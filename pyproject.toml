@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "alice-station-mcp"
+version = "0.1.0"
+description = "Privacy-first local MCP and source-linked skills for owner-managed Yandex Stations"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["mcp>=1.30,<2"]
+
+[project.scripts]
+alice-mcp = "alice_mcp.server:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1", "mypy>=1.15,<2", "build>=1.2,<2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alice_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "alice_mcp/data/skills"
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/skills", "/docs", "/tests", "/scripts", "/README.md", "/SECURITY.md", "/CONTRIBUTING.md", "/AGENTS.md", "/pyproject.toml", "/.gitignore", "/.github/workflows/ci.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

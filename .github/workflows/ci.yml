@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install development dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Tests
+        run: python -m pytest -q
+      - name: Lint
+        run: python -m ruff check --no-cache src tests scripts
+      - name: Types
+        run: python -m mypy --no-incremental src/alice_mcp
+      - name: MCP contract snapshot
+        run: PYTHONPATH=src python scripts/snapshot_tools.py --check
+      - name: Publication source check
+        run: python scripts/check_public.py
+      - name: Build wheel and source distribution
+        run: python -m build
+      - name: Publication archive check
+        run: python scripts/check_public.py --archive dist/*.whl dist/*.tar.gz

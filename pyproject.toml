@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "alice-station-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Privacy-first local MCP and source-linked skills for owner-managed Yandex Stations"
 readme = "README.md"
 requires-python = ">=3.11"

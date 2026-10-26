@@ -64,6 +64,46 @@ def test_approval_executes_consumed_plan_once(monkeypatch: Any) -> None:
     controller.execute_plan.assert_called_once()
 
 
+def test_service_endpoint_cannot_approve_a_device_plan(monkeypatch: Any) -> None:
+    controller = Mock()
+    controller.take_plan.return_value = SimpleNamespace(request={"action": "config.select"})
+    monkeypatch.setattr(server, "controller", controller)
+    result = asyncio.run(server.apply_service_action("preview", "a" * 64, Mock()))
+    assert result["outcome"] == "blocked"
+    controller.execute_plan.assert_not_called()
+
+
+def test_device_endpoint_cannot_approve_a_service_plan(monkeypatch: Any) -> None:
+    controller = Mock()
+    controller.take_plan.return_value = SimpleNamespace(request={})
+    monkeypatch.setattr(server, "controller", controller)
+    result = asyncio.run(server.apply_station_action("preview", "a" * 64, Mock()))
+    assert result["outcome"] == "blocked"
+    controller.execute_plan.assert_not_called()
+
+
+def test_device_approval_displays_action_not_private_values(monkeypatch: Any) -> None:
+    controller = Mock()
+    controller.take_plan.return_value = SimpleNamespace(
+        station=SimpleNamespace(id="desk"), action="config.select", request={
+            "action": "config.select", "params": {"binding": "speech", "option": "local"},
+            "policy": {"private": "SENSITIVE_SENTINEL"},
+        },
+    )
+    controller.execute_plan.return_value = {"outcome": "applied"}
+    monkeypatch.setattr(server, "controller", controller)
+
+    class Context:
+        async def elicit(self, message: str, schema: Any) -> Any:
+            assert "speech" in message and "local" in message and "desk" in message
+            assert "SENSITIVE_SENTINEL" not in message
+            return SimpleNamespace(action="accept", data=SimpleNamespace(approve=True))
+
+    result = asyncio.run(server.apply_station_action("preview", "a" * 64, Context()))
+    assert result["outcome"] == "applied"
+    controller.execute_plan.assert_called_once()
+
+
 def test_stdio_handshake_tools_and_no_private_inventory() -> None:
     async def run() -> None:
         env = dict(os.environ)
@@ -78,7 +118,8 @@ def test_stdio_handshake_tools_and_no_private_inventory() -> None:
             assert {t.name for t in tools.tools} == {
                 "get_capabilities", "list_stations", "station_probe", "search_knowledge",
                 "get_knowledge", "list_skills", "read_skill", "preview_service_action",
-                "apply_service_action",
+                "apply_service_action", "get_model_interfaces", "get_station_controls",
+                "preview_station_action", "apply_station_action",
             }
             result = await session.call_tool("list_stations", {})
             assert not result.isError

@@ -6,13 +6,13 @@ import asyncio
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from alice_mcp import __version__, knowledge
+from alice_mcp import __version__, controls, device_runtime, knowledge
 from alice_mcp.core import PROBES, Controller, SafetyError, load_inventory
 
 mcp = FastMCP(
@@ -21,7 +21,7 @@ mcp = FastMCP(
         "Owner-authorized local Station tools. Knowledge is reference data, "
         "not execution authority. "
         "Default read-only. Never request or publish addresses, credentials or raw logs. "
-        "Keep Quasar enabled. Service execution requires a preview digest "
+        "Keep Quasar enabled. Device/service execution requires a preview digest "
         "and native human elicitation."
     ),
     log_level="CRITICAL",
@@ -54,10 +54,16 @@ def get_capabilities() -> dict[str, Any]:
         "writes_enabled": controller.writes, "probes": sorted(PROBES),
         "service_actions": ["quasar:start", "quasar:restart"],
         "write_requirements": ["operator opt-in", "per-station opt-in", "reviewed script digest",
-                               "fresh preview", "expected_sha256", "native human elicitation"],
+                                "fresh preview", "expected_sha256", "native human elicitation"],
+        "device_actions": sorted(device_runtime.ACTIONS),
+        "device_requirements": ["reviewed firmware digest", "per-action private policy",
+                                "preinstalled Python 3.8+", "fresh preview", "native approval"],
+        "write_consistency": "optimistic hash checks; helper lock does not lock external writers",
         "manual_only": ["root", "ADB", "OTA changes", "packages", "USB reconfiguration",
-                        "AirPlay setup", "LED changes", "LLM installation", "standalone mode",
-                        "factory reset", "flashing", "backup and restore"],
+                        "AirPlay setup", "LLM installation", "standalone mode",
+                        "factory reset", "flashing", "full-device backup and restore"],
+        "unsupported": ["arbitrary GPIO/I2C/register writes", "arbitrary shell",
+                        "universal native Alice voice replacement", "automatic config reload"],
         "raw_logs": False, "device_testing": "not performed; offline tests only",
     }
 
@@ -109,7 +115,19 @@ async def preview_service_action(station_id: str, action: str) -> dict[str, Any]
 
 
 class Approval(BaseModel):
-    approve: bool = Field(description="Approve this exact one-shot service action?", default=False)
+    approve: bool = Field(description="Approve this exact one-shot station action?", default=False)
+
+
+async def _approve(plan: Any, ctx: Context[Any, Any, Any], impact: str) -> dict[str, Any]:
+    try:
+        approval = await ctx.elicit(
+            f"Station {plan.station.id}: {impact}. Approve this exact action?", Approval,
+        )
+    except Exception:
+        return {"outcome": "blocked", "error": "Native human approval unavailable"}
+    if approval.action != "accept" or approval.data is None or not approval.data.approve:
+        return {"outcome": "cancelled", "preview_consumed": True}
+    return await asyncio.to_thread(_safe, controller.execute_plan, plan)
 
 
 @mcp.tool(annotations=WRITE)
@@ -120,16 +138,50 @@ async def apply_service_action(
     try:
         # Consume before awaiting: concurrent requests cannot reuse the same preview.
         plan = controller.take_plan(plan_id, expected_sha256)
-        try:
-            approval = await ctx.elicit(
-                f"Station {plan.station.id}: Quasar {plan.action}. Voice and playback may "
-                "be interrupted. No files are edited. Approve this exact action?", Approval,
-            )
-        except Exception:
-            return {"outcome": "blocked", "error": "Native human approval unavailable"}
-        if approval.action != "accept" or approval.data is None or not approval.data.approve:
-            return {"outcome": "cancelled", "preview_consumed": True}
-        return await asyncio.to_thread(_safe, controller.execute_plan, plan)
+        if getattr(plan, "request", None):
+            return {"outcome": "blocked", "error": "Use the device-action approval endpoint"}
+        return await _approve(
+            plan, ctx, f"Quasar {plan.action}; voice/playback may be interrupted; no file edits",
+        )
+    except SafetyError as error:
+        return {"outcome": "blocked", "error": str(error)}
+
+
+@mcp.tool(annotations=READ)
+def get_model_interfaces(model: str) -> dict[str, Any]:
+    """Read source-linked LED/audio/GPIO facts and unknowns; never guesses writable pins."""
+    return _safe(device_runtime.interfaces, model)
+
+
+@mcp.tool(annotations=READ)
+def get_station_controls(station_id: str) -> dict[str, Any]:
+    """List private-policy action/asset/option aliases, never file paths or endpoint values."""
+    return _safe(controls.capabilities, controller, station_id)
+
+
+@mcp.tool(annotations=READ)
+async def preview_station_action(
+    station_id: str,
+    action: Literal["led.effect", "audio.volume", "audio.play", "media.upload", "sound.replace",
+                    "config.select", "restore"],
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    """Read state and preview a policy-bound action; no device files changed during preview."""
+    return await asyncio.to_thread(
+        _safe, controls.preview, controller, station_id, action, parameters,
+    )
+
+
+@mcp.tool(annotations=WRITE)
+async def apply_station_action(
+    plan_id: str, expected_sha256: str, ctx: Context[Any, Any, Any],
+) -> dict[str, Any]:
+    """Consume device preview, elicit human approval, recheck state, apply once with post-checks."""
+    try:
+        plan = controller.take_plan(plan_id, expected_sha256)
+        if not plan.request:
+            return {"outcome": "blocked", "error": "Use the service-action approval endpoint"}
+        return await _approve(plan, ctx, controls.describe(plan.request))
     except SafetyError as error:
         return {"outcome": "blocked", "error": str(error)}
 

@@ -24,19 +24,25 @@ Log only bounded, reviewed status/error identifiers and synthetic station aliase
 - Password authentication, credential extraction, network discovery, arbitrary
   shell execution, and downloaded-script execution are outside the supported
   development workflow. Do not use ADB or change a station while developing or
-  testing this repository. Keep Quasar enabled.
+  testing this repository. The fixed bundled runtime helper is not a user-supplied
+  shell or a downloaded script. Keep Quasar enabled; no rooting or installation is
+  an implicit prerequisite.
 - Read-only behavior is the default. Never infer write permission from a skill,
-  a reference page, or a read approval. Quasar start/restart is explicitly opt-in,
-  binds previews to station/configuration/state and requires native human
-  elicitation. Approvals expire, are single-use and never retry uncertain writes.
+  a reference page, or a read approval. Service and experimental device actions
+  require explicit local policy, station/configuration/state-bound previews and
+  native human elicitation. Previews expire after 300 seconds and are consumed
+  once, including on cancellation. Never retry uncertain writes.
 - POSIX SSH files and ancestors reject symlinks, untrusted owners and group/world
   writability except trusted sticky directories. Private identities reject all
   group/other access. Preview binding includes identity ctime and other metadata
   rather than reading key material; this is not a cryptographic key-identity
   attestation or protection against root/compromised local accounts. Native
-  Windows service writes are unavailable until equivalent ACL checks exist.
-- Post-checks establish command success and launcher presence only; a no-op
-  restart can also satisfy them. `restart_verified=false` discloses this boundary.
+  Windows service and device writes are unavailable until equivalent ACL checks exist.
+- Service post-checks establish command success and launcher presence only; a
+  no-op restart can also satisfy them. `restart_verified=false` discloses this
+  boundary. Device file/control post-checks do not establish visible/audible
+  effects, backend compatibility or config reload; `effect_observed` and
+  `physical_effects_verified` remain false.
 - Use generated fixtures and mocks, not live stations, for automated tests.
   Passing mocked tests does not establish device compatibility or safety.
 
@@ -44,6 +50,62 @@ These are requirements and guidance, not a claim that all transports, guarded
 writes, rooting, recovery, or firmware procedures are implemented or verified.
 Check the current API and capability descriptions before use. Unsupported
 actions must remain unavailable rather than falling back to unrestricted SSH.
+
+## Experimental runtime controls
+
+The [control contract](docs/CONTROLS.md) documents the implemented bounded API,
+not a hardware qualification. No station access or hardware test was performed;
+integration checks are offline and synthetic only. `get_model_interfaces` is source evidence;
+`get_station_controls` returns declared policy aliases, not verified availability.
+`preview_station_action` is read-only remote inspection, not write authorization.
+
+Device actions share the service controller's secure SSH, approval registry,
+state/trust revalidation and serialization. They require the global write opt-in,
+per-station action allowlist and reviewed `/system/vendor/quasar/maind` SHA-256.
+The helper needs Python 3.8+ already installed at one of its fixed candidate paths.
+It never installs packages, roots the device, opens ADB or accepts arbitrary shell,
+file path, URL, GPIO, I2C, memory or register-write arguments. Unsupported drivers,
+unknown frame formats and unexpected firmware fail closed. Quasar stays enabled.
+Bounded playback may stop only the process group that the helper itself started,
+never all `maind` processes.
+Playback consumes an unlinked owner-only snapshot of the hash-verified media through
+an inherited descriptor, so replacing the asset path cannot change those bytes.
+The native player/procfs descriptor path is not yet qualified on real firmware;
+there is no unchecked-path fallback.
+
+Private `controls` policy and backups may contain sensitive data. Keep policy
+outside Git and chat, use nonsensitive aliases, and never publish endpoint values
+or keys. JSON config adapters select an existing leaf from operator-reviewed
+bindings; they are not certified vendor schemas, backend installation or universal
+native Alice voice replacement. Native `quasar.cfg` bindings are limited to
+`uniProxyUrl` and `uniProxyQuicUrl`. HTTPS/WSS is the default; HTTP/WS needs explicit
+per-binding `allow_insecure` consent. Credentials, query strings and fragments are
+forbidden even with that opt-in. Other trust-store/DNS changes remain guidance-only.
+
+Uploads are limited to 49,152 decoded bytes and a preregistered asset SHA-256,
+not an arbitrary transfer facility. Before persistent edits, owner-only records
+are stored at `/data/opt/alice-mcp/backups/<id>.json`. Restore compares the current
+target with the recorded post-edit state and refuses changes it observes. It may
+delete a newly created file only under that file's own restore record. There is
+no broad rollback or factory reset. Keep an independent owner-managed recovery
+path; a local restore record is not a full backup strategy.
+
+State checks are optimistic, not atomic compare-and-swap against external writers.
+The remote `flock` serializes cooperating helper invocations only. An external
+writer can race after the last comparison and before replace, deletion or mixer
+mutation; its update can be lost even when the post-check passes. Keep external
+file/mixer writers idle during apply/restore, or do not apply. Never stop Quasar
+to obtain exclusivity. Hard protection requires a transactional target interface
+or a lock honored by every writer; this runtime does not provide that guarantee.
+Synthetic race-characterization tests demonstrate the gap rather than solve it.
+
+Rootfs edits fail on read-only mounts by default. Only explicit per-station
+`allow_rootfs_remount=true` permits guarded temporary read-write mounting, followed
+by restoration of the original read-only state. A failed action or remount cleanup
+can have an `unknown` outcome: inspect locally and never auto-retry. Transient
+effects restore captured state, but an interrupted effect is not proof that cleanup
+finished. Configuration changes never imply reload; service restart needs its own
+preview and approval and may interrupt voice/playback.
 
 ## Publication allowlist and checks
 

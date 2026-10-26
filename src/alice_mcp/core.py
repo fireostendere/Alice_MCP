@@ -14,7 +14,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +68,7 @@ class Station:
     quasar_script_sha256: str
     config_sha256: str
     trust_sha256: str
+    controls: dict[str, Any] = field(default_factory=dict)
 
 
 def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -123,7 +124,8 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
         for entry in entries:
             if not isinstance(entry, dict) or not required <= entry.keys():
                 raise ValueError("missing fields")
-            if entry.keys() - required - {"allow_service_actions", "quasar_script_sha256"}:
+            optional = {"allow_service_actions", "quasar_script_sha256", "controls"}
+            if entry.keys() - required - optional:
                 raise ValueError("unexpected fields")
             for key in required - {"port"}:
                 if not isinstance(entry[key], str):
@@ -154,6 +156,9 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
                 raise ValueError("invalid policy")
             if script_sha and not re.fullmatch(r"[a-f0-9]{64}", script_sha):
                 raise ValueError("invalid digest")
+            from alice_mcp.device_runtime import validate_policy
+
+            control_policy = validate_policy(entry.get("controls", {}), entry["model"])
             # Bind previews to public trust data and key metadata, without reading private keys.
             stamp = key_path.stat()
             with hosts_path.open("rb") as source:
@@ -168,6 +173,7 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
                 entry["id"], entry["model"], host, entry["port"], entry["user"],
                 key_path, hosts_path, enabled, script_sha,
                 hashlib.sha256(raw).hexdigest(), hashlib.sha256(trust).hexdigest(),
+                control_policy,
             )
         return result
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
@@ -211,7 +217,7 @@ def run_ssh(station: Station, command: str) -> str:
             thread = threading.Thread(target=drain, daemon=True)
             thread.start()
             try:
-                code = process.wait(timeout=15)
+                code = process.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
@@ -285,6 +291,8 @@ class Plan:
     action: str
     digest: str
     expires: float
+    request: dict[str, Any] = field(default_factory=dict)
+    remote_sha256: str = ""
 
 
 class Controller:
@@ -342,6 +350,13 @@ class Controller:
             raise SafetyError("Only Quasar start and restart are supported; stop is prohibited")
         station = self.station(station_id)
         digest, _ = self._digest(station, action)
+        plan_id = self.store_plan(station, action, digest)
+        return {"plan_id": plan_id, "expected_sha256": digest, "station_id": station_id,
+                "action": action, "expires_in_seconds": "300",
+                "impact": "Voice and playback may be interrupted; no files are edited"}
+
+    def store_plan(self, station: Station, action: str, digest: str, *,
+                   request: dict[str, Any] | None = None, remote_sha256: str = "") -> str:
         with self._plan_lock:
             self.plans = {
                 key: plan for key, plan in self.plans.items() if plan.expires > self.clock()
@@ -349,10 +364,9 @@ class Controller:
             if len(self.plans) >= 64:
                 raise SafetyError("Too many pending previews")
             plan_id = secrets.token_hex(16)
-            self.plans[plan_id] = Plan(station, action, digest, self.clock() + 300)
-        return {"plan_id": plan_id, "expected_sha256": digest, "station_id": station_id,
-                "action": action, "expires_in_seconds": "300",
-                "impact": "Voice and playback may be interrupted; no files are edited"}
+            self.plans[plan_id] = Plan(station, action, digest, self.clock() + 300,
+                                       request or {}, remote_sha256)
+        return plan_id
 
     def take_plan(self, plan_id: str, expected_sha256: str) -> Plan:
         with self._plan_lock:
@@ -373,6 +387,10 @@ class Controller:
     def _execute_plan(self, plan: Plan) -> dict[str, Any]:
         if not math.isfinite(plan.expires) or self.clock() >= plan.expires:
             raise SafetyError("Preview expired")
+        if plan.request:
+            from alice_mcp.controls import execute
+
+            return execute(self, plan)
         station = self.station(plan.station.id)
         digest, _ = self._digest(station, plan.action)
         if digest != plan.digest:

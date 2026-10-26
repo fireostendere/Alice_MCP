@@ -263,3 +263,144 @@ Consume a preview, ask the human, revalidate state, execute once and post-check.
   }
 }
 ```
+
+## `get_model_interfaces`
+
+Read source-linked LED/audio/GPIO facts and unknowns; never guesses writable pins.
+
+```json
+{
+  "inputSchema": {
+    "properties": {
+      "model": {
+        "title": "Model",
+        "type": "string"
+      }
+    },
+    "required": [
+      "model"
+    ],
+    "title": "get_model_interfacesArguments",
+    "type": "object"
+  },
+  "annotations": {
+    "title": null,
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": null,
+    "openWorldHint": false
+  }
+}
+```
+
+## `get_station_controls`
+
+List private-policy action/asset/option aliases, never file paths or endpoint values.
+
+```json
+{
+  "inputSchema": {
+    "properties": {
+      "station_id": {
+        "title": "Station Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "station_id"
+    ],
+    "title": "get_station_controlsArguments",
+    "type": "object"
+  },
+  "annotations": {
+    "title": null,
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": null,
+    "openWorldHint": false
+  }
+}
+```
+
+## `preview_station_action`
+
+Read state and preview a policy-bound action; no device files changed during preview.
+
+```json
+{
+  "inputSchema": {
+    "properties": {
+      "station_id": {
+        "title": "Station Id",
+        "type": "string"
+      },
+      "action": {
+        "enum": [
+          "led.effect",
+          "audio.volume",
+          "audio.play",
+          "media.upload",
+          "sound.replace",
+          "config.select",
+          "restore"
+        ],
+        "title": "Action",
+        "type": "string"
+      },
+      "parameters": {
+        "additionalProperties": true,
+        "title": "Parameters",
+        "type": "object"
+      }
+    },
+    "required": [
+      "station_id",
+      "action",
+      "parameters"
+    ],
+    "title": "preview_station_actionArguments",
+    "type": "object"
+  },
+  "annotations": {
+    "title": null,
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": null,
+    "openWorldHint": false
+  }
+}
+```
+
+## `apply_station_action`
+
+Consume device preview, elicit human approval, recheck state, apply once with post-checks.
+
+```json
+{
+  "inputSchema": {
+    "properties": {
+      "plan_id": {
+        "title": "Plan Id",
+        "type": "string"
+      },
+      "expected_sha256": {
+        "title": "Expected Sha256",
+        "type": "string"
+      }
+    },
+    "required": [
+      "plan_id",
+      "expected_sha256"
+    ],
+    "title": "apply_station_actionArguments",
+    "type": "object"
+  },
+  "annotations": {
+    "title": null,
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": false
+  }
+}
+```

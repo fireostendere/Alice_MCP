@@ -163,15 +163,31 @@ def _owned_daemon(pid: int, root: Path) -> bool:
 
 
 @pytest.fixture
-def startup(tmp_path: Path) -> Any:
+def startup(tmp_path: Path, request: Any) -> Any:
     compiler = shutil.which("cc")
     if compiler is None:
         pytest.skip("Synthetic daemon requires an existing host C compiler")
     root = tmp_path / "runtime"
     root.mkdir()
     daemon = tmp_path / "daemon.c"
-    daemon.write_text("#include <unistd.h>\n"
-                      "int main(void) { alarm(20); for (;;) pause(); }\n")
+    daemon.write_text(r'''
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+int main(void) {
+    char path[4096];
+    const char *root = getenv("ALICE_TEST_DAEMON_ROOT");
+    if (!root) return 2;
+    int n = snprintf(path, sizeof(path), "%s/daemon.%ld", root, (long)getpid());
+    if (n < 0 || (size_t)n >= sizeof(path)) return 2;
+    FILE *record = fopen(path, "w");
+    if (!record) return 2;
+    fprintf(record, "%ld\n", (long)getpid());
+    fclose(record);
+    alarm(20);
+    for (;;) pause();
+}
+''')
     subprocess.run([compiler, "-O2", "-Wall", "-Wextra", "-Werror", str(daemon),
                     "-o", str(root / "agent")], capture_output=True, check=True, timeout=30)
     (root / "agent").chmod(0o500)
@@ -182,11 +198,13 @@ def startup(tmp_path: Path) -> Any:
     tools.mkdir()
     # Delay exec to expose the PID publication race; the compiled daemon has a hard alarm.
     shim = tools / "setsid"
-    shim.write_text("#!/bin/sh\nsleep 0.2\n"
+    delay = getattr(request, "param", 0.2)
+    shim.write_text(f"#!/bin/sh\nsleep {delay}\n"
                     f"printf '%s\\n' \"$$\" > {root}/launched.$$\n"
                     f"exec {shutil.which('setsid')} \"$1\" 20\n")
     shim.chmod(0o500)
-    env = dict(os.environ, PATH=str(tools) + ":" + os.environ["PATH"])
+    env = dict(os.environ, PATH=str(tools) + ":" + os.environ["PATH"],
+               ALICE_TEST_DAEMON_ROOT=str(root))
 
     def run(action: str) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(["sh", str(script), action], env=env,
@@ -195,7 +213,7 @@ def startup(tmp_path: Path) -> Any:
     try:
         yield root, run
     finally:
-        for record in root.glob("launched.*"):
+        for record in [*root.glob("launched.*"), *root.glob("daemon.*")]:
             pid = int(record.read_text())
             if _owned_daemon(pid, root):
                 try:
@@ -214,7 +232,13 @@ def test_generated_start_serializes_concurrent_launches(startup: Any) -> None:
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: start(), range(2)))
-    assert any(result.returncode == 0 for result in results)
+    launchers = {record.read_text() for record in root.glob("launched.*")}
+    daemons = {record.read_text() for record in root.glob("daemon.*")}
+    assert any(result.returncode == 0 for result in results), {
+        "exit_codes": [result.returncode for result in results],
+        "launchers": len(launchers), "daemons": len(daemons),
+        "launcher_matches_daemon": launchers == daemons,
+    }
     records = list(root.glob("launched.*"))
     assert len(records) == 1
     pid = int(records[0].read_text())
@@ -282,6 +306,15 @@ def test_generated_stop_cannot_race_start_claim(startup: Any) -> None:
         assert run("stop").returncode != 0
         assert (root / ".agent-lock").is_dir()
         assert starting.result(timeout=5).returncode == 0
+    assert run("status").returncode == 0
+    assert run("stop").returncode == 0
+
+
+@pytest.mark.parametrize("startup", [1.5], indirect=True)
+def test_generated_start_waits_for_the_same_delayed_child_without_relaunch(startup: Any) -> None:
+    root, run = startup
+    assert run("start").returncode == 0
+    assert len(list(root.glob("launched.*"))) == 1
     assert run("status").returncode == 0
     assert run("stop").returncode == 0
 

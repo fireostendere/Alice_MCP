@@ -169,7 +169,10 @@ The source provisioning startup template also serializes start/stop/status with
 an atomic owner-local claim. Busy or stale claims require inspection, not blind
 removal. Concurrent-start tests use a synthetic daemon and verify that the PID
 file tracks the single live process; symlink PID targets and unrelated processes
-are protected. The installed startup script is unchanged. This is not permission
+are protected. Both bootstrap and later startup wait up to three seconds for the
+same child PID to identify as the reviewed agent, rather than assuming one fixed
+second is enough; the wait never launches a replacement process. A delayed-exec
+regression exercises this bound. The installed startup script is unchanged. This is not permission
 to overwrite the existing installation with the bootstrap procedure.
 
 The generic `/etc/asound.conf` is not proof of the live Mini 1 hardware route.

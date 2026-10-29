@@ -28,8 +28,20 @@ NAMES = ("agent", "tts-once", "asr-once", "config.json", "certificate.pem", "pri
          "credential", "start")
 MAX_PACKAGE = 20 * 1024 * 1024
 
+WAIT_AGENT = r'''wait_agent() {
+    for attempt in 1 2 3; do
+        sleep 1
+        if kill -0 "$1" 2>/dev/null && [ "$(readlink "/proc/$1/exe")" = "$2" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+'''
+
 START = r'''#!/bin/sh
 umask 077
+__WAIT_AGENT__
 ROOT=@ROOT@
 pidfile=$ROOT/agent.pid
 valid_pid() {
@@ -68,8 +80,7 @@ case "${1:-start}" in
         (set -C; printf '%s\n' "$child" > "$pidfile") || exit 1
         published=1
         chmod 600 "$pidfile" || exit 1
-        sleep 1
-        valid_pid && [ "$pid" = "$child" ] && kill -0 "$pid" 2>/dev/null || exit 1
+        wait_agent "$child" "$ROOT/agent" && valid_pid && [ "$pid" = "$child" ] || exit 1
         child=;;
     stop)
         valid_pid || exit 1
@@ -84,12 +95,13 @@ case "${1:-start}" in
     status) valid_pid && kill -0 "$pid" 2>/dev/null;;
     *) exit 2;;
 esac
-'''
+'''.replace("__WAIT_AGENT__", WAIT_AGENT)
 
 SCRIPT = r'''
 LC_ALL=C; export LC_ALL
 umask 077
 exec 2>/dev/null
+__WAIT_AGENT__
 mode=$1; cap=$2; firmware=$3; package=$4; expected=$5; autostart=$6; layout=$7; needed=$8
 shift 8
 agent_sha=$1; tts_sha=$2; asr_sha=$3; config_sha=$4; cert_sha=$5; key_sha=$6
@@ -206,11 +218,10 @@ setsid "$DEST/agent" -config "$DEST/config.json" </dev/null >/dev/null 2>&1 &
 child=$!
 printf '%s\n' "$child" > "$DEST/agent.pid" || exit 0
 chmod 600 "$DEST/agent.pid" || exit 0
-sleep 1
-kill -0 "$child" || exit 0
+wait_agent "$child" "$DEST/agent" || exit 0
 started=1
 exit 0
-'''
+'''.replace("__WAIT_AGENT__", WAIT_AGENT)
 
 
 @dataclass(frozen=True)

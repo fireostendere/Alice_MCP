@@ -119,8 +119,12 @@ firmware/state-bound preview and native approval. It returns one new final text,
 not audio. A build or successful transfer is not a readiness signal.
 `speech.say` adds literal-text native TTS with a separately pinned ARM32 client.
 One corrected Mini 3 pilot has owner-confirmed audible output; native completion
-events remain unverified, and Mini 1 TTS acceptance is pending. Host tests and an
-ARM build alone do not prove sound. See [speech clients](docs/SPEECH_CLIENT.md).
+events remain unverified. On one tested Mini 1, the owner accepted normal-tempo
+**local Piper → resident TLS → PCM** speech after a separately guarded upgrade,
+with SSH disabled for that audition. No cloud fallback or microphone capture is
+involved; reboot persistence and other firmware remain unqualified. Host tests
+and an ARM build alone do not prove sound. See [native local voice](docs/NATIVE_AGENT.md)
+and [speech clients](docs/SPEECH_CLIENT.md).
 
 The server exposes **16 tools**. See the generated [MCP contract](docs/TOOLS.md)
 and the [runtime control contract](docs/CONTROLS.md).

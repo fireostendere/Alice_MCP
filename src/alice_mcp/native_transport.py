@@ -305,10 +305,15 @@ def _pcm_result(result: dict[str, Any], *, expected_frames: int | None = None,
     if (set(result) != {"outcome", "playback_started", "playback_completed", "cleanup_verified",
                         "frames_written", "sample_rate", "quasar_running", "do_not_retry",
                         "evidence_class", "physical_effects_verified", "tts_backend",
-                        "input_frames", "stage", "alsa_return_code"}
+                        "input_frames", "stage", "alsa_return_code",
+                        "hardware_parameters_verified", "playback_elapsed_ms"}
         or result["outcome"] not in {"applied", "blocked", "unknown"}
         or any(type(result[k]) is not bool for k in
-               ("playback_started", "playback_completed", "cleanup_verified", "quasar_running"))
+               ("playback_started", "playback_completed", "cleanup_verified", "quasar_running",
+                "hardware_parameters_verified"))
+        or not rt._integer(result["playback_elapsed_ms"], -1, 25000)
+        or not result["hardware_parameters_verified"] and (
+            result["frames_written"] != 0 or result["playback_elapsed_ms"] != -1)
         or not rt._integer(result["frames_written"], 0, 960000)
         or not rt._integer(result["input_frames"], 1, 960000)
         or not rt._integer(result["sample_rate"], 16000, 48000)
@@ -316,11 +321,12 @@ def _pcm_result(result: dict[str, Any], *, expected_frames: int | None = None,
         or expected_frames is not None and result["input_frames"] != expected_frames
         or expected_rate is not None and result["sample_rate"] != expected_rate
         or type(result["stage"]) is not str or result["stage"] not in {
-            "request", "library", "symbols", "configuration", "open", "parameters", "clock",
-            "write", "wait", "blocking", "drain", "cleanup", "complete", "unverified",
+            "request", "library", "symbols", "configuration", "open", "parameters", "hardware",
+            "clock", "write", "wait", "blocking", "drain", "cleanup", "complete", "unverified",
         }
         or (result["stage"] == "unverified" and (
-            result["outcome"] != "unknown" or result["alsa_return_code"] is not None)
+            result["outcome"] != "unknown" or result["alsa_return_code"] is not None
+            or result["hardware_parameters_verified"] or result["playback_elapsed_ms"] != -1)
             or result["stage"] != "unverified"
             and not rt._integer(result["alsa_return_code"], -4095, 2**31 - 1))
         or result["do_not_retry"] is not True or result["physical_effects_verified"] is not False
@@ -330,8 +336,9 @@ def _pcm_result(result: dict[str, Any], *, expected_frames: int | None = None,
         or result["outcome"] == "applied" and not all(result[k] for k in
                ("playback_started", "cleanup_verified", "quasar_running"))
         or result["outcome"] == "applied" and (
-            result["frames_written"] != result["input_frames"] or result["stage"] != "complete"
-            or result["alsa_return_code"] < 0)
+             result["frames_written"] != result["input_frames"] or result["stage"] != "complete"
+             or result["alsa_return_code"] < 0 or not result["hardware_parameters_verified"]
+             or result["playback_elapsed_ms"] < 0)
         or result["outcome"] == "blocked" and result["playback_started"]):
         raise SafetyError("Local playback result unverified; do not retry")
     return dict(result)

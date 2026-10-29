@@ -2,12 +2,14 @@
  * ALSA public ABI: alsa-project/alsa-lib v1.2.13 include/pcm.h.
  * Mini 1 candidate: kernel playback 0 (TDM-B), still needs audible qualification.
  * Generic /etc dmixer device 2 is capture-only on this board; do not copy it.
- * Plug negotiates hardware parameters, with no global config hooks or IPC mixer.
+ * Plug converts to the Mini 1 candidate's 48 kHz/S32/stereo geometry.
+ * Kernel readback is required before writes; no global config hooks or IPC mixer.
  * No capture, mixer, recovery/replay, firmware change or cloud request.
  */
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -20,9 +22,15 @@
 #ifndef PCM_ALSA_LIBRARY
 #define PCM_ALSA_LIBRARY "/system/vendor/quasar/libs/libasound.so.2"
 #endif
+#ifndef PCM_HW_PARAMS_PATH
+#define PCM_HW_PARAMS_PATH "/proc/asound/card0/pcm0p/sub0/hw_params"
+#endif
 #define WAV_MAX (44u + 48000u * 2u * 20u)
+/* ALSA plug slave constraints and duplicate policy: alsa-lib PCM plugins reference.
+ * Candidate geometry is based on reviewed Mini 1 metadata, not a universal profile. */
 static const char route[] =
-    "pcm.alice_playback { type plug slave.pcm { type hw card 0 device 0 } }";
+    "pcm.alice_playback { type plug route_policy duplicate slave { "
+    "pcm { type hw card 0 device 0 } format S32_LE channels 2 rate 48000 } }";
 
 typedef struct _snd_pcm snd_pcm_t;
 static volatile sig_atomic_t interrupted;
@@ -40,6 +48,33 @@ static int64_t now_ms(void) {
     return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
+static bool hardware_parameters(void) {
+    FILE *file = fopen(PCM_HW_PARAMS_PATH, "r");
+    if (!file) return false;
+    char text[513];
+    size_t size = fread(text, 1, sizeof(text) - 1, file);
+    bool valid = feof(file) && !ferror(file);
+    if (fclose(file)) valid = false;
+    if (!valid || memchr(text, '\0', size)) return false;
+    text[size] = '\0';
+    unsigned seen = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (!strncmp(line, "format:", 7)) {
+            if ((seen & 1) || strcmp(line, "format: S32_LE")) return false;
+            seen |= 1;
+        } else if (!strncmp(line, "channels:", 9)) {
+            if ((seen & 2) || strcmp(line, "channels: 2")) return false;
+            seen |= 2;
+        } else if (!strncmp(line, "rate:", 5)) {
+            if ((seen & 4) || (strcmp(line, "rate: 48000 (48000/1)") &&
+                               strcmp(line, "rate: 48000"))) return false;
+            seen |= 4;
+        }
+    }
+    return seen == 7;
+}
+
 int main(int argc, char **argv) {
     int output = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
     if (output < 0 || dup2(STDERR_FILENO, STDOUT_FILENO) < 0) return 2;
@@ -47,6 +82,8 @@ int main(int argc, char **argv) {
     bool attempted = false, complete = false, clean = true;
     bool diagnostic = argc == 2 && strcmp(argv[1], "--check") == 0;
     bool configuration_parsed = false;
+    bool hardware_verified = false;
+    int64_t start = -1, elapsed = -1;
     const char *stage = "request";
     int alsa_status = 0;
     unsigned rate = 0;
@@ -125,8 +162,11 @@ load_library:
     if (interrupted || (alsa_status = pcm_open(&pcm, "alice_playback", 0, 1, config)) < 0) goto done;
     stage = "parameters";
     if ((alsa_status = set_params(pcm, 2, 3, 1, rate, 1, 100000)) < 0) goto done;
+    stage = "hardware";
+    hardware_verified = hardware_parameters();
+    if (!hardware_verified || interrupted) goto done;
     stage = "clock";
-    int64_t start = now_ms();
+    start = now_ms();
     if (start < 0) goto done;
     while (written < frames && !interrupted) {
         stage = "clock";
@@ -152,6 +192,11 @@ load_library:
     if ((alsa_status = drain(pcm)) < 0 || interrupted) goto done;
     complete = true;
 done:
+    if (start >= 0) {
+        int64_t end = now_ms();
+        if (end < start || end - start > 25000) { complete = false; stage = "clock"; }
+        else elapsed = end - start;
+    }
     if (pcm) {
         int status;
         if (!complete && (status = drop(pcm)) < 0) { clean = false; alsa_status = status; }
@@ -176,10 +221,12 @@ done:
     }
     int emitted = dprintf(output, "{\"outcome\":\"%s\",\"playback_started\":%s,\"playback_completed\":%s,"
            "\"cleanup_verified\":%s,\"frames_written\":%lu,\"sample_rate\":%u,"
-           "\"input_frames\":%lu,\"stage\":\"%s\",\"alsa_return_code\":%d}\n",
+            "\"input_frames\":%lu,\"stage\":\"%s\",\"alsa_return_code\":%d,"
+            "\"hardware_parameters_verified\":%s,\"playback_elapsed_ms\":%" PRId64 "}\n",
            complete ? "complete" : attempted || !clean ? "unknown" : "blocked",
            written ? "true" : "false", complete ? "true" : "false", clean ? "true" : "false",
-           written, rate, frames, complete ? "complete" : stage, alsa_status);
+            written, rate, frames, complete ? "complete" : stage, alsa_status,
+            hardware_verified ? "true" : "false", elapsed);
     close(output);
     return emitted < 0 ? 2 : complete ? 0 : 1;
 }

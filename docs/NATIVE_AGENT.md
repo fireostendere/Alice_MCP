@@ -31,14 +31,16 @@ arbitrary shell, file browser, package manager or unauthenticated root API.
   300 seconds; read-only revalidation never extends the old deadline. A timed-out
   caller must never reuse/retry the request.
 - Older installed residents remain usable for read-only probes/controls but
-  **writes fail closed** without the state-bound contract. This source change is
-  not deployed and does not justify automatically upgrading an existing agent.
+  **writes fail closed** without the state-bound contract. One owner-qualified
+  Mini 1 now runs the guarded upgrade below; other installations still require
+  their own separately authorized upgrade, not an automatic reinstall.
 - ASR observes stock Alice, not independent speech recognition. Preparation is
   bounded to 180 seconds, followed by a 5–60 second phrase window. One session is
   retained in RAM; text is untrusted data, released once after successful child
   exit/Quasar checks, and discarded after two minutes. Status never starts capture.
-- The installed agent still uses normal Yandex synthesis. Source now also supports
-  an explicitly selected local-PCM backend, described below; it is not deployed.
+- The qualified Mini 1 now uses the explicitly selected local-PCM backend below.
+  Other configurations may retain normal Yandex synthesis; local mode forbids
+  cloud-text fallback and does not alter ordinary Quasar operation.
   Uncorrelated completion remains `unknown`/`do_not_retry`; a functioning TLS channel
   does not prove audible sound.
 
@@ -71,6 +73,84 @@ Preserve other entries and SSH recovery settings. A native-only inventory may
 omit SSH fields. All existing trust/permission checks still apply to the selected
 transport. TLS errors, unsupported tools and invalid results fail closed.
 
+### Guarded existing-installation upgrade (owner-qualified on one Mini 1)
+
+`agent_upgrade.py` is separate from bootstrap. It accepts only the pinned previous
+agent/ASR/TTS baseline and a canonical four-file update: pinned new agent,
+`pcm-player`, policy-preserving `config.json` and the reviewed startup template.
+The old startup fingerprint may predate that template; it is bound/preserved, not
+executed by the upgrade helper. Only `local_pcm` is added to the existing device
+configuration. Allowed actions, standing preauthorization, listener, certificates,
+keys, bearer, recovery SSH and the existing init hook are not changed or re-uploaded.
+
+A consumed-once 300-second host preview binds the package, private configuration,
+native and recovery-SSH trust, firmware, boot, Quasar process identities, existing
+file hashes, current agent PID/start time and helper source. This is an explicit
+operator maintenance transport, not a normal native-action SSH fallback. Existing
+lifecycle/capture claims, an already present PCM player, wrong files, insufficient
+space or active agent children block the transaction.
+
+Read-only inspection sends bounded bundled source on stdin, not a long SSH exec
+argument. Apply uses a short fixed request, reads exactly the source-prefix byte
+count without consuming archive bytes, preserves trailing newlines with a sentinel,
+and verifies source length **and SHA-256 before evaluating that reviewed source**.
+Only then can the independently hashed canonical archive be consumed. No source
+path/script text is accepted from an MCP action, no helper script is saved on the
+Station, and the combined source+archive stays within the existing 20-MiB transfer
+bound. Tests execute this actual wire path and reject truncated/shifted source
+before staging. A former approximately 15-KiB exec request failed a real read-only
+preflight; the short-request stdin path subsequently returned ready. The exact old
+server-side rejection reason was not collected and is not guessed.
+
+The fixed helper stages and verifies before stopping anything, creates a private
+backup of the three replaced files, and freezes **only our identified resident**
+before inspecting children. PID/start time/executable/artifact are rechecked after
+STOP; a mismatched stopped identity is resumed, not killed. With no children, the
+old resident is killed while stopped to avoid a resume/new-request race. Quasar is
+never stopped. Replacement uses same-filesystem file renames and bounded startup
+plus ownership of the listening socket. Known startup failures attempt restoration
+of matching backups and restart only the pinned old agent. A foreign/currently
+changed file or lost lock ownership prevents blind rollback or cleanup. Backups
+remain under the owned `.upgrade-<opaque-id>` directory; this is not full-device
+backup or a user-supplied installer.
+
+Recovery is armed before STOP/KILL, including handled-signal boundaries. Resume
+cancels a pending STOP even before `/proc` reports state `T`; rollback waits for
+the original identity to depart before reconciling its stale PID file. Tests model
+both delayed stop visibility and delayed process disappearance. Preserved
+credentials/helpers are rechecked before either new or rollback launch; a foreign
+credential change is not overwritten or reported as a successful upgrade.
+
+These are optimistic cooperating-writer checks, **not pidfd or kernel CAS**. An
+uncoordinated root actor, hard power loss, SIGKILL of the helper or uncertain SSH
+termination can leave a partial state. Initial numeric-PID STOP can race with exit;
+post-STOP identity checking prevents killing a mismatched stopped process but does
+not provide an atomic PID handle. Never rerun an uncertain update or remove its
+claims automatically. Inspect the saved receipt and owned state first. Keep other
+agent actions, startup operations and configuration editors idle during maintenance.
+
+The operator wrapper requires a new explicit maintenance confirmation, records
+dispatch create-only, checks native TLS controls/state contract, and only then
+binds host `controls.local_tts`. Host binding preserves every other entry, SSH
+field and permission, creates an owner-only backup next to the private inventory,
+and compares original content/metadata before atomic replacement. It does not make
+concurrent external editing safe. A second separate `PLAY NATIVE` confirmation can
+authorize exactly one new phrase with SSH disabled for that trial; `NORMAL` is
+separate owner evidence. Setup/controls success alone is not audio acceptance.
+After source updates, reconnect the existing single host `alice` process before
+using it: a fresh operator Python client does not reload a previously running MCP
+router. Do not create feature-specific connection aliases.
+
+Host contract tests and disposable local-daemon shell tests cover guarded update,
+rollback, changed files/claims, active children, failed new startup, PID-file-move
+failure, post-STOP identity mismatch and Quasar metadata failure. Those tests do
+not establish real firmware/utility compatibility by themselves. A subsequent
+owner-operated update installed the pinned agent/player, preserved the existing
+init hook, TLS credentials/helpers and Quasar identity, and bound only host
+`controls.local_tts`. The owner separately approved one native audition and selected
+`NORMAL`; the live result is recorded below. This bounded path accepts the reviewed
+previous installation, not arbitrary already-upgraded versions or new permissions.
+
 ## Evidence and remaining blockers
 
 One owner-authorized Mini 1 installation was checked with the standard Python
@@ -79,7 +159,7 @@ Health/microphone metadata and five tools responded; initial RSS was about 7 MiB
 An SSH-disabled host runner also verified native routing. Quasar process identity
 was unchanged and SSH recovery remained available. Startup was registered, not
 tested by reboot. Host tests and Go race/TLS/protocol tests use synthetic data.
-No new household capture or TTS acceptance test was run during this deployment;
+No new household capture or TTS acceptance test was run during that initial installation;
 the host action allowlist was preserved, not expanded to enable ASR.
 
 The full independent assistant/wizard is **not live implemented or accepted**:
@@ -96,13 +176,14 @@ The full independent assistant/wizard is **not live implemented or accepted**:
    reviewed format/channel mapping and live acceptance.
 3. The owner chose local TTS. Optional `local_tts.py` verifies an installed Russian
    Piper model/config by hash and returns at most 20 seconds of mono S16 WAV in
-   memory. Synthetic Russian speech and its PCM transport bounds were checked on
-   the host; the new resident playback path has synthetic tests but is not deployed
-   or audibly accepted. Piper 1.8.0 is GPL-3.0-or-later;
+    memory. Synthetic bounds and the resident TLS/PCM path are tested; one Mini 1
+    subsequently passed the owner-operated local-voice acceptance below. This is
+    not independent microphone/wake or universal firmware qualification.
+    Piper 1.8.0 is GPL-3.0-or-later;
    the tested Ruslan model card specifies CC-BY-NC-SA-4.0 for its dataset. Weights
    are not distributed here; this test is a personal noncommercial experiment.
 
-## Local PCM backend (source-tested, not installed)
+## Local PCM backend (owner-qualified on one Mini 1)
 
 Keep using the same host `speech.say` action and one `alice` connection. A private
 host `controls.local_tts` object selects the hash-pinned installed Piper model:
@@ -126,7 +207,9 @@ paths, appear in controls; host/device selections can be compared there.
 `native/pcm_player.c` accepts only mono S16 canonical WAV: 16–48 kHz, 20 seconds
 maximum and absolute sample amplitude at most 8191. It writes to an isolated ALSA
 plug-to-hardware graph for the kernel-supported **candidate** playback port 0
-(TDM-B); its audible destination is not yet qualified. The graph has no
+(TDM-B), with an explicit 48-kHz/S32_LE/stereo slave and mono duplication.
+The owner confirmed normal-tempo speech in both the bounded SSH pilot and the
+subsequent resident/TLS audition below. The graph has no
 user/global ALSA config hooks. No capture, mixer change, Quasar stop, waveform
 file, external URL or playback retry is involved. The 25-second child alarm and
 27-second resident deadline bound failures. Drain/exit is software evidence, not
@@ -135,16 +218,18 @@ proof of audible output or room volume. Unknown results must not be replayed.
 Only typed PCM requests receive the larger 2,600,000-byte HTTP body allowance;
 other requests retain 16 KiB. Authentication precedes body parsing. Native actions
 remain serialized and recheck local policy, firmware and artifact trust. Tests
-use a synthetic ALSA library; cross-build and protocol success do not qualify the
-real audio path. Do not use the bootstrap installer to overwrite the existing
-agent: live qualification and a separately guarded upgrade are still required.
+use a synthetic ALSA library and hardware-free file/null conversion;
+cross-build and protocol success alone do not qualify the real audio path. Do not
+use the bootstrap installer to overwrite an existing agent: other devices/versions
+still require a separately guarded upgrade and their own live qualification.
 
 A subsequent read-only check found that this Mini 1 has **no**
 `/usr/lib/libasound.so.2`: the library is at
 `/system/vendor/quasar/libs/libasound.so.2`. Both player and resident source now
 use that reviewed vendor path. The required public ALSA entry names and built-in
 hw/plug/dmix names were observed as strings; neither external plugin directory
-exists. This is presence evidence, not a successful `dlsym` or audible test.
+exists. That observation alone was presence evidence, not a successful `dlsym` or
+audible test; the later owner-qualified playback provides separate live evidence.
 External ALSA plugins are disabled for this isolated graph.
 
 `pcm_pilot.py` provides a separately owner-run, one-shot development qualification
@@ -153,7 +238,7 @@ temporary file/claim cleanup, pinned key-only SSH, firmware/ALSA/WAV/source-boun
 one-use preview and no-uncertain-retry behavior. It verifies unchanged Quasar PIDs
 and requires the owner to approve sound in the room. It does not install startup
 entries or change volume/Quasar. This explicit pilot is **not a normal speech
-route or native-MCP SSH fallback**, and does not qualify resident playback.
+route or native-MCP SSH fallback**, and cannot by itself qualify resident playback.
 Mini 1 has no `base64` utility or BusyBox decoder. The pilot now sends exact player
 bytes followed by WAV on bounded pinned SSH stdin, with a fixed `sh -c` helper.
 `dd bs=1 count=...` saves only the pinned executable and cannot read ahead into the
@@ -182,9 +267,11 @@ The generic `/etc/asound.conf` is not proof of the live Mini 1 hardware route.
 Its `dmixer` names device 2 and `default` names device 3, but a subsequent kernel
 capability read found playback only on devices 0/1 (TDM-B/TDM-C); device 2 is PDM
 capture-only and there is no playback node 3. The old device-2 graph cannot play
-on this observed layout and has been removed, together with its unqualified
-48-kHz/S32/stereo/IPC settings. ALSA plug now negotiates from the bounded WAV;
-it uses no separate IPC mixer or global/user configuration hooks. Both operator
+on this observed layout and was removed, together with its unqualified IPC mixer.
+The replacement initially left slave geometry unconstrained. Following the
+fast-speech report below, the candidate now explicitly converts bounded input WAV
+to 48-kHz/S32_LE/stereo; it still uses no separate IPC mixer or global/user
+configuration hooks. Both operator
 playback preview and resident execution require the playback-0 character node.
 This is a bounded qualification candidate, not a claim that port 0 is already
 audibly accepted. Port 1 is not tried automatically, and busy hardware must fail
@@ -245,8 +332,86 @@ Playback responses now retain validated `input_frames`, closed `stage` and numer
 `alsa_return_code`, separately from helper exit/cleanup metadata. Consumers reject
 uncorrelated counts, arbitrary stages and private/noisy fields. Hard termination
 can still emit no player JSON; it remains unknown/no-retry, not a fabricated ALSA
-completion. The longer phrase is prepared only for a future explicit owner trial;
-no sound or device deployment was performed during autonomous development.
+completion. No sound or device deployment was performed during autonomous development.
+
+A subsequent owner-operated longer-phrase trial wrote all **64,256 input frames**
+at the declared WAV rate of **22,050 Hz** (2.914 seconds), exited 0 and reported
+software completion, player/helper cleanup and unchanged Quasar. The owner heard
+the phrase but clarified that it sounded approximately ten times too fast.
+The original `HEARD` response establishes audibility, **not normal-tempo acceptance**.
+Neither hardware geometry nor elapsed playback time was recorded in that trial;
+the reported speed ratio is subjective, not measured.
+
+Read-only metadata found a 48-kHz Quasar setting, S32_LE/stereo ALSA settings and
+two-slot, 32-bit device-tree links. These observations are not a complete mapping
+of every DAI and do not prove the earlier negotiated parameters or physical clock.
+The 8.7075 ratio between candidate native and input byte rates is a hypothesis,
+not a measured cause. The generic config's invalid device numbers remain excluded.
+
+The revised isolated graph constrains the **same port 0** slave to 48 kHz,
+S32_LE and two channels, with ALSA `route_policy duplicate`. This uses the
+[documented plug slave conversion](https://www.alsa-project.org/alsa-doc/alsa-lib/pcm_plugins.html),
+not an arbitrary TTS slowdown. After setup and **before any write**, the player
+requires matching bounded kernel readback from
+`/proc/asound/card0/pcm0p/sub0/hw_params`; missing, closed or mismatched geometry
+blocks playback at stage `hardware`. `hardware_parameters_verified` means this
+fixed geometry was read back, not that physical clocks or tempo were measured.
+`sample_rate` remains the **input WAV rate**. `playback_elapsed_ms` uses the
+monotonic interval from before the first write through drain, excluding transfer,
+setup and cleanup; -1 means unavailable. Strict C/Go/Python contracts carry both
+fields, and no longer accept old completion responses without this evidence.
+
+A regression executes the production graph with **only the hardware leaf** replaced
+by ALSA file/null, never a sound device. Generated one-second mono S16 inputs at
+16, 22.05 and 48 kHz must yield one second of duplicated stereo S32_LE/48-kHz
+output (at most 1 ms converter-tail rounding), with preserved sample amplitude.
+The old unconstrained graph failed this test by retaining input byte geometry.
+The file/null test's kernel-readback fixture is explicitly synthetic; it does not
+qualify vendor conversion, a real clock, room sound or the installed resident.
+There is no automatic replay, port-1 fallback, cloud use, mixer edit or Quasar stop.
+
+A subsequent owner-authorized trial of the revised player completed all
+**66,560 / 66,560 input frames** at 22,050 Hz, with kernel geometry verification,
+exit 0, player/helper cleanup and unchanged Quasar. Measured write-through-drain
+time was **3,031 ms**, versus **3,019 ms** nominal WAV duration. The owner explicitly
+selected `NORMAL`, confirming the complete intelligible phrase at ordinary tempo.
+This accepts the bounded **operator SSH pilot on that tested Mini 1**, not the
+production resident/TLS route, reboot persistence, other firmware or microphone/
+wake-word behavior. The machine result still correctly says
+`physical_effects_verified=false`; owner confirmation is separate evidence.
+The earlier fast trial remains recorded and is not retroactively accepted. No
+automatic replay followed; the later resident change required a new explicit
+operator session rather than reusing the SSH-pilot request.
+
+### Native local-voice acceptance (2026-10-29, W0)
+
+One explicit owner session completed guarded maintenance, native TLS/state-contract
+verification and private Piper binding. A separate `PLAY NATIVE` confirmation then
+authorized exactly one `speech.say` through the resident MCP. The fresh host router's
+SSH runner was disabled for the audition: no executable transfer, cloud fallback,
+microphone capture, volume change or Quasar restart was part of speech playback.
+
+The resident wrote **73,472 / 73,472 input frames** at **22,050 Hz**, with hardware
+geometry verified before writes, stage `complete`, ALSA code 0 and cleanup true.
+Write-through-drain took **3,350 ms**, versus **3,332.063 ms** nominal WAV duration.
+The owner selected `NORMAL`, confirming intelligible speech at ordinary tempo.
+`physical_effects_verified=false` remains the machine result; owner confirmation
+is separate evidence, not a fabricated device sensor or ALSA audibility claim.
+
+A subsequent **read-only, no-audio** batch verified deployed agent/player/config/
+startup hashes, preserved certificates/key/bearer and speech helpers, one matching
+rollback backup, no lingering lifecycle claim, unchanged init hook/ALSA settings/
+vendor library, and running Quasar. The private inventory changed only by adding
+the selected station's `local_tts`; all three entries, recovery SSH fields and
+standing permissions were preserved, with an owner-only original-inventory backup.
+Fresh native-only controls and health also passed with SSH disabled. No sound was
+replayed during these postchecks.
+
+This accepts local voice on the tested Mini 1 and the reviewed builds only. It
+does not accept reboot persistence, independent capture/wake/ASR, RGB, timers or
+other workstreams; those require their own evidence. Reconnect the existing single
+host `alice` process after host-code updates so an older loaded result parser is
+not mistaken for the newly verified client. No additional connection alias is needed.
 
 ## Physical mute versus software status
 

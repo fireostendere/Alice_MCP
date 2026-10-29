@@ -322,6 +322,7 @@ def test_local_speech_uses_only_pcm_tls_and_never_falls_back_to_cloud(
     result.update(outcome="applied", playback_started=True, playback_completed=True,
                   cleanup_verified=True, frames_written=22050, sample_rate=22050,
                   input_frames=22050, stage="complete", alsa_return_code=0,
+                  hardware_parameters_verified=True, playback_elapsed_ms=1000,
                   quasar_running=True, do_not_retry=True, evidence_class="analytical",
                   physical_effects_verified=False, tts_backend="local_pcm")
     response = native_transport.run_action(controller, controller.station("desk"), "speech.say",
@@ -340,13 +341,16 @@ def test_local_pcm_results_reject_uncorrelated_or_private_fields() -> None:
              "cleanup_verified": True, "frames_written": 22050, "sample_rate": 22050,
              "quasar_running": True, "do_not_retry": True, "evidence_class": "analytical",
               "physical_effects_verified": False, "tts_backend": "local_pcm"}
-    valid.update(input_frames=22050, stage="complete", alsa_return_code=0)
+    valid.update(input_frames=22050, stage="complete", alsa_return_code=0,
+                 hardware_parameters_verified=True, playback_elapsed_ms=1000)
     assert native_transport._pcm_result(valid)["outcome"] == "applied"
     for key, value in [("private", "SENSITIVE_SENTINEL"), ("cleanup_verified", False),
                        ("frames_written", True), ("quasar_running", False),
                        ("tts_backend", "yandex"), ("playback_started", False),
                        ("input_frames", 22049), ("stage", "PRIVATE_SENTINEL"),
-                       ("alsa_return_code", True)]:
+                       ("alsa_return_code", True), ("hardware_parameters_verified", False),
+                       ("hardware_parameters_verified", 1), ("playback_elapsed_ms", -1),
+                       ("playback_elapsed_ms", True), ("playback_elapsed_ms", 25001)]:
         with pytest.raises(SafetyError):
             native_transport._pcm_result(dict(valid, **{key: value}))
 
@@ -355,6 +359,7 @@ def test_local_pcm_result_is_bound_to_the_submitted_audio_not_just_plausible_cou
     result = {"outcome": "applied", "playback_started": True, "playback_completed": True,
               "cleanup_verified": True, "frames_written": 2205, "input_frames": 2205,
               "sample_rate": 22050, "stage": "complete", "alsa_return_code": 0,
+              "hardware_parameters_verified": True, "playback_elapsed_ms": 100,
               "quasar_running": True, "do_not_retry": True, "evidence_class": "analytical",
               "physical_effects_verified": False, "tts_backend": "local_pcm"}
     assert native_transport._pcm_result(result, expected_frames=2205, expected_rate=22050)

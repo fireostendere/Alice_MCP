@@ -1,9 +1,11 @@
-"""Synthetic ALSA library only: no sound device or household audio is opened."""
+"""Synthetic ALSA and real file/null conversion; never open a sound device."""
 
+import ctypes.util
 import io
 import json
 import os
 import shutil
+import struct
 import subprocess
 import wave
 from pathlib import Path
@@ -11,6 +13,8 @@ from pathlib import Path
 import pytest
 
 SOURCE = Path(__file__).parents[1] / "src/alice_mcp/native/pcm_player.c"
+HW_PARAMS = ("access: RW_INTERLEAVED\nformat: S32_LE\nsubformat: STD\nchannels: 2\n"
+             "rate: 48000 (48000/1)\nperiod_size: 4800\nbuffer_size: 4800\n")
 
 
 def wav(samples: bytes = b"\x01\x00" * 2205, rate: int = 22050) -> bytes:
@@ -21,6 +25,43 @@ def wav(samples: bytes = b"\x01\x00" * 2205, rate: int = 22050) -> bytes:
         audio.setframerate(rate)
         audio.writeframes(samples)
     return stream.getvalue()
+
+
+@pytest.mark.parametrize("rate", [16000, 22050, 48000])
+def test_production_graph_converts_to_native_geometry_without_audio_hardware(
+    tmp_path: Path, rate: int,
+) -> None:
+    compiler, library = shutil.which("cc"), ctypes.util.find_library("asound")
+    if not compiler or not library:
+        pytest.skip("File/null conversion requires an existing C compiler and libasound")
+    output = tmp_path / "converted.raw"
+    source = SOURCE.read_text()
+    leaf = "type hw card 0 device 0"
+    assert source.count(leaf) == 1
+    # Only the hardware leaf changes: retain the production plug/slave configuration.
+    source = source.replace(leaf, 'type file slave.pcm { type null } file \\"' +
+                            str(output) + '\\" format raw')
+    test_source, executable = tmp_path / "player.c", tmp_path / "player"
+    test_source.write_text(source)
+    hardware = tmp_path / "hw_params"
+    hardware.write_text(HW_PARAMS)  # File/null has no kernel PCM; this is synthetic readback.
+    subprocess.run([compiler, "-O2", "-Wall", "-Wextra", "-Werror",
+                    f'-DPCM_ALSA_LIBRARY="{library}"', f'-DPCM_HW_PARAMS_PATH="{hardware}"',
+                    str(test_source), "-ldl",
+                    "-o", str(executable)], check=True, capture_output=True, timeout=30)
+    result = subprocess.run([str(executable), "--play"],
+                            input=wav(struct.pack("<h", 1024) * rate, rate),
+                            env={**os.environ, "ALSA_PLUGIN_DIR": "/nonexistent"},
+                            capture_output=True, timeout=5)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    converted = output.read_bytes()
+    # One second must remain one second at 48 kHz, S32_LE, stereo, not input bytes.
+    assert len(converted) % 8 == 0
+    # Linear rate conversion can round its drained tail; allow at most 1 ms.
+    assert 48000 <= len(converted) // 8 <= 48048
+    samples = struct.unpack("<" + "i" * (len(converted) // 4), converted)
+    assert samples[0::2] == samples[1::2]  # Explicit mono duplication, not a silent channel.
+    assert all(abs(sample - (1024 << 16)) <= 65536 for sample in samples[256:-256])
 
 
 @pytest.fixture
@@ -77,6 +118,7 @@ int snd_pcm_set_params(void *pcm, int format, int access, unsigned channels,
 long snd_pcm_writei(void *pcm, const void *data, unsigned long frames) {
     (void)pcm;
     static int calls;
+    if (getenv("TEST_FORBID_PCM_WRITE")) exit(92);
     if (getenv("TEST_WRITE_FAILURE")) return -EIO;
     if (getenv("TEST_WRITE_AGAIN") && calls++ == 0) return -EAGAIN;
     unsigned long count = frames > 7 ? 7 : frames;
@@ -98,6 +140,7 @@ int snd_pcm_drain(void *pcm) {
     draining = 1;
     if (getenv("TEST_STALL_DRAIN")) for (;;) pause();
     if (getenv("TEST_DRAIN_FAILURE")) return -EIO;
+    if (getenv("TEST_SLOW_DRAIN")) usleep(100000);
     if (getenv("TEST_DRAIN_RACE") && !blocking) return -EAGAIN;
     return 0;
 }
@@ -106,10 +149,13 @@ int snd_pcm_close(void *pcm) { (void)pcm; return getenv("TEST_CLOSE_FAILURE") ? 
 ''')
     library = tmp_path / "alsa.so"
     executable = tmp_path / "pcm-player"
+    hardware = tmp_path / "hw_params"
+    hardware.write_text(HW_PARAMS)
     subprocess.run([compiler, "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror", str(stub),
                     "-o", str(library)], check=True, capture_output=True, timeout=30)
     subprocess.run([compiler, "-O2", "-Wall", "-Wextra", "-Werror",
-                    f'-DPCM_ALSA_LIBRARY="{library}"', str(SOURCE), "-ldl", "-o", str(executable)],
+                    f'-DPCM_ALSA_LIBRARY="{library}"', f'-DPCM_HW_PARAMS_PATH="{hardware}"',
+                    str(SOURCE), "-ldl", "-o", str(executable)],
                    check=True, capture_output=True, timeout=30)
     return executable
 
@@ -117,11 +163,42 @@ int snd_pcm_close(void *pcm) { (void)pcm; return getenv("TEST_CLOSE_FAILURE") ? 
 def test_pcm_player_writes_all_frames_without_mixer_or_capture_access(player: Path) -> None:
     result = subprocess.run([str(player), "--play"], input=wav(), capture_output=True, timeout=5)
     assert result.returncode == 0
-    assert json.loads(result.stdout) == {
+    report = json.loads(result.stdout)
+    assert report.pop("playback_elapsed_ms") >= 0
+    assert report == {
         "outcome": "complete", "playback_started": True, "playback_completed": True,
         "cleanup_verified": True, "frames_written": 2205, "sample_rate": 22050,
         "input_frames": 2205, "stage": "complete", "alsa_return_code": 0,
+        "hardware_parameters_verified": True,
     }
+
+
+@pytest.mark.parametrize("params", [None, "closed\n", "", HW_PARAMS.replace("S32_LE", "S16_LE"),
+                                    HW_PARAMS.replace("channels: 2", "channels: 1"),
+                                    HW_PARAMS.replace("48000", "22050"),
+                                    HW_PARAMS + "channels: 2\n", "x" * 513])
+def test_pcm_player_refuses_missing_or_mismatched_hardware_before_writes(
+    player: Path, params: str | None,
+) -> None:
+    hardware = player.parent / "hw_params"
+    if params is None:
+        hardware.unlink()
+    else:
+        hardware.write_text(params)
+    result = subprocess.run([str(player), "--play"], input=wav(), capture_output=True, timeout=5,
+                            env={**os.environ, "TEST_FORBID_PCM_WRITE": "1"})
+    assert result.returncode == 1
+    report = json.loads(result.stdout)
+    assert report["outcome"] == "blocked" and report["stage"] == "hardware"
+    assert not report["hardware_parameters_verified"] and not report["playback_started"]
+    assert report["frames_written"] == 0 and report["playback_elapsed_ms"] == -1
+
+
+def test_pcm_elapsed_time_includes_blocking_drain(player: Path) -> None:
+    result = subprocess.run([str(player), "--play"], input=wav(), capture_output=True, timeout=5,
+                            env={**os.environ, "TEST_SLOW_DRAIN": "1"})
+    assert result.returncode == 0
+    assert 90 <= json.loads(result.stdout)["playback_elapsed_ms"] < 2000
 
 
 def test_pcm_player_blocking_drain_avoids_nonblocking_wait_race(player: Path) -> None:

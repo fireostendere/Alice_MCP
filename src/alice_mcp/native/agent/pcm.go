@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const pcmClientSHA256 = "123d9d4221aa2054ff150202c0f4f5a36b008c93335d7c80cd76846d1bcd6087"
+const pcmClientSHA256 = "f0d3e86eb207eb32200ec61bb70ef5ea10aa3e2c7e7f56e4d1d96ab178637e18"
 const maxWAV = 44 + 48000*2*20
 const maxPCMRequest = 2600000
 
@@ -72,16 +72,20 @@ func pcmFlags(raw []byte, frames, rate int) (map[string]any, bool) {
 		Input     *int   `json:"input_frames"`
 		Stage     string `json:"stage"`
 		Code      *int   `json:"alsa_return_code"`
+		Hardware  *bool  `json:"hardware_parameters_verified"`
+		Elapsed   *int   `json:"playback_elapsed_ms"`
 	}
 	if !decode(raw, &result) || result.Started == nil || result.Completed == nil ||
 		result.Clean == nil || result.Frames == nil || result.Rate == nil || *result.Rate != rate ||
 		result.Input == nil || *result.Input != frames || result.Code == nil ||
+		result.Hardware == nil || result.Elapsed == nil || *result.Elapsed < -1 || *result.Elapsed > 25000 ||
+		!*result.Hardware && (*result.Frames != 0 || *result.Elapsed != -1) ||
 		*result.Code < -4095 || int64(*result.Code) > 2147483647 ||
 		*result.Frames < 0 || *result.Frames > frames || *result.Started != (*result.Frames > 0) {
 		return nil, false
 	}
 	switch result.Stage {
-	case "request", "library", "symbols", "configuration", "open", "parameters", "clock",
+	case "request", "library", "symbols", "configuration", "open", "parameters", "hardware", "clock",
 		"write", "wait", "blocking", "drain", "cleanup", "complete":
 	default:
 		return nil, false
@@ -90,7 +94,7 @@ func pcmFlags(raw []byte, frames, rate int) (map[string]any, bool) {
 	switch outcome {
 	case "complete":
 		if !*result.Started || !*result.Completed || !*result.Clean || *result.Frames != frames ||
-			result.Stage != "complete" || *result.Code < 0 {
+			result.Stage != "complete" || *result.Code < 0 || !*result.Hardware || *result.Elapsed < 0 {
 			return nil, false
 		}
 		outcome = "applied"
@@ -104,7 +108,8 @@ func pcmFlags(raw []byte, frames, rate int) (map[string]any, bool) {
 	return map[string]any{"outcome": outcome, "playback_started": *result.Started,
 		"playback_completed": *result.Completed, "cleanup_verified": *result.Clean,
 		"frames_written": *result.Frames, "sample_rate": *result.Rate,
-		"input_frames": *result.Input, "stage": result.Stage, "alsa_return_code": *result.Code}, true
+		"input_frames": *result.Input, "stage": result.Stage, "alsa_return_code": *result.Code,
+		"hardware_parameters_verified": *result.Hardware, "playback_elapsed_ms": *result.Elapsed}, true
 }
 
 func (n *nativeRuntime) playPCM(p pcmPayload, expected ...string) map[string]any {
@@ -157,7 +162,8 @@ func (n *nativeRuntime) playPCM(p pcmPayload, expected ...string) map[string]any
 	if !valid || execErr != nil && result["outcome"] == "applied" {
 		result = map[string]any{"outcome": "unknown", "playback_started": false,
 			"playback_completed": false, "cleanup_verified": false, "frames_written": 0,
-			"sample_rate": rate, "input_frames": frames, "stage": "unverified", "alsa_return_code": nil}
+			"sample_rate": rate, "input_frames": frames, "stage": "unverified", "alsa_return_code": nil,
+			"hardware_parameters_verified": false, "playback_elapsed_ms": -1}
 	}
 	_, fresh, policyErr = n.policy()
 	running := quasarRunning()

@@ -258,7 +258,7 @@ func TestLocalPCMModeCannotInvokeCloudTextTTS(t *testing.T) {
 }
 
 func TestLocalPCMOnlyAcceptsCorrelatedCompletion(t *testing.T) {
-	valid := []byte(`{"outcome":"complete","playback_started":true,"playback_completed":true,"cleanup_verified":true,"frames_written":2205,"sample_rate":22050,"input_frames":2205,"stage":"complete","alsa_return_code":0}`)
+	valid := []byte(`{"outcome":"complete","playback_started":true,"playback_completed":true,"cleanup_verified":true,"frames_written":2205,"sample_rate":22050,"input_frames":2205,"stage":"complete","alsa_return_code":0,"hardware_parameters_verified":true,"playback_elapsed_ms":100}`)
 	if result, ok := pcmFlags(valid, 2205, 22050); !ok || result["outcome"] != "applied" {
 		t.Fatal("valid synthetic playback completion rejected")
 	}
@@ -268,11 +268,20 @@ func TestLocalPCMOnlyAcceptsCorrelatedCompletion(t *testing.T) {
 		strings.Replace(string(valid), `"input_frames":2205`, `"input_frames":2206`, 1),
 		strings.Replace(string(valid), `"stage":"complete"`, `"stage":"PRIVATE_SENTINEL"`, 1),
 		strings.Replace(string(valid), `"alsa_return_code":0`, `"alsa_return_code":true`, 1),
+		strings.Replace(string(valid), `"hardware_parameters_verified":true`, `"hardware_parameters_verified":false`, 1),
+		strings.Replace(string(valid), `,"hardware_parameters_verified":true`, ``, 1),
+		strings.Replace(string(valid), `"playback_elapsed_ms":100`, `"playback_elapsed_ms":-1`, 1),
+		strings.Replace(string(valid), `"playback_elapsed_ms":100`, `"playback_elapsed_ms":25001`, 1),
+		strings.Replace(string(valid), `"playback_elapsed_ms":100`, `"playback_elapsed_ms":true`, 1),
 		strings.TrimSuffix(string(valid), "}") + `,"private":"PRIVATE_SENTINEL"}`,
 	} {
 		if _, ok := pcmFlags([]byte(invalid), 2205, 22050); ok {
 			t.Fatal("unverified PCM completion accepted")
 		}
+	}
+	blocked := []byte(`{"outcome":"blocked","playback_started":false,"playback_completed":false,"cleanup_verified":true,"frames_written":0,"sample_rate":22050,"input_frames":2205,"stage":"hardware","alsa_return_code":0,"hardware_parameters_verified":false,"playback_elapsed_ms":-1}`)
+	if result, ok := pcmFlags(blocked, 2205, 22050); !ok || result["outcome"] != "blocked" {
+		t.Fatal("pre-write hardware mismatch rejected as invalid protocol")
 	}
 }
 

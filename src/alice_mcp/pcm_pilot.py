@@ -20,7 +20,7 @@ from alice_mcp import local_tts, native_transport, speech_capture
 from alice_mcp.core import MAX_OUTPUT, Controller, SafetyError, Station, ssh_argv
 from alice_mcp.vqe_experiment import _ssh
 
-PLAYER_SHA256 = "123d9d4221aa2054ff150202c0f4f5a36b008c93335d7c80cd76846d1bcd6087"
+PLAYER_SHA256 = "f0d3e86eb207eb32200ec61bb70ef5ea10aa3e2c7e7f56e4d1d96ab178637e18"
 LIBRARY = "/system/vendor/quasar/libs/libasound.so.2"
 PIDS = "pidof maind | tr ' ' '\\n' | sort -n | sha256sum | cut -d ' ' -f 1"
 MAX_TRANSFER = 20 * 1024 * 1024
@@ -283,6 +283,7 @@ def _result(raw: str, audio: bytes, *, diagnostic: bool = False) -> dict[str, An
         if (type(result) is not dict or set(result) != {
             "outcome", "playback_started", "playback_completed", "cleanup_verified",
             "frames_written", "sample_rate", "input_frames", "stage", "alsa_return_code",
+            "hardware_parameters_verified", "playback_elapsed_ms",
         } or result["sample_rate"] != int.from_bytes(audio[24:28], "little")
             or result["input_frames"] != metadata["input_frames"]):
             raise ValueError

@@ -335,3 +335,26 @@ func TestAllowedActionsAllExpandsToConfiguredImplementedActions(t *testing.T) {
 		}
 	}
 }
+
+func TestMigratedLEDMapIsValidatedCalibrationMetadata(t *testing.T) {
+	path, _ := privateConfig(t)
+	raw, _ := os.ReadFile(path)
+	for _, item := range []struct {
+		value string
+		valid bool
+	}{
+		{`{"channels":[[0,"red"],null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]}`, true},
+		{`{"channels":[]}`, false},
+		{`{"channels":[[6,"red"],null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]}`, false},
+		{`{"gain_percent":{"red":101}}`, false},
+		{`{"channels":[[0,"white"],null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]}`, false},
+	} {
+		data := strings.TrimSuffix(string(raw), "}") + `,"led_map":` + item.value + "}"
+		if os.WriteFile(path, []byte(data), 0600) != nil {
+			t.Fatal("synthetic calibration unavailable")
+		}
+		if _, _, err := loadConfig(path); (err == nil) != item.valid {
+			t.Fatal("migrated calibration validation mismatch")
+		}
+	}
+}

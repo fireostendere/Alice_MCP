@@ -17,16 +17,17 @@ from typing import Any
 import pytest
 
 from alice_mcp import agent_provision, agent_upgrade, agent_upgrade_script
-from alice_mcp.core import SSHInput
+from alice_mcp.core import SafetyError, SSHInput
 
 
 @pytest.mark.parametrize("mode", ["success", "config_changed", "claim_busy", "bad_archive",
                                   "child_active", "new_exits", "symlink", "pid_move_fails",
                                   "identity_changed_after_stop", "quasar_invalid",
                                   "signal_after_stop", "signal_after_kill",
-                                  "concurrent_credential", "pending_stop", "truncated_helper"])
+                                  "concurrent_credential", "pending_stop", "truncated_helper",
+                                  "tls_fails", "config_move_fails"])
 def test_existing_installation_upgrade_or_guarded_rollback_without_quasar_changes(
-    tmp_path: Path, mode: str,
+    tmp_path: Path, monkeypatch: Any, mode: str,
 ) -> None:
     compiler = shutil.which("cc")
     if not compiler:
@@ -71,8 +72,11 @@ int main(void) {
         (root / name).write_bytes(("synthetic original " + name).encode())
         (root / name).chmod(0o600 if name != "start" else 0o500)
     old.chmod(0o500)
-    originals = {name: (root / name).read_bytes() for name in agent_provision.NAMES}
-    old_hashes = [hashlib.sha256(originals[name]).hexdigest() for name in agent_provision.NAMES]
+    (root / "pcm-player").write_bytes(b"synthetic reviewed PCM")
+    (root / "pcm-player").chmod(0o500)
+    names = (*agent_provision.NAMES, "pcm-player")
+    originals = {name: (root / name).read_bytes() for name in names}
+    old_hashes = [hashlib.sha256(originals[name]).hexdigest() for name in names]
     content = {"agent": new.read_bytes(), "pcm-player": b"synthetic reviewed PCM",
                "config.json": b"synthetic new config", "start": b"synthetic new startup"}
     payload = io.BytesIO()
@@ -93,8 +97,9 @@ int main(void) {
     if mode == "quasar_invalid":
         (tools / "pidof").write_text("#!/bin/sh\nprintf '99999999\\n'\n")
     (tools / "pidof").chmod(0o500)
-    if mode == "pid_move_fails":
-        (tools / "mv").write_text('#!/bin/sh\ncase "$1" in */agent.pid) exit 1;; esac\n'
+    if mode in {"pid_move_fails", "config_move_fails"}:
+        pattern = "*/agent.pid" if mode == "pid_move_fails" else "*/.upgrade-*/config.json"
+        (tools / "mv").write_text(f'#!/bin/sh\ncase "$1" in {pattern}) exit 1;; esac\n'
                                  f'exec {shutil.which("mv")} "$@"\n')
         (tools / "mv").chmod(0o500)
     elif mode == "concurrent_credential":
@@ -159,6 +164,21 @@ fi
                                    stderr=subprocess.DEVNULL)
     (root / "agent.pid").write_text(str(old_process.pid) + "\n")
     (root / "agent.pid").chmod(0o600)
+    tls_calls = []
+
+    def verify_tls() -> None:
+        # The actual transaction must reach this barrier with the new executable,
+        # but the exact old config. No new fields may reach the old resident.
+        tls_calls.append(1)
+        assert (root / "agent").read_bytes() == content["agent"]
+        assert (root / "config.json").read_bytes() == originals["config.json"]
+        live_pid = int((root / "agent.pid").read_text())
+        assert live_pid != old_process.pid
+        assert Path(f"/proc/{live_pid}/exe").readlink() == root / "agent"
+        if mode == "tls_fails":
+            raise SafetyError("Synthetic TLS failure")
+
+    monkeypatch.setattr(agent_provision, "ssh_argv", lambda s, c: shlex.split(c))
 
     def run(expected: str = "", body: bytes | None = None) -> dict[str, Any]:
         package = payload.getvalue() if body is None else body
@@ -177,8 +197,13 @@ fi
             if mode == "truncated_helper":
                 prefix = prefix[:-1]
             args, wire = shlex.split(command), prefix + package
-        result = subprocess.run(args, input=wire, env=env,
-                                capture_output=True, timeout=20)
+        if expected and mode != "truncated_helper":
+            monkeypatch.setenv("PATH", env["PATH"])
+            try:
+                return agent_provision._transfer(station, command, wire, verify_tls=verify_tls)
+            except SafetyError:
+                return {"outcome": "unknown", "do_not_retry": True}
+        result = subprocess.run(args, input=wire, env=env, capture_output=True, timeout=20)
         if expected and mode == "truncated_helper":
             assert result.returncode != 0 and result.stdout == b""
             assert not (root / (".upgrade-" + nonce)).exists()
@@ -201,7 +226,8 @@ fi
         elif mode == "symlink":
             (root / "start").unlink()
             (root / "start").symlink_to(init)
-        result = run(preview["state_sha256"], b"truncated" if mode == "bad_archive" else None)
+        corrupt = b"corrupt".ljust(len(payload.getvalue()), b"\0")
+        result = run(preview["state_sha256"], corrupt if mode == "bad_archive" else None)
         assert result.get("do_not_retry", True) is True
         if mode == "concurrent_credential":
             assert result["outcome"] == "unknown"
@@ -215,17 +241,19 @@ fi
             assert (backup / "old-agent").read_bytes() == originals["agent"]
             assert (backup / "old-config.json").read_bytes() == originals["config.json"]
             assert not (backup / ".package.tar").exists()
-        elif mode in {"new_exits", "pid_move_fails", "signal_after_kill"}:
+            assert tls_calls == [1]
+        elif mode in {"new_exits", "pid_move_fails", "signal_after_kill", "tls_fails",
+                      "config_move_fails"}:
             assert result["outcome"] == "unknown"
             assert all((root / name).read_bytes() == body for name, body in originals.items())
-            assert not (root / "pcm-player").exists()
+            assert (root / "pcm-player").read_bytes() == originals["pcm-player"]
             restored_pid = int((root / "agent.pid").read_text())
             assert Path(f"/proc/{restored_pid}/exe").readlink() == root / "agent"
         else:
             assert result["outcome"] in {"blocked", "unknown"}
             assert old_process.poll() is None
             assert old.read_bytes() == originals["agent"]
-            assert not (root / "pcm-player").exists()
+            assert (root / "pcm-player").read_bytes() == originals["pcm-player"]
             if mode in {"identity_changed_after_stop", "signal_after_stop"}:
                 assert not signal_marker.exists()
                 state = Path(f"/proc/{old_process.pid}/status").read_text()

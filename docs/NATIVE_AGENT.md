@@ -53,6 +53,9 @@ fresh, consumed-once 300-second preview binds station/trust/configuration,
 firmware/boot and the exact canonical archive. It accepts only pinned agent,
 ASR and TTS artifacts, private configuration/certificate/key/credential, and its
 fixed startup script. Existing installation/startup destinations are refused.
+The pinned combined binary is also used for new installs. Bootstrap canonicalizes
+`allowed_actions` to `"all"` (including legacy input lists); standing preauthorization
+remains `true`. The private input file is not edited.
 
 Installation uses the verified persistent data volume and a dedicated
 `/etc/init.d/S99zz-alice-mcp` hook. Vendor launch profiles, Quasar, SSH, mount flags
@@ -75,28 +78,42 @@ Preserve other entries and SSH recovery settings. A native-only inventory may
 omit SSH fields. All existing trust/permission checks still apply to the selected
 transport. TLS errors, unsupported tools and invalid results fail closed.
 
-### Guarded existing-installation upgrade (owner-qualified on one Mini 1)
+### Guarded W0 → combined upgrade (source-tested, not live-accepted)
 
-`agent_upgrade.py` is separate from bootstrap. It accepts only the pinned previous
-agent/ASR/TTS baseline and a canonical four-file update: pinned new agent,
-`pcm-player`, policy-preserving `config.json` and the reviewed startup template.
-The old startup fingerprint may predate that template; it is bound/preserved, not
-executed by the upgrade helper. Only `local_pcm` is added to the existing device
-configuration. Allowed actions, standing preauthorization, listener, certificates,
-keys, bearer, recovery SSH and the existing init hook are not changed or re-uploaded.
+`agent_upgrade.py` is separate from bootstrap. The baseline is the **installed W0**
+resident, SHA-256 `ec43eb7ada625616dc04c5c6f58ab619ac1ce758bcec5d5f7a92780c17303806`,
+not the pre-W0 install. The W0 ASR/TTS and existing PCM player must match their
+source pins. The canonical four-file package contains the pinned combined agent,
+the **same** PCM player, migrated `config.json` and the reviewed startup template.
+No arbitrary baseline or artifact hash is accepted. The old startup may predate
+that template; its exact reviewed hash is bound and backed up, not executed by
+the helper. Listener, TLS files, bearer, local-PCM pins, recovery SSH, host inventory
+and the existing init hook are preserved.
+W0's old config must still contain its explicit speech-action list, not `"all"`
+or new-schema fields; the new policy is never used for the first startup.
+
+The active config changes to `allowed_actions: "all"` and
+`preauthorize_all_actions: true`. Optional `config_updates` contains only reviewed
+`volume`, registered `media` aliases/digests, and `led_map`. No mixer, calibration
+or media is invented: omit unavailable fields, especially Mini 1's unqualified
+mixer mapping. Media digests must already match host `controls.local_media`.
+Volume remains bounded by host `max_volume`. LED calibration uses the shared host
+validator; the resident accepts it as state-bound metadata, not a second mapping
+of already-mapped PWM frames. Host `controls.led_map` stays unchanged.
 
 A consumed-once 300-second host preview binds the package, private configuration,
 native and recovery-SSH trust, firmware, boot, Quasar process identities, existing
 file hashes, current agent PID/start time and helper source. This is an explicit
 operator maintenance transport, not a normal native-action SSH fallback. Existing
-lifecycle/capture claims, an already present PCM player, wrong files, insufficient
+lifecycle/capture claims, a missing or changed W0 PCM player, wrong files, insufficient
 space or active agent children block the transaction.
 
 Read-only inspection sends bounded bundled source on stdin, not a long SSH exec
 argument. Apply uses a short fixed request, reads exactly the source-prefix byte
 count without consuming archive bytes, preserves trailing newlines with a sentinel,
 and verifies source length **and SHA-256 before evaluating that reviewed source**.
-Only then can the independently hashed canonical archive be consumed. No source
+Only then can the independently hashed canonical archive be consumed. Exact archive
+byte reads leave the same SSH stdin open for a single TLS acknowledgement. No source
 path/script text is accepted from an MCP action, no helper script is saved on the
 Station, and the combined source+archive stays within the existing 20-MiB transfer
 bound. Tests execute this actual wire path and reject truncated/shifted source
@@ -110,8 +127,20 @@ before inspecting children. PID/start time/executable/artifact are rechecked aft
 STOP; a mismatched stopped identity is resumed, not killed. With no children, the
 old resident is killed while stopped to avoid a resume/new-request race. Quasar is
 never stopped. Replacement uses same-filesystem file renames and bounded startup
-plus ownership of the listening socket. Known startup failures attempt restoration
-of matching backups and restart only the pinned old agent. A foreign/currently
+plus ownership of the listening socket. The strict install order is:
+
+1. Replace/start the new binary with the **exact old W0 config still active**.
+2. Pause the SSH transaction; the host checks the production authenticated TLS 1.3
+   channel and state-bound `speech.say` controls through `native_transport._state`.
+   No speech or device action is dispatched. Recheck policy/trust/expiry, then
+   acknowledge this one transaction on its existing stdin.
+3. Only after that acknowledgement rename the new config into place. The resident
+   reloads policy per request; no additional process restart is needed. The host
+   checks TLS controls once more before reporting verified installation.
+
+Known startup, pre-migration TLS or config-rename failures attempt restoration
+of matching backups and restart only the pinned W0 agent; the W0 PCM player remains
+in place. A foreign/currently
 changed file or lost lock ownership prevents blind rollback or cleanup. Backups
 remain under the owned `.upgrade-<opaque-id>` directory; this is not full-device
 backup or a user-supplied installer.
@@ -131,27 +160,84 @@ not provide an atomic PID handle. Never rerun an uncertain update or remove its
 claims automatically. Inspect the saved receipt and owned state first. Keep other
 agent actions, startup operations and configuration editors idle during maintenance.
 
-The operator wrapper requires a new explicit maintenance confirmation, records
-dispatch create-only, checks native TLS controls/state contract, and only then
-binds host `controls.local_tts`. Host binding preserves every other entry, SSH
-field and permission, creates an owner-only backup next to the private inventory,
-and compares original content/metadata before atomic replacement. It does not make
-concurrent external editing safe. A second separate `PLAY NATIVE` confirmation can
-authorize exactly one new phrase with SSH disabled for that trial; `NORMAL` is
-separate owner evidence. Setup/controls success alone is not audio acceptance.
+Missing/invalid TLS acknowledgements, transport uncertainty or a failed final TLS
+check return `unknown`/`do_not_retry`; never rerun the write. A final TLS failure
+after commit does not authorize another rollback/write from the host. Inspect the
+owned state first. TLS controls success is not audio/LED or reboot acceptance.
 After source updates, reconnect the existing single host `alice` process before
 using it: a fresh operator Python client does not reload a previously running MCP
 router. Do not create feature-specific connection aliases.
 
+#### Operator API and CLI
+
+`preview(controller, station_id, package)` and
+`apply(controller, plan_id, expected_sha256, package)` are callable from Python
+without a TTY or input prompt under the existing standing authorization. Keep the
+same controller and bundle in one process: previews are in-memory, expire after
+300 seconds, and are consumed once even on refusal. Build the bundle with:
+
+```python
+from alice_mcp import agent_upgrade
+
+package = agent_upgrade.bundle(
+    controller.station(station_id), agent_bytes, player_bytes,
+    old_config_bytes, old_hashes, alsa_config_sha256, library_sha256,
+    layout=layout, config_updates=updates,
+)
+plan = agent_upgrade.preview(controller, station_id, package)
+result = agent_upgrade.apply(controller, plan["plan_id"], plan["expected_sha256"], package)
+```
+
+`old_config_bytes` must be the exact private W0 file, not reserialized JSON.
+`old_hashes` follows `BASE_NAMES`: `agent`, `tts-once`, `asr-once`, `config.json`,
+`certificate.pem`, `private-key.pem`, `credential`, `start`, `pcm-player`. These
+digests are rechecked on the station; they do not replace the pinned binary hashes.
+No credentials or private snapshots belong in Git or chat.
+
+The CLI validates private file trust and size, previews by default and emits compact
+JSON. `--old-hashes` is a private JSON object mapping those nine names to digests;
+`--config-updates` is optional private JSON containing only the three supported
+fields above. Run from this branch's worktree with `PYTHONPATH=src`, the owner's
+Python executable and private inventory environment. For example, with those
+environment variables and private absolute file variables already set:
+
+```sh
+"$PY" -m alice_mcp.agent_upgrade --station "$STATION" --layout "$LAYOUT" \
+  --agent "$AGENT" --player "$PLAYER" --old-config "$W0_CONFIG" --old-hashes "$W0_HASHES"
+```
+
+Add `--live` only for the terminal CLI: it previews anew, requires the exact word
+`UPGRADE` via `core.confirm`, then applies once. Cancellation consumes the preview.
+Non-TTY operators must use the Python API, not pipe a confirmation word.
+
+#### Reproducible combined binary
+
+Go **1.27.3**, stdlib only, from `src/alice_mcp/native/agent/`:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 GOTOOLCHAIN=local \
+  go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o "$AGENT" .
+```
+
+Two clean builds in different source directories with independent empty Go caches
+produced identical 7,340,156-byte ARM32 ELF executables, SHA-256
+`23ca5fd6969b9a72865384a1ef21d816b7d410855746abd82ed48e37a6c9b9df`.
+`agent_provision.AGENT_SHA256` is the shared target pin; `agent_upgrade.BASE_AGENT_SHA256`
+is the distinct W0 baseline. Binaries remain outside the source/distribution tree.
+
 Host contract tests and disposable local-daemon shell tests cover guarded update,
 rollback, changed files/claims, active children, failed new startup, PID-file-move
-failure, post-STOP identity mismatch and Quasar metadata failure. Those tests do
-not establish real firmware/utility compatibility by themselves. A subsequent
-owner-operated update installed the pinned agent/player, preserved the existing
-init hook, TLS credentials/helpers and Quasar identity, and bound only host
+failure, post-STOP identity mismatch, Quasar metadata failure, TLS refusal and
+config-rename failure. The actual duplex wire tests assert that the old config
+is still active when the new executable reaches the host TLS barrier. These are
+synthetic tests, not real firmware qualification. **No combined upgrade has been
+installed or live-tested.**
+
+Historical W0 evidence: a previous owner-operated update installed the W0 agent/player,
+preserved the existing init hook, TLS credentials/helpers and Quasar identity, and bound only host
 `controls.local_tts`. The owner separately approved one native audition and selected
 `NORMAL`; the live result is recorded below. This bounded path accepts the reviewed
-previous installation, not arbitrary already-upgraded versions or new permissions.
+pre-W0 installation. It does not qualify this combined upgrade.
 
 ## Evidence and remaining blockers
 

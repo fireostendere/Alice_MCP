@@ -16,7 +16,7 @@ installer/self-repair/process cleanup, host autostart.
 
 | ID | Owner | Scope | Needs the owner at the station |
 |---|---|---|---|
-| W0 | OpenCode session | Initial local voice DONE: guarded resident installed, Piper bound, native `speech.say` NORMAL (73,472 frames, 3.350 s vs 3.332 s WAV; SSH disabled). [W0 PR #2](https://github.com/fireostendere/Alice_MCP/pull/2), DCO `c246e71`, 842 tests and all four GitHub checks PASS, still OPEN/not merged. Combined-build upgrade follow-up BLOCKED on the owner's required PR #2 merge prerequisite; integrated tree inspected but not changed, no commit or device install | Initial live acceptance done; no repeat or new device action |
+| W0 | OpenCode session | Initial local voice DONE: guarded W0 resident installed, Piper bound, native `speech.say` NORMAL. Combined upgrade from `feat/reference-parity` is source-tested in `feat/combined-upgrade`, without waiting for PR #2: pinned W0 baseline/PCM, reproducible combined ARM32 target, new binary → production TLS check → config migration to `all`, optional reviewed volume/media/LED calibration, non-TTY Python API and confirmed CLI. 1181 tests PASS (1 optional skip); lint/types/snapshot/package/privacy/gitleaks and Go test/race/vet/gofmt/ARM32 checks PASS. No combined device installation or new live acceptance | Claude runs the guarded upgrade later; no owner presence needed for the upgrade |
 | W1 | Claude Code agent | Native typed adapters: `audio.volume`, registered-media playback, typed health probes (memory, storage, uptime, services). Source-tested, not merged: 768 tests pass, Go ARM32 build OK. Acceptance after merge and resident deploy: `.venv/bin/python -m alice_mcp.native_acceptance {health,volume,media} --station <private alias>`. Deploy the new binary before adding the new device config fields | No; live checks are batched |
 | W2 | Claude Code agent | LED parity effects (temporal rainbow, breathe, spin, custom-colour spin, static, off, notify, police) for Mini 1 and Lite, native LED adapter, channel-calibration runner; display/clock feasibility only. Source-tested, not merged: 841 tests pass; new `led.show` action, design in `docs/LED_PARITY.md`. Covers Mini 1, Lite and Mini 3 (6×1 BGR framebuffer); only Mini 3 has a clock, so display is read-only probe only. Mini 1 needs `calibrate` before `show` | Yes: calibration and effects check |
 | W3 | Claude Code agent | Owned jobs: timers/countdown/alarm, owned cancellation ("stop"), bounded siren, reboot under a disruptive-action policy, declarative presets. Source-tested, not merged: 790 tests pass; tools `start_job`/`list_jobs`/`cancel_job`, design in `docs/JOBS.md`. Jobs live in host memory and are lost when the MCP process exits; reboot is SSH-only; native steps limited to `speech.say` until W1/W2 adapters are wired in at merge | No; live checks are batched |
@@ -47,14 +47,15 @@ timers/cancel → siren (low volume) → presets → W4 probes → reboot (last,
 optional). The results are recorded in the docs as evidence. A failure stops
 only that feature, and nothing is retried automatically.
 
-The W0–W4b integration tree passes every check (1088 tests, ARM32 build,
-`check_public`, gitleaks) and carries the ordered checklist in
+The combined upgrade tree passes source checks (1181 tests, 1 optional skip,
+reproducible ARM32 build, `check_public`, gitleaks) and carries the ordered checklist in
 `docs/LIVE_ACCEPTANCE.md`. Blockers before running it on Mini 1:
 
-1. **Upgrade base (W0 owner).** `agent_upgrade.py` only upgrades the original
-   install. It must accept the installed W0 resident as the verified base, pin the
-   combined build's `AGENT_SHA256`, and add the new device config fields (`volume`,
-   `media`, `led_map`, new actions) only after the new binary runs.
+1. **Upgrade base (W0 owner).** Source-implemented in `feat/combined-upgrade`:
+   installed W0 is the strictly pinned baseline; the combined target is pinned after
+   two identical clean ARM32 builds. New action policy and optional `volume`, `media`,
+   `led_map` reach the active config only after new-binary startup and production TLS
+    verification. Source/package checks pass; guarded deployment remains pending.
 2. **Mini 1 volume.** Read-only checks (2026-10-29): no `amixer`/`tinymix` on the
    device; `pcm.!default` is `hw`; the `softvol` "Softmaster" PCM points at
    `hw:0,2`, which has no playback stream; only Quasar `platformd` holds

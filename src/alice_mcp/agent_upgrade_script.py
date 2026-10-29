@@ -8,11 +8,12 @@ umask 077
 exec 2>/dev/null
 OWNER_UID=0
 __WAIT_AGENT__
-mode=$1; nonce=$2; firmware=$3; package=$4; expected=$5; layout=$6; needed=$7
-shift 7
+mode=$1; nonce=$2; firmware=$3; package=$4; expected=$5; layout=$6; needed=$7; package_size=$8
+shift 8
 old_agent=$1; old_tts=$2; old_asr=$3; old_config=$4
 old_cert=$5; old_key=$6; old_credential=$7; old_start=$8
-shift 8
+old_pcm=$9
+shift 9
 new_agent=$1; new_pcm=$2; new_config=$3; new_start=$4
 blocked() { printf '{"outcome":"blocked","error_code":"upgrade_precondition"}\n'; exit 0; }
 case "$mode:$layout" in inspect:direct|inspect:bkupgrade|apply:direct|apply:bkupgrade) ;;
@@ -21,11 +22,14 @@ case "$mode:$layout" in inspect:direct|inspect:bkupgrade|apply:direct|apply:bkup
 case "$nonce" in *[!0-9a-f]*) blocked;; esac
 for value in "$firmware" "$package" "$old_agent" "$old_tts" "$old_asr" "$old_config" \
     "$old_cert" "$old_key" "$old_credential" "$old_start" "$new_agent" "$new_pcm" \
-    "$new_config" "$new_start"; do
+    "$new_config" "$new_start" "$old_pcm"; do
     [ "${#value}" = 64 ] || blocked
     case "$value" in *[!0-9a-f]*) blocked;; esac
 done
 case "$needed" in ''|*[!0-9]*) blocked;; esac
+case "$package_size" in ''|*[!0-9]*) blocked;; esac
+[ "$package_size" -gt 0 ] && [ "$package_size" -le 20971520 ] &&
+    [ "$old_pcm" = "$new_pcm" ] || blocked
 for command in awk sha256sum ls cut readlink pidof cp mv tar setsid env df cat sed sort dd; do
     command -v "$command" >/dev/null || blocked
 done
@@ -59,7 +63,7 @@ INIT=/etc/init.d/S99zz-alice-mcp
 trusted "$DATA" && trusted "$DATA/opt" && trusted "$ROOT" && trusted "${INIT%/*}" || blocked
 hook_sha=$(printf '#!/bin/sh\nexec %s/start "$@"\n' "$ROOT" | sha256sum | awk '{print $1}')
 check "$INIT" "$hook_sha" || blocked
-[ ! -e "$ROOT/pcm-player" ] && [ ! -L "$ROOT/pcm-player" ] || blocked
+check "$ROOT/pcm-player" "$old_pcm" || blocked
 [ ! -e "$DATA/opt/alice-mcp-asr-active" ] &&
     [ ! -L "$DATA/opt/alice-mcp-asr-active" ] &&
     [ ! -e "$DATA/opt/alice-mcp-vqe-audit-active" ] &&
@@ -86,7 +90,7 @@ preserved() {
     check /system/vendor/quasar/maind "$firmware" &&
         check "$ROOT/tts-once" "$old_tts" && check "$ROOT/asr-once" "$old_asr" &&
         check "$ROOT/certificate.pem" "$old_cert" && check "$ROOT/private-key.pem" "$old_key" 1 &&
-        check "$ROOT/credential" "$old_credential" 1
+        check "$ROOT/credential" "$old_credential" 1 && check "$ROOT/pcm-player" "$old_pcm"
 }
 baseline() {
     preserved && check "$ROOT/agent" "$old_agent" && check "$ROOT/config.json" "$old_config" 1 &&
@@ -102,7 +106,7 @@ baseline() {
     boot=$(sha256sum /proc/sys/kernel/random/boot_id | awk '{print $1}')
     state=$(printf '%s\n' "$boot" "$qstamp" "$pid:$old_stamp" "$nonce" "$package" \
         "$old_agent" "$old_tts" "$old_asr" "$old_config" "$old_cert" "$old_key" \
-        "$old_credential" "$old_start" "$hook_sha" | sha256sum | awk '{print $1}')
+        "$old_credential" "$old_start" "$old_pcm" "$hook_sha" | sha256sum | awk '{print $1}')
 }
 baseline || blocked
 initial_qstamp=$qstamp
@@ -231,9 +235,6 @@ rollback() {
             mv "$STAGE/restore-$name" "$ROOT/$name" || return 1
         else return 1; fi
     done
-    if [ -e "$ROOT/pcm-player" ] || [ -L "$ROOT/pcm-player" ]; then
-        check "$ROOT/pcm-player" "$new_pcm" && rm "$ROOT/pcm-player" || return 1
-    fi
     preserved && check "$ROOT/agent" "$old_agent" &&
         check "$ROOT/config.json" "$old_config" 1 && check "$ROOT/start" "$old_start" &&
         launch || return 1
@@ -274,7 +275,8 @@ trap 'exit 0' HUP INT TERM
 mkdir "$STAGE" && trusted "$STAGE" && chmod 700 "$STAGE" || exit 0
 (set -C; printf '%s\n' "$$" > "$STAGE/owner") || exit 0
 stage_owned=1
-(set -C; cat > "$STAGE/.package.tar") || exit 0
+# Exact reads leave this same stdin open for the host's TLS acknowledgement.
+(set -C; dd bs=1 count="$package_size" > "$STAGE/.package.tar") || exit 0
 check "$STAGE/.package.tar" "$package" || exit 0
 entries=$(tar tf "$STAGE/.package.tar") || exit 0
 [ "$entries" = "$(printf 'agent\npcm-player\nconfig.json\nstart')" ] || exit 0
@@ -293,12 +295,19 @@ stop_agent "$pid" "$old_stamp" "$old_agent" || exit 0
 stopped=1
 read -r recorded < "$ROOT/agent.pid"
 [ "$recorded" = "$pid" ] && mv "$ROOT/agent.pid" "$STAGE/old-agent.pid" || exit 0
-for name in agent pcm-player config.json start; do
+for name in agent pcm-player start; do
     owned && mv "$STAGE/$name" "$ROOT/$name" || exit 0
 done
 preserved && check "$ROOT/agent" "$new_agent" && check "$ROOT/pcm-player" "$new_pcm" &&
-    check "$ROOT/config.json" "$new_config" 1 && check "$ROOT/start" "$new_start" &&
+    check "$ROOT/config.json" "$old_config" 1 && check "$ROOT/start" "$new_start" &&
     launch && preserved && [ "$(quasar_stamp)" = "$initial_qstamp" ] || exit 0
+printf '{"outcome":"awaiting_tls"}\n'
+IFS= read -r tls_ack && [ "$tls_ack" = TLS-OK ] || exit 0
+owned && preserved && check "$ROOT/config.json" "$old_config" 1 &&
+    check "$ROOT/agent" "$new_agent" && [ "$(starttime "$child")" = "$child_stamp" ] &&
+    listener_owned "$child" && children_absent "$child" &&
+    [ "$(quasar_stamp)" = "$initial_qstamp" ] || exit 0
+mv "$STAGE/config.json" "$ROOT/config.json" && check "$ROOT/config.json" "$new_config" 1 || exit 0
 installed=1
 child=
 exit 0

@@ -94,28 +94,34 @@ ALICE_MCP_ALLOW_WRITES=1 $PY -m alice_mcp.owned_jobs reboot --station yandex-sta
 
 ## Phase B — Mini 1 combined resident
 
-**B0. Prerequisites. Open; Phase B is blocked until they are done.**
+**B0. Prerequisites. Source path ready; live deployment and feature checks remain open.**
 
-1. **Pinned upgrade path.** `agent_upgrade.py` only upgrades the original install
-   (`agent_provision.AGENT_SHA256`) to the W0 build (`AGENT_SHA256`). The combined
-   build needs the W0-installed agent accepted as its baseline and a new reviewed
-   `AGENT_SHA256`. W0 owns this.
-2. **Install order.** Install the new binary first; it accepts the old device
-   config. Only then add the device config fields:
+1. **Pinned upgrade path.** `agent_upgrade.py` accepts the exact pinned W0 resident
+   (`BASE_AGENT_SHA256`) and existing pinned PCM player, and targets the reproducible
+   combined build (`agent_provision.AGENT_SHA256`). See [the operator API/CLI](NATIVE_AGENT.md#operator-api-and-cli).
+   This source work does not wait for PR #2 to merge. It has not installed anything.
+2. **Install order.** The guarded transaction starts the new binary with the exact
+   old config, checks the production TLS channel, then migrates to `allowed_actions:
+   "all"` and `preauthorize_all_actions: true`. Optional reviewed config fields are:
    - `volume` (`amixer`, `amixer_sha256`, `card`, `control`, `max_percent`);
-   - `media` (alias → sha256).
+    - `media` (alias → sha256).
+    - `led_map` (validated calibration metadata; host mapping remains on the host).
 
    With `"allowed_actions": "all"` (or the field absent), the new binary enables
    each action once its prerequisites exist. The old binary rejects these fields
-   and `"all"`. No tool writes them yet.
+    and `"all"`. Never add them manually before the TLS barrier. The upgrade's
+    optional `config_updates` is bound to the one-use preview. Omit unsupported
+    hardware fields; no Mini 1 mixer mapping is guessed.
 3. **Mini 1 mixer mapping.** The mapping is unreviewed, and no read-only mixer
    discovery command exists.
 4. **Mini 1 LED.** A fresh same-boot `led.capture` from at most 30 min earlier is
    required, but `led.capture` has no native adapter. A native-configured station
    cannot run it, and nothing falls back to SSH.
 
-**B1. Deploy.** Run W0's guarded upgrade runner for the combined build. Type the
-word it shows, run it once, and never repeat it.
+**B1. Deploy (not run during development).** Claude may call the guarded Python
+`preview()`/`apply()` API without a TTY under standing authorization. The ordinary
+`--live` CLI requires `UPGRADE`. Both use one fresh preview and never retry an
+uncertain write. See [NATIVE_AGENT.md](NATIVE_AGENT.md#operator-api-and-cli).
 
 **B2. Native typed checks.**
 

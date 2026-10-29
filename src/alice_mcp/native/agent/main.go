@@ -30,6 +30,7 @@ type config struct {
 	AllowedActions         actionList `json:"allowed_actions"`
 	PreauthorizeAllActions bool       `json:"preauthorize_all_actions"`
 	LocalPCM               *pcmConfig `json:"local_pcm,omitempty"`
+	LEDMap                 *ledMap    `json:"led_map,omitempty"`
 	audioPolicy
 }
 
@@ -153,6 +154,9 @@ func loadConfig(path string) (config, []byte, error) {
 		return config{}, nil, bad
 	}
 	if c.Volume != nil && !c.Volume.valid() || c.Media != nil && (c.LocalPCM == nil || !validMedia(c.Media)) {
+		return config{}, nil, bad
+	}
+	if c.LEDMap != nil && !c.LEDMap.valid(c.Model) {
 		return config{}, nil, bad
 	}
 	if c.AllowedActions == nil || len(c.AllowedActions) == 1 && c.AllowedActions[0] == allActions {

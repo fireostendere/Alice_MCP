@@ -222,8 +222,17 @@ int main(void) {
                     pass  # The bounded synthetic daemon may exit between check and signal.
 
 
-def test_generated_start_serializes_concurrent_launches(startup: Any) -> None:
+@pytest.mark.parametrize("nonexclusive_directory_creation", [False, True])
+def test_generated_start_serializes_concurrent_launches(
+    startup: Any, nonexclusive_directory_creation: bool,
+) -> None:
     root, run = startup
+    if nonexclusive_directory_creation:
+        mkdir = shutil.which("mkdir")
+        shim = root.parent / "tools" / "mkdir"
+        shim.write_text("#!/bin/sh\n[ ! -e \"$1\" ] || exit 1\nsleep 0.2\n"
+                        f"exec {shlex.quote(mkdir)} -p \"$@\"\n")
+        shim.chmod(0o500)
     barrier = Barrier(2)
 
     def start() -> subprocess.CompletedProcess[bytes]:
@@ -320,6 +329,23 @@ def test_generated_start_waits_for_the_same_delayed_child_without_relaunch(start
     assert len(list(root.glob("launched.*"))) == 1
     assert run("status").returncode == 0
     assert run("stop").returncode == 0
+
+
+def test_generated_start_never_removes_another_owner_record(startup: Any) -> None:
+    root, run = startup
+    owner = root / ".agent-lock" / "owner"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        starting = pool.submit(run, "start")
+        for _ in range(100):
+            if owner.is_file():
+                break
+            time.sleep(0.005)
+        assert owner.is_file()
+        owner.write_text("foreign-owner\n")
+        assert starting.result(timeout=5).returncode != 0
+    assert owner.read_text() == "foreign-owner\n"
+    assert run("stop").returncode != 0
+    assert owner.read_text() == "foreign-owner\n"
 
 
 def test_forged_bundle_cannot_self_authorize_an_unreviewed_agent(provision: Any) -> None:

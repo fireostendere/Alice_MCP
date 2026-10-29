@@ -53,7 +53,12 @@ valid_pid() {
 case "${1:-start}" in start|stop|status) ;; *) exit 2;; esac
 # A stale/busy claim requires operator inspection, never automatic lock removal.
 lock=$ROOT/.agent-lock
+[ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 1
 mkdir "$lock" 2>/dev/null || exit 1
+owner=$lock/owner
+[ -d "$lock" ] && [ ! -L "$lock" ] || exit 1
+# Only an exclusive owner record authorizes cleanup, even if mkdir was nonexclusive.
+(set -C; printf '%s\n' "$$" > "$owner") || exit 1
 child=; published=0
 cleanup() {
     result=$?
@@ -63,7 +68,9 @@ cleanup() {
         wait "$child" 2>/dev/null
         if [ "$published" = 1 ]; then rm -f "$pidfile"; fi
     fi
-    rmdir "$lock" || result=1
+    if [ -f "$owner" ] && [ ! -L "$owner" ] && [ "$(cat "$owner")" = "$$" ]; then
+        rm "$owner" && rmdir "$lock" || result=1
+    else result=1; fi
     exit "$result"
 }
 trap cleanup 0

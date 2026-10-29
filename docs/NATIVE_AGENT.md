@@ -166,7 +166,10 @@ diagnostics. Bootstrap transfer/result contracts are not weakened. Normal reside
 PCM retains its independent TLS size/duration bounds and never uses this pilot.
 
 The source provisioning startup template also serializes start/stop/status with
-an atomic owner-local claim. Busy or stale claims require inspection, not blind
+an owner-local claim with an exclusive, no-clobber owner record; only its recorded
+owner may clean up the claim. Directory creation alone is not sufficient authority
+to remove a lock. A regression reproduces the observed double-directory-acquisition
+race without weakening PID/lifecycle checks. Busy or stale claims require inspection, not blind
 removal. Concurrent-start tests use a synthetic daemon and verify that the PID
 file tracks the single live process; symlink PID targets and unrelated processes
 are protected. Both bootstrap and later startup wait up to three seconds for the

@@ -3,6 +3,9 @@
 Status 2026-10-29: **research, a read-only probe and a bounded level pilot, all
 with synthetic tests only.** No station was accessed while this was written.
 Nothing here has been observed on a device, and no audio has been captured.
+W6 adds a `--stream` client mode, an on-station wake pilot ([step 3](#step-3-on-station-wake-pilot))
+and owner voice recording for training ([step 4](#step-4-owner-voice-recording-for-wake-training)),
+also synthetic-tested only; the live round-2/3 results below come from the parent session.
 
 Read-only checks on Mini 1 left one way to get room audio without stopping or
 reconfiguring Quasar: subscribe to Quasar's own audio channels over its local IPC.
@@ -148,7 +151,8 @@ the preview.
    inode a `maind` process owns.
 3. Check that no other `alice-mcp-*-active` claim exists.
 4. Write the octal-encoded helper. Its SHA-256 is pinned:
-   `818b3f1fc09f429c4f8359504ecc1b22a60c1b66591aef69e9223df005f271fb`.
+   `05a6632285c69795d5c59667697a1b26f3ccd0abe36156fc70168dd8585351c2` (W6 build,
+   levels mode unchanged, `--stream` added).
 5. Run `--levels PORT CHANNEL SECONDS PREAMBLE` with seconds in 1–5.
 
 **The helper** (`src/alice_mcp/native/io_channel_levels.c`):
@@ -191,10 +195,12 @@ counts, channel type/name/rate/format, `bytes_per_sample_estimate`, `peak_s16`,
 | `quasar_unchanged:false` | Quasar restarted or changed during the run; stop and inspect | Proof that the subscription caused it |
 
 **Build and pin.** The artifact was built with the toolchain the parent session
-provided (zig 0.15.1). Two clean-cache builds were byte-identical: 19,128 bytes,
-ELF32 ARM EABI5 hard-float, static, no `INTERP`, non-executable stack. The
-round-1 build (`c066c8ff…`, 29,532 bytes, with stdio) is retired. A fixed JSON
-writer replaced `printf`, which made room for the frame metadata.
+provided (zig 0.15.1). Two clean-cache builds were byte-identical: 19,664 bytes,
+ELF32 ARM EABI5 hard-float, static, no `INTERP`, non-executable stack. The same
+command reproduces the round-2 pin `818b3f1f…71fb` (19,128 bytes) byte for byte
+from the round-2 source, which is retired with the round-1 build (`c066c8ff…`,
+29,532 bytes, with stdio). A fixed JSON writer replaced `printf`, which made room
+for the frame metadata.
 
 ```sh
 zig cc -target arm-linux-musleabihf -std=c11 -D_POSIX_C_SOURCE=200809L \
@@ -293,8 +299,8 @@ Every variant ends with `unsubscribe` (field 6) in the same envelope, except
 
 ### Next live round (same bounds: 5 s, levels only, identity check, never retried)
 
-Use the new pinned helper, `818b3f1f…71fb`. The round-1 artifact now fails the
-pin check before anything is transferred.
+This round used `818b3f1f…71fb`; it is now replaced by `05a66322…51c2`, whose
+levels mode is unchanged. Older artifacts fail the pin check before any transfer.
 
 | # | Port | `--channel` | `--preamble` | Tests | Writes to Quasar |
 |---|---|---|---|---|---|
@@ -314,6 +320,299 @@ How to read the results:
 - `kind:158` with channels anywhere means audio arrived, so path A is open.
 - `unparsed`/`string_like` payloads on 9850 would mean `yio_audio` speaks
   another protocol.
+
+## Step 3: on-station wake pilot
+
+`src/alice_mcp/wake_pilot.py`. From Python (the parent has no TTY):
+
+```python
+import os
+from pathlib import Path
+from alice_mcp.core import Controller
+from alice_mcp import wake_pilot as w
+
+controller = Controller(Path(os.environ["ALICE_MCP_INVENTORY"]), writes=True)
+item = w.Pilot(45, Path("/PRIVATE/io-channel-levels-armhf").read_bytes(),
+               Path("/PRIVATE/mww-detect-armhf").read_bytes())
+plan = w.preview(controller, "ALIAS", item)
+result = w.apply(controller, plan["plan_id"], plan["expected_sha256"], item)
+```
+
+The owner CLI, `python -m alice_mcp.wake_pilot --station ALIAS --client … --detector …
+--seconds 45`, needs a terminal and the typed word **`WAKE`**. Gates are those of step 2
+(`speech.listen`, `station-mini`, `preauthorize_all_actions`, pinned firmware, writes).
+
+**On the station** (one fixed `sh -c` wrapper, numbers and pins as arguments; the
+guards of step 2 are shared code):
+
+1. Both helpers arrive on bounded binary SSH stdin (`pcm_pilot`'s transfer): the
+   client with `dd bs=1 count=19664`, the detector as the rest. Both must match their
+   pins (`05a66322…51c2`; W5's three-model `d2b73953…c4`, 604,488 bytes) before
+   `chmod 500`.
+2. `client --stream 9850 SECONDS | detector --max-seconds 90 --gain-db G`, at most
+   60 s. `--stream` sends only `full_envelope` `request_vqe`, requires every entry to
+   be `vqe_0`, type 6, 16 kHz, format 1 with an even byte count, writes those bytes
+   unchanged into the pipe (a stall over 1 s stops it) and its report to stderr,
+   without frame metadata, so it stays one atomic pipe write.
+3. Every second the wrapper reads `VmHWM` and `utime+stime` of the process named
+   `detector` from `/proc`. CPU after the last sample (at most 1 s of audio) is not
+   counted; `cpu_ms` assumes USER_HZ 100 (the ARM Linux ABI).
+4. Cleanup removes both helpers and the claim, and checks the Quasar identity.
+
+**Returned:** `detections[]` (`word`, `probability`, `t_ms` of audio since the
+subscription, `trusted:false`), the loaded `models`, `io` (frame counts, `vqe_0`
+peak/mean square and dBFS), `detector` (`audio_ms`, `end_reason`, `exit`,
+`vmhwm_kib`, `cpu_ticks`, `cpu_ms`) and the cleanup flags. `complete` also requires
+`audio_ms == bytes // 320 * 10`: every whole 10 ms hop the client wrote reached the
+detector. No audio is stored or exported.
+
+### Replay: one host clip through the ARM detector
+
+Live round (reported by the coordinator, Mini 1, 2026-10-29): a 45 s run completed
+with 0 detections (detector VmHWM 328 KiB, 2.1 s CPU, `vqe_0` at −50 dBFS), while the
+x86 build traced komp ≥ 0.98 on 12 of the owner's 20 recorded positives. `Replay`
+separates "ARM build diverges" from "live timing": `wake_pilot.Replay(pcm, detector)`
+with `pcm = wake_pilot.pcm_from_wav(path)` (16 kHz mono S16, ≤ 10 s; the SHA-256 of
+the PCM is bound into the preview) goes through the same `preview()`/`apply()`. The
+station receives the clip as the first stdin segment instead of the client, checks its
+hash, runs `{ cat clip; sleep 2; } | detector --trace` (the pipe stays open 2 s so the
+`/proc` samples see the finished detector) and removes clip and detector. No room
+audio is read. Per model it returns only `max_q`, `max_mean5` (best five-inference
+mean), `q_ge_250` and `inferences`, plus the detector's `audio_ms`, exit, VmHWM and
+CPU. Every trace line is parsed strictly. `complete` requires exactly
+`(audio_ms / 10 − 2) // stride` inferences per model, the count W5's x86 build
+produces.
+
+## Step 4: owner voice recording for wake training
+
+`src/alice_mcp/voice_record.py` is **the one place where room audio leaves the
+station**, by owner decision (2026-10-29), for fine-tuning W5's models on the owner's
+and, with her own consent, his wife's voice. Each take is one bounded run of the same
+wrapper with `purpose=record` (bound into the preview state): the client's `vqe_0` PCM
+goes through `cat` to the host, followed by a newline, its report and the cleanup
+trailer. Nothing else changes: same guards, pins, identity check, cleanup and no retry.
+
+- **Takes:** positives ≤ 3 s with the cue «скажи: компьютер» (or «окей дом»,
+  «маруся»), negatives ≤ 10 s with «говори что угодно, без слова»; at most 40 saved
+  takes per session (counted in the manifest).
+- **Storage:** only `~/.local/share/alice-mcp/voice-train/<speaker>/` by default
+  (`--dir` to change). Directories are created 0700 and must stay private and owned;
+  WAV files (16 kHz, S16, mono) and `manifest.jsonl` are 0600. A directory inside the
+  alice-mcp checkout is refused, and the base holds a `*` `.gitignore`, so an enclosing
+  repository (such as a dotfiles home) never picks clips up.
+- **Manifest line:** `file`, `label`, `word`, `speaker` (alias), `session`,
+  `timestamp` (UTC), `seconds`, `samples`, `sha256` (of the WAV), `rms_dbfs`,
+  `peak_dbfs`.
+- **Saved only when certain:** a clip is written only for a `complete` take whose PCM
+  length equals the client's byte count and whose trailer flags are all true.
+  `unknown` takes discard the PCM and stop the session.
+- **Delete:** `python -m alice_mcp.voice_record delete --speaker wife` removes that
+  speaker's clips and manifest; any other file is reported, never removed.
+
+From Python, the parent shows `plan["cue"]` in chat, then applies at once:
+
+```python
+from alice_mcp import voice_record as r
+
+take = r.Take("owner", "20261029a", "komp", 3, Path("/PRIVATE/io-channel-levels-armhf").read_bytes())
+plan = r.preview(controller, "ALIAS", take)        # plan["cue"] == "скажи: компьютер"
+result = r.apply(controller, plan["plan_id"], plan["expected_sha256"], take)
+```
+
+The owner CLI, `python -m alice_mcp.voice_record record --station ALIAS --client …
+--speaker owner --session 20261029a --word komp --positives 20 --negatives 10`, asks
+for **`RECORD`** once (the prompt states that room audio is exported to the host for
+wake-word training), then shows each cue and waits for Enter.
+
+### W5 hook: owner clips in `mww_train.py` (documented, not run)
+
+`mww_train.features` turns every `*.wav` in `DATA/<word>/wav/{positive,positive_lt,
+near_miss,sentences}` into features, and `training_config` already samples
+`positive_lt` as positives (weight 1.5, `truncate_start`) and `sentences` as long
+negatives (weight 2.0, clean and augmented, random 3 s windows). So, per word, in the
+training venv:
+
+1. **Positives:** for each manifest entry with `label == "positive"` and that
+   `word`, trim silence so the clip ends just after the word (the recipe end-aligns
+   positives) and write it to `DATA/<word>/wav/positive_lt/owner_<sha256[:16]>.wav`:
+   `mww_train.write_wav(out, mww_train._trim(samples))`, with `samples =
+   numpy.frombuffer(frames, "<i2").astype("float32")` (`write_wav` takes
+   int16-scaled values). `_trim` cuts relative to the clip's peak, so the −45 dBFS
+   level needs no gain; the recipe's gain/noise/RIR augmentation still applies.
+2. **Negatives:** copy `label == "negative"` clips unchanged to
+   `DATA/<word>/wav/sentences/owner_<sha256[:16]>.wav`.
+3. Check each file's SHA-256 against the manifest first; then delete
+   `DATA/<word>/features/{positive_lt,ru_sentences_0,ru_sentences_1}` (features are
+   skipped when present) and rerun `features` and `train` for that word.
+
+Owner clips then land in train/validation/test by the recipe's 10 % split. Before
+deploying, re-run W5's evaluation and keep the household's held-out clips out of
+training. `delete --speaker` does not reach copies under `DATA`; remove those
+`owner_*` files by hand too.
+
+## Step 5: continuous stream to the PC and wake listener
+
+Owner decision (2026-10-29): detect the wake word on the PC first. Continuous room audio
+may go to this PC for wake detection; it is processed in RAM and never written to disk.
+No typed word; the listener prints a one-line notice and runs unattended.
+
+```sh
+ALICE_MCP_ALLOW_WRITES=1 ALICE_MCP_INVENTORY=/PRIVATE/inventory.json PYTHONPATH=src \
+  python -m alice_mcp.wake_listen --station ALIAS --client /PRIVATE/io-channel-levels-armhf \
+  --mww /PRIVATE/mww-detect-x86 --libvosk /PRIVATE/libvosk.so \
+  --vosk-zip /PRIVATE/vosk-model-small-ru-0.22.zip [--mode either] [--mww-model ft]
+```
+
+**Station side (`wake_stream.py`).** One state-bound preview, then setup uploads the
+pinned client once into a tmpfs (the first of `/tmp`, `/run`, `/dev/shm`, `/var/run`
+that `/proc/mounts` lists as tmpfs; owned by root, sticky or not writable by others) as
+`alice-mcp-stream/client`. A directory left by a dead host session is reclaimed only
+when no process runs from it. Each **chunk** is one SSH session running the same guards
+as step 2, a Quasar identity check against the setup identity, one `--stream` window
+(≤ 60 s, so a chunk is well under 10 min), and an identity re-check. Raw PCM is the
+session's stdout; the client's report and the re-check are its stderr (≤ 8 KiB, parsed
+strictly). Cleanup waits for running clients (≤ 5 s, then TERM by verified exe), removes
+the directory and reports `cleanup_verified`/`quasar_unchanged`.
+
+**Seamless handover.** The next chunk starts `lead_s` (5) seconds before the active
+window ends, so for a few seconds two subscriptions are open on `yio_audio`. The PC
+keeps feeding the active stream until the new one has two frames, then looks for the
+new stream's first frame (512 bytes) in the last 64 KiB it fed, skips that overlap and
+switches. The old stream's later data is dropped. The synthetic live-like server shows
+contiguous frame indices across handovers, with no gaps or duplicates (dash and BusyBox
+1.36). **Whether two simultaneous subscriptions disturb Quasar on Mini 1 is not yet
+observed**; every chunk re-checks the identity, and `--lead-s 0` gives sequential chunks
+with a short gap and never two subscriptions.
+
+**Stops.** Ctrl+C, a `stop` event or `max_chunks` end the session normally. A Quasar
+identity change or a blocked guard stops it at once; three chunks in a row without a
+complete window stop it too (5 s back-off between them). Every result has
+`do_not_retry:true`.
+
+**PC side (`wake_listen.py`).** Each PCM block goes to W4b's `WakePipeline`
+(pinned Vosk 0.3.45 + `vosk-model-small-ru-0.22`, prefix routing, forced endpoint at
+8 s) and, in parallel, to W5's pinned x86 `mww-detect --trace`. `--mww-model ft` (default)
+is komp fine-tuned on the owner's clips (`f8648a5c…059f`, model `f5ea6953…1bcf`), and `old`
+is the round-3 three-model build (`19788961…0a23`). A fresh mww process starts every 10 min
+of audio. An utterance is decided once mww has scored past its end. Vosk hits when the
+transcript starts with the name; mww hits when the detector's own wake rule fires
+within 1 s of the utterance. Any mww hit that no utterance claims within 9 s fires with
+an empty transcript. `--mode vosk|mww|either|both` picks the rule. Each wake prints
+`{event:"wake", word, sources, command, mww_max_q, t, trusted:false}` (`t`: audio
+seconds since start) and goes to an in-process `McpInbox`. Stderr gets per-utterance
+scores, never text.
+
+**Command and dedup (after the first live run).** Live, one event carried the whole 8 s
+transcript ("учимся компьютер какая погода компьютер как дела …"). Now `command` holds
+only the words after the name. They come from Vosk's word times and run up to the first
+0.6 s gap or the next spoken name.
+
+- **Matching mww to Vosk.** An mww hit belongs to the name Vosk heard ending within 1 s
+  of it. Otherwise the word under way at the hit counts as the name.
+- **Repeats.** Repeats of the name right after it are skipped.
+- **Name said alone.** A name at the end of its utterance waits for the next one. Speech
+  starting within 5 s becomes its command. Vosk's own silence endpoint (about 5 s of
+  silence) or later speech releases it with an empty command.
+- **Shared cooldown.** Both engines share one cooldown: a second wake within 2.5 s of a
+  fired one is the same wake. The exception is two commands in a row, where Vosk heard
+  the name again after the first command's words.
+
+These values are named constants in `wake_listen.py` (`PAUSE_S`, `FOLLOW_S`,
+`COOLDOWN_S`, `MATCH_S`, `LAG_S`). They are tested on synthetic input only.
+
+### Offline result on the owner's recordings (host, 2026-10-29)
+
+`--pcm-dir ~/.local/share/alice-mcp/voice-train/owner --heldout-positives 5
+--heldout-negatives 3`, each clip as its own stream, `vqe_0` captures at about −50 dBFS:
+
+| mww build | Positives (20) vosk / mww / either / both | Negatives (10) FA vosk / mww / either | Held-out 5 pos: either | Held-out 3 neg: FA |
+|---|---|---|---|---|
+| `ft` (default) | 15 / 16 / 16 / 15 | 0 / 1 / 1 | vosk 4, mww 4, either 4 | 0 |
+| `old` | 15 / 10 / 16 / 9 | 0 / 1 / 1 | vosk 4, mww 1, either 4 | 0 |
+
+Only the held-out clips (positives 18:11:42–18:12:09, negatives 18:14:39–18:15:09 UTC)
+were never trained on, so the `ft` rows for the other clips are optimistic; the Vosk
+columns are valid on every clip. The one false accept is mww on the first negative.
+Host cost (Ryzen 5 9600X, WSL2): 17.3 s CPU for 198.9 s of audio including per-clip
+start-up (8.7 % of one core), listener peak RSS 296 MiB (mostly the Vosk model),
+detector VmHWM 556 KiB (`ft`) / 784 KiB (`old`).
+
+## Step 6: voice commands in the MCP and opencode
+
+Goal: the owner says «компьютер» and a command near Mini 1, the opencode `alice` agent
+acts on it and answers with `speech.say` on the same station. Tests are synthetic only;
+the owner runs the live test of the whole chain.
+
+**MCP (`voice_service.py`).** The stdio server runs the step 5 stream and listener in a
+background thread, for one station at a time. It has four tools:
+
+- `voice_listen_start(station_id)`
+- `voice_listen_stop()`
+- `voice_status()`: state, station, chunks, handovers, gaps, failures, audio seconds,
+  utterances, recent event count, last error and the last session's cleanup flags
+- `get_voice_events(after_id)`
+
+The stream has the same requirements as step 5: writes enabled, standing
+preauthorization, Mini 1, `speech.listen` allowed and the firmware pin. Stop, SIGTERM,
+SIGHUP and stdin EOF all stop the stream and run its verified station cleanup. After a
+SIGKILL, the next start reclaims the station directory as stale.
+
+The private policy goes inside the station's `controls`. It holds paths only; the pins
+are in code (`io_channel_pilot.HELPER_SHA256`, `wake_listen.MWW_PINS`,
+`wake_simulate.LIBVOSK_SHA256` and `VOSK_ZIP_SHA256`):
+
+```json
+"voice": {"client": "/PRIVATE/io-channel-levels-armhf", "mww": "/PRIVATE/mww-detect-x86",
+          "libvosk": "/PRIVATE/libvosk.so", "vosk_zip": "/PRIVATE/vosk-model-small-ru-0.22.zip",
+          "mww_model": "ft", "mode": "either", "autostart": false}
+```
+
+- `mww_model`, `mode` and `autostart` are optional; the values shown are the defaults.
+- Only `station-mini` accepts this block.
+- With `autostart: true`, the first such station starts with the MCP process.
+- Tool output never contains these paths.
+
+**Events file.** The service appends JSON lines to
+`$XDG_STATE_HOME/alice-mcp/voice-events.jsonl` (default `~/.local/state`).
+
+- Records: each command is `{kind:"wake", id, ts, station, word, command, sources,
+  trusted:false}`. Each listener state change is `{kind:"state", id, ts, state, station,
+  error}`.
+- Ids always increase: each one is the current time in milliseconds, but at least the
+  previous id + 1.
+- Storage: the directory is 0700 and the file 0600, with no symlinks. Past 256 KiB the
+  file rotates to `.1`.
+- Audio is never written. `get_voice_events` serves the last 100 commands from memory.
+
+**opencode plugin (local, not in Git).** It lives in `.opencode/plugins/alice-voice/` of
+the checkout opencode runs in.
+
+`index.js` is a server plugin. It:
+
+1. tails the events file from its end, so history is never re-sent;
+2. drops commands older than 60 s, empty commands and any event not marked
+   `trusted:false`;
+3. claims each id once with an exclusive file under `alice-mcp/voice-claims/`, so two
+   opencode servers never both send it;
+4. queues `[голос · STATION · недоверенный ввод] COMMAND` into the newest session titled
+   «Голос» whose agent is `alice`, and creates that session when it is missing.
+
+A dedicated session keeps spoken input out of typed conversations and works without an
+open TUI.
+
+`panel.jsx` is a TUI plugin. It shows a toast for each command, one status line in the
+footer and a «Голос» block in the session sidebar.
+
+The `alice` agent's prompt treats the tagged text as untrusted spoken input and answers
+on the same station.
+
+**Gaps.**
+
+- The listener gets no signal that the station is speaking, so it also hears the
+  station's own answer. The agent avoids saying the name in spoken answers.
+- A command is decided at the Vosk endpoint, so a noisy room can add up to 8 s.
+- The events file is not a queue: a command written while no opencode server runs is
+  never sent.
 
 ## Later: resident and wake pipeline (planned, not implemented)
 
@@ -348,12 +647,16 @@ How to read the results:
   probe but blocked by the pilot.
 - BusyBox 1.26.2 is not available to host tests. The scripts are tested under
   `dash` with GNU awk and mawk, and reviewed for the known BusyBox 1.26 awk
-  pitfall (`name (expr)` parsed as a function call). Only a station run can
-  confirm compatibility.
+  pitfall (`name (expr)` parsed as a function call). W6's wake and record paths
+  also passed once, ad hoc, under BusyBox 1.36.1 `sh` and its applets (Ubuntu
+  static build). Only a station run can confirm compatibility.
+- The wake pilot and recording are synthetic-tested with a host build of the client
+  and a shell stand-in for the detector; the ARM32 detector has never run.
 - The `quasar.cfg` scan is heuristic: a brace or colon inside a string can
   confuse it.
 
-**Tests:**
+**Tests:** (W6: `tests/test_wake_pilot.py`, `tests/test_voice_record.py` and the
+`--stream` cases in `tests/test_io_channel_pilot.py`)
 
 - `tests/test_io_channel_probe.py`: a synthetic `/proc` tree, with
   sentinel-leak, read-only and parser-rejection checks.

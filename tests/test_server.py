@@ -366,6 +366,7 @@ def test_stdio_handshake_tools_and_no_private_inventory() -> None:
                 "apply_service_action", "get_model_interfaces", "get_station_controls",
                 "preview_station_action", "apply_station_action", "run_station_action",
                 "get_capture_status", "start_job", "list_jobs", "cancel_job",
+                "voice_listen_start", "voice_listen_stop", "voice_status", "get_voice_events",
             }
             result = await session.call_tool("list_stations", {})
             assert not result.isError
@@ -376,3 +377,23 @@ def test_stdio_handshake_tools_and_no_private_inventory() -> None:
             assert unsafe.structuredContent is not None
             assert unsafe.structuredContent["outcome"] == "blocked"
     asyncio.run(run())
+
+
+def test_sigterm_stops_the_voice_listener_and_exits_cleanly() -> None:
+    import json
+    import signal
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if k != "ALICE_MCP_INVENTORY"}
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    process = subprocess.Popen([sys.executable, "-m", "alice_mcp"], env=env,
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL)
+    assert process.stdin is not None and process.stdout is not None
+    process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "t", "version": "0"}}}).encode() + b"\n")
+    process.stdin.flush()
+    assert json.loads(process.stdout.readline())["id"] == 1  # Serving: handlers installed.
+    process.send_signal(signal.SIGTERM)
+    assert process.wait(timeout=30) == 0

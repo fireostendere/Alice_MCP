@@ -84,6 +84,7 @@ def test_detects_synthetic_leaks(value: str, rule: str) -> None:
         "https://example.invalid/?page=1",
         "https://example.invalid/?token=REDACTED",
         "999.999.999.999",
+        "`vosk-model-small-ru-0.22.zip`",  # A token prefix inside a word is not a token.
     ],
 )
 def test_public_text_and_placeholders(value: str) -> None:

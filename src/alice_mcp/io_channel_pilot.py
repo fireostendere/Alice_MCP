@@ -27,8 +27,8 @@ from alice_mcp.core import Controller, SafetyError, SSHInput, Station, _unique, 
 from alice_mcp.vqe_experiment import _ssh
 
 # Pin only after reviewing native/io_channel_levels.c and rebuilding it (docs/IO_CHANNEL.md).
-HELPER_SHA256 = "818b3f1fc09f429c4f8359504ecc1b22a60c1b66591aef69e9223df005f271fb"
-# ponytail: octal-in-script transfer fits ~29.6 KB helpers (this one: 19,128 B) in SSHInput's
+HELPER_SHA256 = "05a6632285c69795d5c59667697a1b26f3ccd0abe36156fc70168dd8585351c2"
+# ponytail: octal-in-script transfer fits ~29.6 KB helpers (this one: 19,664 B) in SSHInput's
 # 120 KiB; switch to pcm_pilot's binary-stdin transfer if the helper grows past that.
 ACTION = "io_channel.levels"
 CHANNELS = ("main", "vqe", "raw")
@@ -37,38 +37,16 @@ PREAMBLES = ("none", "listen_only", "full_envelope", "hub_retrieve_state")
 PAYLOADS = frozenset({"message", "string_like", "unparsed", "absent", "empty"})
 ERRORS = frozenset({"none", "no_audio_frames", "ipc_unavailable", "ipc_closed", "ipc_io_error",
                     "protocol_error", "frame_limit", "channel_limit", "interrupted",
-                    "clock_error", "signal_error", "unsubscribe_unverified"})
+                    "clock_error", "signal_error", "unsubscribe_unverified",
+                    "format_changed", "output_error"})  # The last two: --stream only.
 PROFILE_ERRORS = frozenset({"not_owner", "invalid_request", "runtime_tools_missing",
                             "data_parent_untrusted", "firmware_mismatch", "abi_mismatch",
                             "quasar_not_running", "ipc_unavailable", "temporary_path_busy",
                             "preview_state_changed"})
 
-# Fixed helper; only validated port/channel/seconds/pins are passed as arguments.
-SCRIPT = r'''
-OWNER_UID=0
-LC_ALL=C; export LC_ALL
-umask 077
-exec 2>/dev/null
-mode=$1; nonce=$2; port=$3; channel=$4; seconds=$5; firmware=$6; helper_sha=$7; expected=$8
-preamble=$9
-blocked() { printf '{"outcome":"blocked","error_code":"%s"}\n' "$1"; exit 0; }
-[ "$(id -u)" = "$OWNER_UID" ] || blocked not_owner
-case "$nonce" in ''|*[!0-9a-f]*) blocked invalid_request;; esac
-[ "${#nonce}" = 32 ] || blocked invalid_request
-case "$port" in ''|0*|*[!0-9]*) blocked invalid_request;; esac
-[ "${#port}" -le 5 ] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || blocked invalid_request
-case "$channel" in main|vqe|raw) ;; *) blocked invalid_request;; esac
-case "$seconds" in [1-5]) ;; *) blocked invalid_request;; esac
-case "$preamble" in none|listen_only|full_envelope|hub_retrieve_state) ;;
-    *) blocked invalid_request;; esac
-for pin in "$firmware" "$helper_sha"; do
-    [ "${#pin}" = 64 ] || blocked invalid_request
-    case "$pin" in *[!0-9a-f]*) blocked invalid_request;; esac
-done
-for c in awk chmod cut grep id ls mkdir od pidof readlink rm rmdir sha256sum sort; do
-    command -v "$c" >/dev/null 2>&1 || blocked runtime_tools_missing
-done
-uid=$(id -u)
+# Station guards shared with wake_pilot: data-parent trust, firmware/ABI pin, Quasar
+# identity, a loopback listener owned by maind and no other alice-mcp claim.
+GUARDS = r'''uid=$(id -u)
 trusted() {
     [ -d "$1" ] && [ ! -L "$1" ] || return 1
     set -- $(ls -ldn "$1")
@@ -109,7 +87,34 @@ done
 for c in "$DATA"/opt/alice-mcp-*-active /bkupgrade/data/opt/alice-mcp-vqe-audit-active; do
     [ ! -e "$c" ] && [ ! -L "$c" ] || blocked temporary_path_busy
 done
-OUT=$DATA/opt/alice-mcp-iochan-$nonce
+'''
+
+# Fixed helper; only validated port/channel/seconds/pins are passed as arguments.
+SCRIPT = r'''
+OWNER_UID=0
+LC_ALL=C; export LC_ALL
+umask 077
+exec 2>/dev/null
+mode=$1; nonce=$2; port=$3; channel=$4; seconds=$5; firmware=$6; helper_sha=$7; expected=$8
+preamble=$9
+blocked() { printf '{"outcome":"blocked","error_code":"%s"}\n' "$1"; exit 0; }
+[ "$(id -u)" = "$OWNER_UID" ] || blocked not_owner
+case "$nonce" in ''|*[!0-9a-f]*) blocked invalid_request;; esac
+[ "${#nonce}" = 32 ] || blocked invalid_request
+case "$port" in ''|0*|*[!0-9]*) blocked invalid_request;; esac
+[ "${#port}" -le 5 ] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || blocked invalid_request
+case "$channel" in main|vqe|raw) ;; *) blocked invalid_request;; esac
+case "$seconds" in [1-5]) ;; *) blocked invalid_request;; esac
+case "$preamble" in none|listen_only|full_envelope|hub_retrieve_state) ;;
+    *) blocked invalid_request;; esac
+for pin in "$firmware" "$helper_sha"; do
+    [ "${#pin}" = 64 ] || blocked invalid_request
+    case "$pin" in *[!0-9a-f]*) blocked invalid_request;; esac
+done
+for c in awk chmod cut grep id ls mkdir od pidof readlink rm rmdir sha256sum sort; do
+    command -v "$c" >/dev/null 2>&1 || blocked runtime_tools_missing
+done
+''' + GUARDS + r'''OUT=$DATA/opt/alice-mcp-iochan-$nonce
 CLAIM=$DATA/opt/alice-mcp-iochan-active
 [ ! -e "$OUT" ] && [ ! -L "$OUT" ] || blocked temporary_path_busy
 boot=$(sha256sum /proc/sys/kernel/random/boot_id | cut -d ' ' -f 1)
@@ -209,27 +214,32 @@ def _json(line: str) -> Any:
     return json.loads(line, object_pairs_hook=_unique)
 
 
-def preview(controller: Controller, station_id: str, item: Pilot) -> dict[str, Any]:
-    station = controller.station(station_id)
-    _permitted(controller, station)
-    item.validate()
-    ssh = _ssh(station)
-    raw = controller.runner(ssh, _request(station, item, "inspect"))
+def ready_state(raw: str, errors: frozenset[str] = PROFILE_ERRORS) -> str:
+    """The inspect stanza's state digest; a typed blocked code or any other shape refuses."""
     try:
         state = _json(raw) if len(raw) <= 1024 else None
     except (ValueError, TypeError):
         state = None
     if (type(state) is dict and set(state) == {"outcome", "error_code"}
-        and state["outcome"] == "blocked" and str(state["error_code"]) in PROFILE_ERRORS):
-        raise SafetyError("IO-channel pilot blocked: " + state["error_code"])
+        and state["outcome"] == "blocked" and str(state["error_code"]) in errors):
+        raise SafetyError("Pilot blocked: " + state["error_code"])
     if (type(state) is not dict or set(state) != {"outcome", "state_sha256"}
         or state["outcome"] != "ready" or type(state["state_sha256"]) is not str
         or not re.fullmatch("[a-f0-9]{64}", state["state_sha256"])):
-        raise SafetyError("IO-channel pilot state unavailable or incompatible; no transfer")
+        raise SafetyError("Pilot state unavailable or incompatible; no transfer")
+    return state["state_sha256"]
+
+
+def preview(controller: Controller, station_id: str, item: Pilot) -> dict[str, Any]:
+    station = controller.station(station_id)
+    _permitted(controller, station)
+    item.validate()
+    ssh = _ssh(station)
+    state = ready_state(controller.runner(ssh, _request(station, item, "inspect")))
     request = {"pilot": item.digest, "ssh_trust": ssh.trust_sha256}
-    digest = hashlib.sha256(repr((station, request, state["state_sha256"])).encode()).hexdigest()
+    digest = hashlib.sha256(repr((station, request, state)).encode()).hexdigest()
     plan_id = controller.store_plan(station, ACTION, digest, request=request,
-                                    remote_sha256=state["state_sha256"])
+                                    remote_sha256=state)
     return {"plan_id": plan_id, "expected_sha256": digest, "expires_in_seconds": 300,
             "audio_exported": False,
             "impact": f"Temporary pinned helper opens Quasar loopback port {item.port} for "
@@ -271,7 +281,8 @@ def _metadata(items: Any) -> None:
 def _helper(value: Any, preamble: str = "none") -> dict[str, Any]:
     flags = ("connected", "subscribe_sent", "unsubscribe_sent")
     counts = {"frames": 20000, "audio_frames": 20000, "other_frames": 20000,
-              "bytes": 64 * 1024 * 1024, "first_audio_ms": 10000, "elapsed_ms": 10000}
+              # The wake pilot streams up to 60 s; the window closes a few ms late.
+              "bytes": 64 * 1024 * 1024, "first_audio_ms": 10000, "elapsed_ms": 61000}
     channel = {"type": 1000, "sample_rate": 768000, "format": 64, "frames": 20000,
                "bytes": 64 * 1024 * 1024, "duration_ms": 10**9,
                "bytes_per_sample_estimate": 2**31, "peak_s16": 32768, "mean_square_s16": 2**30}

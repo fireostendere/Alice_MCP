@@ -216,6 +216,7 @@ class VoskRecognizer:
     def __init__(self, lib: ctypes.CDLL, model: int, rate: int,
                  log: list[dict[str, Any]] | None = None) -> None:
         self.lib, self.log = lib, log
+        self.words: list[tuple[str, float, float]] = []  # Of the latest result.
         self.handle = lib.vosk_recognizer_new(model, float(rate))
         if not self.handle:
             raise SafetyError("Vosk recognizer unavailable")
@@ -223,6 +224,8 @@ class VoskRecognizer:
 
     def _parse(self, raw: bytes) -> dict[str, Any]:
         data = json.loads(raw)
+        self.words = [(str(w["word"]), float(w["start"]), float(w["end"]))
+                      for w in data.get("result") or []]
         words = data.get("result") or [{"start": 0.0, "end": 0.0}]
         result = {"text": data.get("text", ""), "start": words[0]["start"],
                   "end": words[-1]["end"]}

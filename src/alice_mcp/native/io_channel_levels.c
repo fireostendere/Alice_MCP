@@ -7,6 +7,13 @@
  * this process. Wire facts: v3rt3p/quasar-protos @ 1044fbdfcd0c2d6d8a26681e31186d13fbb5aef6
  * yandex_io/protos/{quasar_proto,yandex_io}.proto; the 252/253 packed envelope is
  * the one asr_once.c uses. Which server answers is unverified (docs/IO_CHANNEL.md).
+ *
+ * --stream PORT SECONDS (1-60) is the wake pilot's source: the live-proven
+ * full_envelope request_vqe opening only, and every entry must be vqe_0, type 6,
+ * 16 kHz PCM with an even byte count, else it stops. Those data bytes go unchanged to
+ * stdout (a pipe to the on-station detector; a stall over 1 s stops the run) and the
+ * numbers-only report goes to stderr, without frame metadata, so it stays one
+ * atomic pipe write.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -57,6 +64,7 @@ static uint64_t total_bytes = 0;
 static int64_t started = 0, first_audio = -1;
 static const char *failure = "none";
 static volatile sig_atomic_t interrupted = 0;
+static bool streaming = false;
 static unsigned char buffer[FRAME_MAX];
 
 static void stop(int signum) { (void)signum; interrupted = 1; }
@@ -117,6 +125,8 @@ static bool get(Slice message, unsigned int wanted, unsigned int expected, Field
     return status == 0;
 }
 
+static bool write_all(int fd, const unsigned char *data, size_t size, int64_t deadline);
+
 static bool add_channel(Slice item) {
     Field type, name, data, rate, format, duration;
     if (!get(item, 1, 0, &type) || !get(item, 2, 2, &name) || !get(item, 3, 2, &data) ||
@@ -132,6 +142,11 @@ static bool add_channel(Slice item) {
     if (valid) {
         memcpy(label, name.bytes.data, name.bytes.size);
         label[name.bytes.size] = '\0';
+    }
+    if (streaming && (strcmp(label, "vqe_0") != 0 || type.number != 6 || rate.number != 16000 ||
+                      format.number != 1 || data.bytes.size % 2u)) {
+        failure = "format_changed";
+        return false;
     }
     Channel *slot = NULL;
     for (unsigned int i = 0; i < channel_count && !slot; ++i)
@@ -155,6 +170,10 @@ static bool add_channel(Slice item) {
         if (magnitude > slot->peak) slot->peak = magnitude;
         slot->squares += magnitude * magnitude;
         slot->samples++;
+    }
+    if (streaming && !write_all(STDOUT_FILENO, data.bytes.data, data.bytes.size, now_ms() + 1000)) {
+        failure = "output_error";
+        return false;
     }
     return true;
 }
@@ -391,7 +410,8 @@ static int report(const char *outcome, bool connected, bool subscribed, bool uns
     }
     put("]}\n");
     for (size_t offset = 0; offset < out_size;) {
-        ssize_t n = write(STDOUT_FILENO, json + offset, out_size - offset);
+        ssize_t n = write(streaming ? STDERR_FILENO : STDOUT_FILENO, json + offset,
+                          out_size - offset);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
         offset += (size_t)n;
@@ -420,17 +440,24 @@ static bool number(const char *text, unsigned int low, unsigned int high, unsign
 }
 
 int main(int argc, char **argv) {
-    unsigned int port, seconds, request;
-    int preamble = -1;
-    if (argc != 6 || strcmp(argv[1], "--levels") != 0 || !number(argv[2], 1024, 65535, &port) ||
-        !number(argv[4], 1, 5, &seconds)) goto usage;
-    if (strcmp(argv[3], "main") == 0) request = 1;
-    else if (strcmp(argv[3], "vqe") == 0) request = 3;
-    else if (strcmp(argv[3], "raw") == 0) request = 4;
-    else goto usage;
-    for (int i = 0; i < 4; ++i)
-        if (strcmp(argv[5], PREAMBLES[i]) == 0) preamble = i;
-    if (preamble < 0) goto usage;
+    unsigned int port, seconds, request = 3;
+    int preamble = FULL;
+    if (argc == 4 && strcmp(argv[1], "--stream") == 0) {
+        if (!number(argv[2], 1024, 65535, &port) || !number(argv[3], 1, 60, &seconds))
+            goto usage;
+        streaming = true;
+    } else {
+        preamble = -1;
+        if (argc != 6 || strcmp(argv[1], "--levels") != 0 ||
+            !number(argv[2], 1024, 65535, &port) || !number(argv[4], 1, 5, &seconds)) goto usage;
+        if (strcmp(argv[3], "main") == 0) request = 1;
+        else if (strcmp(argv[3], "vqe") == 0) request = 3;
+        else if (strcmp(argv[3], "raw") == 0) request = 4;
+        else goto usage;
+        for (int i = 0; i < 4; ++i)
+            if (strcmp(argv[5], PREAMBLES[i]) == 0) preamble = i;
+        if (preamble < 0) goto usage;
+    }
     started = now_ms();
     if (started < 0) { failure = "clock_error"; return report("blocked", false, false, false); }
     struct sigaction action = {0};
@@ -439,6 +466,11 @@ int main(int argc, char **argv) {
     if (sigaction(SIGINT, &action, NULL) || sigaction(SIGTERM, &action, NULL) ||
         sigaction(SIGHUP, &action, NULL) || signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
         failure = "signal_error";
+        return report("blocked", false, false, false);
+    }
+    int flags = streaming ? fcntl(STDOUT_FILENO, F_GETFL) : 0;
+    if (flags < 0 || (streaming && fcntl(STDOUT_FILENO, F_SETFL, flags | O_NONBLOCK) < 0)) {
+        failure = "output_error";
         return report("blocked", false, false, false);
     }
     int64_t window = started + (int64_t)seconds * 1000;
@@ -465,7 +497,7 @@ int main(int argc, char **argv) {
         frames++;
         total_bytes = total;
         int kind = observe((Slice){buffer, size});
-        if (kind != 1) describe((Slice){buffer, size});
+        if (kind != 1 && !streaming) describe((Slice){buffer, size});
         if (kind < 0) break;
         if (kind == 0) { other_frames++; continue; }
         if (first_audio < 0) first_audio = now_ms() - started;
@@ -492,7 +524,8 @@ int main(int argc, char **argv) {
 usage:
     {
         static const char text[] = "Usage: io-channel-levels --levels PORT main|vqe|raw "
-                                   "SECONDS none|listen_only|full_envelope|hub_retrieve_state\n";
+                                   "SECONDS none|listen_only|full_envelope|hub_retrieve_state\n"
+                                   "       io-channel-levels --stream PORT SECONDS\n";
         (void)!write(STDERR_FILENO, text, sizeof(text) - 1);
     }
     return 2;

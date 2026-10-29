@@ -79,7 +79,7 @@ CREDENTIAL = re.compile(
     r"(?P<value>\"[^\"\n]*\"|'[^'\n]*'|[^\s,;#}\]]+)"
 )
 PROVIDER = re.compile(
-    r"(?:sk-(?:proj-|ant-)?|gh[pousr]_|github_pat_|glpat-|"
+    r"(?<![A-Za-z0-9])(?:sk-(?:proj-|ant-)?|gh[pousr]_|github_pat_|glpat-|"
     r"xox[baprs]-|hf_|npm_|y0_|ya29\.|SG\.|(?:sk|rk)_(?:live|test)_)[a-zA-Z0-9_.-]{20,}"
     r"|(?:AKIA|ASIA)[A-Z0-9]{16}(?![\w])"
     r"|AIza[a-zA-Z0-9_-]{30,}"
@@ -137,7 +137,8 @@ def source_allowed(path: str) -> bool:
     if parts[:2] == ["src", "alice_mcp"] and len(parts) > 2:
         if path in {"src/alice_mcp/native/asr_once.c", "src/alice_mcp/native/vqe_audit.c",
                     "src/alice_mcp/native/pcm_player.c",
-                    "src/alice_mcp/native/io_channel_levels.c"}:
+                    "src/alice_mcp/native/io_channel_levels.c",
+                    "src/alice_mcp/native/mww/mww_detect.cc"}:
             return True  # Reviewed source only; native executables remain excluded.
         if parts[:4] == ["src", "alice_mcp", "native", "agent"] and len(parts) == 5:
             return parts[4] in {

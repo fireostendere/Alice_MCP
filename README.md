@@ -145,6 +145,7 @@ and the [runtime control contract](docs/CONTROLS.md).
 | `run_station_action(station_id, action, parameters)` | Preview and apply in one call: fresh one-use preview, then private preauthorization or one native approval form |
 | `get_capture_status(station_id, capture_id)` | Read fresh capture readiness, bounded LED records or one approved ASR text; never starts capture |
 | `start_job`, `list_jobs`, `cancel_job` | Owned host timers, declarative presets and a bounded generated-tone siren; cancel by owned ID; lost when this process exits ([jobs](docs/JOBS.md)) |
+| `voice_listen_start`, `voice_listen_stop`, `voice_status`, `get_voice_events` | Mini 1 wake word «компьютер» heard on this PC; each spoken command becomes an untrusted event for the opencode `alice` agent; audio stays in RAM ([voice commands](docs/IO_CHANNEL.md#step-6-voice-commands-in-the-mcp-and-opencode)) |
 
 ### Fewer approval prompts and bounded diagnostics
 

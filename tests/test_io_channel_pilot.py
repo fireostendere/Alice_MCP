@@ -198,6 +198,8 @@ def test_server_close_is_unknown_and_refused_connection_is_blocked(helper: Path)
     ["--levels", "09875", "vqe", "1", "none"], ["--listen", "9875", "vqe", "1", "none"],
     ["--levels", "9875", "vqe", "1"], ["--levels", "9875", "vqe", "1", "custom"],
     ["--levels", "9875", "vqe", "1", "none", "extra"],
+    ["--stream", "9850"], ["--stream", "9850", "0"], ["--stream", "9850", "61"],
+    ["--stream", "80", "5"], ["--stream", "9850", "5", "full_envelope"],
 ])
 def test_invalid_arguments_never_connect(helper: Path, args: list[str]) -> None:
     result = subprocess.run([str(helper), *args], capture_output=True, timeout=5)
@@ -263,6 +265,66 @@ def test_continuous_stream_is_bounded_by_the_window(helper: Path) -> None:
     server.close()
     assert result["elapsed_ms"] <= 2500 and result["audio_frames"] <= 2000
     assert code == 0 and result["outcome"] == "complete"
+
+
+# --stream: the wake pilot's PCM source.
+
+FULL_VQE = [field(159, field(3, b"")), field(159, field(6, b""))]
+
+
+def stream(helper: Path, port: int, stdout: Any = subprocess.PIPE) -> tuple[int, bytes, Any]:
+    result = subprocess.run([str(helper), "--stream", str(port), "1"], stdout=stdout,
+                            stderr=subprocess.PIPE, timeout=15)
+    lines = result.stderr.decode().splitlines()
+    assert len(lines) == 1 and SENTINEL not in result.stderr
+    return result.returncode, result.stdout or b"", json.loads(lines[0])
+
+
+def test_stream_pipes_vqe_pcm_unchanged_and_reports_numbers_on_stderr(helper: Path) -> None:
+    chunks = [[300, -300] * 128, [7, -32768] * 128, [1] * 256]
+    server = FakeIPC([audio(channel(6, b"vqe_0", c, duration=16), full_message=True)
+                      for c in chunks] + [frame(field(7, b"x-" + SENTINEL), 3)])
+    code, pcm, result = stream(helper, server.port)
+    assert server.close() == FULL_VQE  # Only the live-proven full_envelope request_vqe.
+    assert code == 0 and pcm == b"".join(struct.pack("<256h", *c) for c in chunks)
+    assert result["outcome"] == "complete" and result["error_code"] == "none"
+    assert result["other_frames"] == 1 and result["other"] == []  # No metadata in streams.
+    assert result["channels"][0]["name"] == "vqe_0" and result["channels"][0]["frames"] == 3
+    assert result["channels"][0]["peak_s16"] == 32768
+    assert result["audio_exported"] is False
+
+
+def odd(data: bytes) -> bytes:
+    return field(1, 6) + field(2, b"vqe_0") + field(3, data) + field(7, 16000) + field(8, 1)
+
+
+@pytest.mark.parametrize("bad", [
+    channel(6, b"raw_mic_0", [1, 2]), channel(7, b"vqe_0", [1, 2]),
+    channel(6, b"vqe_0", [1, 2], rate=48000), odd(b"\x01\x02\x03"),
+])
+def test_stream_stops_on_any_format_change(helper: Path, bad: bytes) -> None:
+    good = [5, -5] * 128
+    server = FakeIPC([audio(channel(6, b"vqe_0", good), full_message=True),
+                      audio(bad, full_message=True),
+                      audio(channel(6, b"vqe_0", good), full_message=True)])
+    code, pcm, result = stream(helper, server.port)
+    assert server.close() == FULL_VQE
+    assert code == 1 and pcm == struct.pack("<256h", *good)
+    assert result["outcome"] == "unknown" and result["error_code"] == "format_changed"
+    assert result["unsubscribe_sent"] is True
+
+
+def test_stream_stops_when_the_detector_pipe_closes(helper: Path) -> None:
+    server = FakeIPC([audio(channel(6, b"vqe_0", [9] * 256), full_message=True)] * 4)
+    read, write = os.pipe()
+    os.close(read)
+    try:
+        code, _, result = stream(helper, server.port, stdout=write)
+    finally:
+        os.close(write)
+    assert server.close() == FULL_VQE
+    assert code == 1 and result["error_code"] == "output_error"
+    assert result["outcome"] == "unknown" and result["unsubscribe_sent"] is True
 
 
 # Host wrapper and fixed on-device shell script.
@@ -508,7 +570,7 @@ def test_apply_uncertainty_is_never_retried(tmp_path: Path, monkeypatch: Any) ->
 
 
 def test_pinned_helper_size_fits_the_bounded_ssh_input(monkeypatch: Any, tmp_path: Path) -> None:
-    helper = b"\0" * 19128  # Size of the pinned ARM32 build (docs/IO_CHANNEL.md).
+    helper = b"\0" * 19664  # Size of the pinned ARM32 build (docs/IO_CHANNEL.md).
     monkeypatch.setattr(pilot, "HELPER_SHA256", hashlib.sha256(helper).hexdigest())
     request = pilot._request(station(tmp_path), pilot.Pilot(9875, "vqe", 5, helper), "apply",
                              "e" * 64)

@@ -146,7 +146,11 @@ def _command(station: Station, item: Candidate, expected: str = "") -> _Transfer
                      item.player + item.audio if expected else b"")
 
 
-def _transfer(station: Station, request: _Transfer) -> str:
+def _transfer(station: Station, request: _Transfer, *, limit: int = 4096) -> str:
+    return _transfer_bytes(station, request, limit=limit).decode("utf-8", errors="strict")
+
+
+def _transfer_bytes(station: Station, request: _Transfer, *, limit: int) -> bytes:
     """Bounded binary stdin over existing pinned SSH; no bootstrap result-contract reuse."""
     if len(request.data) > MAX_TRANSFER or len(request.command.encode()) > 20000:
         raise SafetyError("Local PCM transfer exceeds reviewed bounds")
@@ -165,9 +169,9 @@ def _transfer(station: Station, request: _Transfer) -> str:
                 failed.append(True)
 
         def read() -> None:
-            body = source.read(4097)
+            body = source.read(limit + 1)
             output.append(body)
-            if len(body) > 4096:
+            if len(body) > limit:
                 process.kill()
 
         writer = threading.Thread(target=write, daemon=True)
@@ -184,9 +188,9 @@ def _transfer(station: Station, request: _Transfer) -> str:
             writer.join(timeout=2)
             reader.join(timeout=2)
         if (status or failed or writer.is_alive() or reader.is_alive() or not output
-            or len(output[0]) > 4096):
+            or len(output[0]) > limit):
             raise SafetyError("Local PCM transfer uncertain; do not retry")
-        return output[0].decode("utf-8", errors="strict")
+        return output[0]
 
 
 def preview(controller: Controller, station_id: str, item: Candidate) -> dict[str, Any]:

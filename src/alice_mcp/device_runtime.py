@@ -172,7 +172,7 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
         _require(_keys(policy, {"firmware_sha256"},
                        {"allowed_actions", "max_volume", "allow_rootfs_remount", "media",
                         "configs", "speech_client", "tts_client", "local_tts", "local_media",
-                        "led_map", "preauthorized_actions"}))
+                        "led_map", "preauthorized_actions", "voice"}))
         _require(_match(HEX64, policy["firmware_sha256"]))
         actions = policy.get("allowed_actions", ALL)
         _require(actions == ALL or type(actions) is list and len(actions) <= len(ACTIONS)
@@ -196,6 +196,19 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
             result["preauthorized_actions"] = sorted(preauthorized)
         if "led_map" in policy:
             result["led_map"] = validate_led_map(model, policy["led_map"])
+        if "voice" in policy:
+            # Host-side artifact paths for voice_service; their pins live in code.
+            voice = {"mww_model": "ft", "mode": "either", "autostart": False,
+                     **policy["voice"]}
+            _require(model == "station-mini"
+                     and _keys(voice, {"client", "mww", "libvosk", "vosk_zip", "mww_model",
+                                       "mode", "autostart"})
+                     and all(_safe_path(voice[k]) for k in ("client", "mww", "libvosk",
+                                                            "vosk_zip"))
+                     and voice["mww_model"] in ("ft", "old")
+                     and voice["mode"] in ("vosk", "mww", "either", "both")
+                     and type(voice["autostart"]) is bool)
+            result["voice"] = voice
         if "local_tts" in policy:
             local = policy["local_tts"]
             _require(model == "station-mini"

@@ -30,9 +30,10 @@ def search_knowledge(query: str = "", limit: int = 10) -> dict[str, Any]:
 
 
 def get_knowledge(page_id: str) -> dict[str, Any]:
-    for page in catalog()["pages"]:
+    data = catalog()
+    for page in data["pages"]:
         if page["id"] == page_id:
-            return {"evidence_class": "document", "page": page, "upstream": catalog()["upstream"]}
+            return {"evidence_class": "document", "page": page, "upstream": data["upstream"]}
     raise SafetyError("Unknown source page")
 
 
@@ -45,9 +46,10 @@ def skill_root() -> Path:
 
 def list_skills() -> dict[str, Any]:
     skills = []
+    pages = catalog()["pages"]
     for path in sorted(skill_root().glob("*/SKILL.md")):
-        pages = [page["id"] for page in catalog()["pages"] if path.parent.name in page["skills"]]
-        skills.append({"name": path.parent.name, "source_pages": pages})
+        source_pages = [page["id"] for page in pages if path.parent.name in page["skills"]]
+        skills.append({"name": path.parent.name, "source_pages": source_pages})
     return {"evidence_class": "document", "skills": skills}
 
 

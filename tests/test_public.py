@@ -95,6 +95,19 @@ def test_python_dynamic_credentials_are_not_literals() -> None:
     assert scan_text("src/alice_mcp/example.py", "password: str") == []
 
 
+def test_python_slices_are_not_ipv6_but_addresses_in_strings_comments_and_bad_code_are() -> None:
+    address = ":".join(("1", "", "2"))
+    source = f"result = frames[{address}]\n"
+    assert scan_text("tests/example.py", source) == []
+    assert scan_text("tests/example.py", f"я = frames[{address}]\n") == []
+    assert scan_text("tests/example.py", "result = frames[" + ":" * 2 + "2]\n") == []
+    for text in (f'value = "{address}"', f'# {address}',
+                 f'value = frames["{address}":]', 'value = "https' + f'://[{address}]/"',
+                 source + "invalid ("):
+        assert "ip-address" in {item.rule for item in scan_text("tests/example.py", text)}
+    assert "ip-address" in {item.rule for item in scan_text("README.md", source)}
+
+
 def test_placeholder_prefix_does_not_exempt_arbitrary_credential() -> None:
     value = 'pass' + 'word = "test-' + noise() + '"'
     assert "credential-assignment" in {item.rule for item in scan_text("README.md", value)}
@@ -108,6 +121,17 @@ def test_placeholder_prefix_does_not_exempt_arbitrary_credential() -> None:
         "pyproject.toml",
         ".gitignore",
         "src/alice_mcp/server.py",
+        "src/alice_mcp/native/asr_once.c",
+        "src/alice_mcp/native/vqe_audit.c",
+        "src/alice_mcp/native/pcm_player.c",
+        "src/alice_mcp/native/agent/go.mod",
+        "src/alice_mcp/native/agent/main.go",
+        "src/alice_mcp/native/agent/mcp.go",
+        "src/alice_mcp/native/agent/runtime.go",
+        "src/alice_mcp/native/agent/speech.go",
+        "src/alice_mcp/native/agent/pcm.go",
+        "src/alice_mcp/native/agent/mcp_test.go",
+        "src/alice_mcp/native/agent/runtime_test.go",
         "src/alice_mcp/data/sources.json",
         "src/alice_mcp/skills/read-only/SKILL.md",
         "src/alice_mcp/data/skills/read-only/SKILL.md",
@@ -141,6 +165,10 @@ def test_explicit_source_allowlist(path: str) -> None:
         "extra.md",
         "src/unrelated/file.py",
         "src/alice_mcp/readme.md",
+        "src/alice_mcp/native/other.c",
+        "src/alice_mcp/native/asr-once-armhf",
+        "src/alice_mcp/native/agent/agent",
+        "src/alice_mcp/native/agent/unreviewed.go",
         ".github/workflows/nested/ci.yml",
         "../README.md",
         "/README.md",

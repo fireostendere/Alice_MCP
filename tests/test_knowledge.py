@@ -4,6 +4,25 @@ from alice_mcp import knowledge
 from alice_mcp.core import SafetyError
 
 
+def test_listing_skills_reads_the_catalog_once(monkeypatch) -> None:
+    from unittest.mock import Mock
+
+    catalog = Mock(wraps=knowledge.catalog)
+    monkeypatch.setattr(knowledge, "catalog", catalog)
+    assert knowledge.list_skills()["skills"]
+    catalog.assert_called_once_with()
+
+
+def test_getting_a_page_reads_the_catalog_once(monkeypatch) -> None:
+    from unittest.mock import Mock
+
+    data = knowledge.catalog()
+    catalog = Mock(return_value=data)
+    monkeypatch.setattr(knowledge, "catalog", catalog)
+    assert knowledge.get_knowledge(data["pages"][0]["id"])["upstream"] == data["upstream"]
+    catalog.assert_called_once_with()
+
+
 def test_catalog_search_and_skill_references() -> None:
     result = knowledge.search_knowledge("", 50)
     assert result["total"] == len(knowledge.catalog()["pages"])

@@ -19,9 +19,10 @@ python -m venv .venv
 .venv/bin/alice-mcp
 ```
 
-The server uses **stdio only**, makes no outbound connection at startup, and
+The host router uses **stdio**, makes no outbound connection at startup, and
 works as an offline knowledge/skills server without any station configuration.
-There is no telemetry, discovery, cloud API, HTTP listener or arbitrary shell.
+There is no telemetry, discovery or arbitrary shell. The optional resident agent
+has a separately authenticated TLS listener; see [native transport](docs/NATIVE_AGENT.md).
 Do not launch it manually in a terminal expecting a chat interface: configure
 your MCP client to start it.
 
@@ -44,14 +45,28 @@ path. Keep the private inventory environment variable outside tracked files.
         }
       }
     }
-  }
+  },
+  "permissions": [
+    {"action": "alice_*", "resource": "*", "effect": "allow"}
+  ]
 }
 ```
 
+The [OpenCode V2 MCP configuration](https://opencode.ai/v2/docs/mcp-servers/) puts the
+server name under `mcp.servers`. Its [permission rules](https://opencode.ai/v2/docs/permissions/)
+can allow `alice_*` calls without a client-side question. This scoped rule leaves
+the server's private policy, previews and required native confirmations in force.
+Merge it with existing rules; a later matching rule can override it.
+Use one `alice` connection for knowledge, LEDs, speech and other supported actions;
+these are features of the same server, not separate MCP connections. `alice_*`
+matches all its tools; feature-specific permission patterns can miss other tools.
+Client tool permission and the server's native action approval are separate layers.
+
 For another stdio MCP client, use the same executable as `command` with no
 arguments and supply the environment through that client's private settings.
-Clients without native **form elicitation** can use read-only tools, but
-cannot execute service or device actions. A model-provided `approve=true` is not accepted
+Clients without native **form elicitation** can use read-only tools and explicitly
+preauthorized actions; other device and service actions require
+elicitation. A model-provided `approve=true` is not accepted
 as a tool argument or a substitute for a human response.
 
 ### Private inventory (optional)
@@ -84,6 +99,10 @@ also expose declared action, asset, binding and option aliases, not their privat
 paths or values. Choose nonsensitive aliases. The model is operator input, not
 hardware identification. Use a dedicated key
 and independently verify/pin the device host key in the private hosts file.
+If that file pins a logical name instead of the endpoint, set the optional
+`host_key_alias` field to that exact name (OpenSSH `HostKeyAlias`). Only literal
+names of 1–253 ASCII letters, digits, dots, underscores and hyphens are accepted,
+starting with a letter or digit; no patterns or SSH expansion tokens are allowed.
 On POSIX, the SSH files and their ancestors must be owned by the current user or
 root, without group/world write access (trusted sticky temporary directories
 are permitted). SSH files/ancestors cannot be symlinks; the private identity
@@ -94,7 +113,16 @@ before using station tools; the wiki's empty-password setup is **not** sufficien
 
 ## Tools and safety boundary
 
-The server exposes **13 tools**. See the generated [MCP contract](docs/TOOLS.md)
+The experimental [`speech.listen` action](docs/SPEECH_CLIENT.md) can temporarily
+transfer and run one exact reviewed ASR client on Mini 1 with private opt-in,
+firmware/state-bound preview and native approval. It returns one new final text,
+not audio. A build or successful transfer is not a readiness signal.
+`speech.say` adds literal-text native TTS with a separately pinned ARM32 client.
+One corrected Mini 3 pilot has owner-confirmed audible output; native completion
+events remain unverified, and Mini 1 TTS acceptance is pending. Host tests and an
+ARM build alone do not prove sound. See [speech clients](docs/SPEECH_CLIENT.md).
+
+The server exposes **16 tools**. See the generated [MCP contract](docs/TOOLS.md)
 and the [runtime control contract](docs/CONTROLS.md).
 
 | Tools | Behavior |
@@ -102,13 +130,62 @@ and the [runtime control contract](docs/CONTROLS.md).
 | `get_capabilities`, `list_stations` | Local capability/alias inventory; no station traffic |
 | `search_knowledge`, `get_knowledge` | Original summaries, compatibility/risk metadata, source links |
 | `list_skills`, `read_skill` | Bundled skills and references; not arbitrary local file access |
-| `station_probe` | Fixed `health`, `storage`, `services`, `audio`, `reboot`, `logs` probes |
+| `station_status` | Every station at once: online flag, read-only `health` metrics, writes and private-policy summary |
+| `station_probe` | Fixed `health`, `storage`, `services`, `audio`, `reboot`, `logs`, `led`, `i2c_trace`, `network` probes |
 | `preview_service_action` | Read state and create a five-minute one-use preview |
 | `apply_service_action` | Native human approval, fresh-state validation, Quasar `start`/`restart`, post-check |
 | `get_model_interfaces(model)` | Local source-linked LED/audio/GPIO facts and explicit unknowns; no station access |
 | `get_station_controls(station_id)` | Declared private-policy action/asset/option aliases; not verified hardware availability |
 | `preview_station_action(station_id, action, parameters)` | Read-only runtime inspection and a 300-second one-use device preview |
-| `apply_station_action(plan_id, expected_sha256)` | Native human approval, fresh-state validation, bounded device action, post-check |
+| `apply_station_action(plan_id, expected_sha256)` | Private preauthorization or native human approval, fresh-state validation, bounded device action, post-check |
+| `run_station_action(station_id, action, parameters)` | Preview and apply in one call: fresh one-use preview, then private preauthorization or one native approval form |
+| `get_capture_status(station_id, capture_id)` | Read fresh capture readiness, bounded LED records or one approved ASR text; never starts capture |
+
+### Fewer approval prompts and bounded diagnostics
+
+Within an owner-authorized task, the agent can inspect capabilities, run read-only
+diagnostics and prepare previews without asking again. Apply presents the native
+confirmation itself; a separate chat confirmation is unnecessary. Client-side
+permission dialogs are controlled by the client, not by MCP tool annotations.
+
+To delegate simple actions, add `"preauthorized_actions": ["led.effect", "audio.volume",
+"audio.play"]` to that station's private `controls` object, choosing only the
+actions you want to delegate. Each must also be in `allowed_actions`; global write
+opt-in and reviewed firmware are still required. This allows supported bounded
+LED effects, volume within the private ceiling and short playback of registered
+assets without native elicitation. The setting persists until removed from the
+private inventory. Keep its media and volume choices suitable for unattended use.
+`get_station_controls` reports this list and each device preview reports
+`approval_required`. Default policy still requires native approval for every write.
+
+To delegate **all already-permitted actions**, set `"preauthorize_all_actions": true`
+on the private **station entry**, alongside `controls` (not inside it). Default is
+`false`. This skips native forms for service start/restart and all device actions,
+including capture, arbitrary-text TTS and persistent edits, within authorized tasks.
+It persists until removed or set to `false`; choose it only for a trusted local agent.
+It does not enable writes, add allowed actions/assets/options, authorize unrelated
+tasks, or implement unsupported operations. Revocation invalidates outstanding previews.
+Every apply still consumes its state-bound preview once within 300 seconds,
+rechecks live policy/trust/state and never retries uncertain writes. The server
+does not edit private inventory or enable writes on the owner's behalf.
+
+Native-agent writes additionally require the state-bound contract described in
+[NATIVE_AGENT.md](docs/NATIVE_AGENT.md). Older resident builds remain readable but
+cannot bypass one-use previews; writes fail closed until a separately guarded
+upgrade. Source changes do not update an installed station automatically.
+
+Read-only probes use at most two concurrent transports per server. No polling runs
+in the background. Reuse results within a task; when checking a running capture,
+wait at least two seconds between status calls and stop after completion or an
+uncertain result. This bounds diagnostic bursts, but does not establish the cause
+of an OpenCode UI freeze or profile the client's terminal.
+
+An OpenCode confirmation form remains unusable if navigation or submission fails,
+even when Esc responds. Terminal redraw is not a verified fix: the freeze can
+recur. Testing a `mini` demo does not establish main-TUI compatibility; verify
+the actual MCP form and received answer. The cause remains under investigation.
+A cancelled or expired preview needs a new preview, and uncertain writes must
+never be retried automatically.
 
 Log inspection returns only error/warning line counts from a bounded sample of
 `maind.log`; raw log text is never sent to the host. These are heuristics, not a
@@ -117,6 +194,42 @@ enabled/disabled (roles may run as `maind`). Audio reports only device-directory
 presence; it is not an audio or microphone test. Kernel architecture does not
 establish userspace ABI. Missing or incompatible fields fail closed or report
 `unknown`. Buildroot probes may be unavailable on Android/JBL devices.
+
+`station_probe(station_id, probe="led")` checks fixed device-node and library
+paths, LED-class entries, the driver links at `0-003c` and `1-001f`, and whether
+`maind` is running. It returns booleans and allowlisted driver names only. It does
+not open LED devices, scan I2C, read registers, load libraries, inspect private
+logs, stop Quasar, or change files. A false flag means the check did not observe
+the object, not proof of absence under all permission/firmware conditions. Node
+or library presence establishes neither a usable control protocol nor library
+ABI or RGB order. Arbitrary Mini 1 RGB control remains unsupported; `led.replay`
+only repeats a recorded update, while `led.pulse` and `led.animate` are bounded
+low-brightness tests requiring recent captured idle evidence and owner confirmation.
+This probe has offline
+synthetic coverage only; restart the MCP process to load a newly added probe.
+
+`station_probe(station_id, probe="i2c_trace")` inspects the two standard tracefs/
+debugfs locations for I2C event metadata, write-payload format, instance/control
+permissions and the current tracing-on flag. Only booleans leave the station.
+It never mounts filesystems, enables events, reads trace buffers, changes the
+tracer, attaches to processes or issues I2C requests. False flags can mean an
+unmounted/inaccessible interface, not necessarily a kernel without tracing.
+Availability is not proof that LED traffic reaches these tracepoints. The separate
+`led.capture` action requires private opt-in, reviewed firmware, a fresh preview
+and native human approval. It uses only its own trace instance for 5–60 seconds,
+then stops and removes that instance. Global tracing is never changed. Check a
+fresh `get_capture_status` response: only `capture_ready=true` means the filtered
+capture is currently running, not merely that tracepoints exist. Discovery and
+capture have synthetic coverage only; real station compatibility is unverified.
+
+The passive `network` probe reports Wi-Fi interface/carrier and IPv4 default-route
+counts, process-presence flags, and on-device classification of at most the last
+400 kernel-log lines / 64 KiB. Only counts and boot-relative event seconds leave
+the station, never SSIDs, addresses, interface names or raw logs. It sends no
+packets, changes no network or power setting and does not clear the kernel log.
+Missing markers are not proof that no disconnect, suspend or driver fault happened;
+the bounded ring-buffer window and keyword classification cannot establish cause
+alone. Process absence does not establish a DHCP or association failure.
 
 ### Service actions
 
@@ -141,20 +254,51 @@ is a separate, explicit service action, never an implied configuration reload.
 
 ### Experimental device actions
 
-The runtime implements `led.effect`, `audio.volume`, `audio.play`, `media.upload`,
+The runtime implements `led.effect`, `led.capture`, `led.replay`, `led.pulse`, `led.animate`,
+`speech.listen`, `speech.say`,
+`audio.volume`, `audio.play`, `media.upload`,
 `sound.replace`, `config.select`, and narrow backup-record `restore`.
 They require `ALICE_MCP_ALLOW_WRITES=1`, a private per-station `controls` policy
 allowing the action, and a locally reviewed SHA-256 of
 `/system/vendor/quasar/maind`. This digest binds the reviewed firmware, not a
-universal model profile. The fixed bundled helper runs over the same pinned,
-key-only SSH transport using **preinstalled Python 3.8+**; it does not install
-Python, root the station or use ADB. Native Windows device writes are unavailable.
+universal model profile. Helpers use the same pinned, key-only SSH transport.
+Mini 3 `led.effect` uses stock shell, `dd`, `base64`, `flock` and core utilities,
+not device Python. It checks the Bergamot identity, exact geometry and firmware,
+then restores and reads back the captured 18 bytes; physical visibility is not verified.
+`led.capture` uses the preinstalled shell, `flock`, `setsid` and core utilities;
+it requires neither Python nor `stat`/`timeout`. Mini 1 replay/pulse/animate use that
+shell helper plus preinstalled `i2cset`. Pulse uses one second at fixed PWM 16/255,
+then the observed idle zero frame; current state and restoration cannot be read back.
+Other actions use Python 3.8+.
+No helper installs packages, roots the station or uses ADB. Native
+Windows device writes are unavailable.
+Bundled helper source is sent through bounded SSH stdin, keeping the SSH exec
+request short; this is not a user-supplied shell/script interface.
+
+Mini 1 `led.animate` provides only these fixed, dim presets (PWM at most 16/255):
+
+| `mode` | Nominal show |
+|---|---|
+| `blink` | Six logical colors, each 0.5 s on / 0.5 s idle; 6 s total. |
+| `rainbow` | Six colors across six logical zones, held for 3 s. |
+| `rainbow_swirl` | Twelve half-second steps of the logical six-zone palette; 6 s total. |
+
+Example parameters: `{"capture_id": "<opaque completed capture id>", "mode": "rainbow"}`.
+Mode aliases appear in `get_station_controls().led_modes`, not as permissions.
+Each show needs a fresh preview and native approval unless explicitly preauthorized;
+the ring must be idle/dark. Same-boot,
+same-firmware idle evidence must be no older than 30 minutes. It returns to that
+observed idle frame, without hardware readback. RGB order, physical zone order
+and swirl direction are not calibrated. These presets have synthetic coverage,
+not verified visual playback. No show daemon, autostart or firmware-voice command
+is installed; operator chat requests are routed through the existing MCP action.
 
 Device actions reuse the service controller's one-use preview/approval registry,
 trust/configuration binding, fresh-state checks and serialized execution. A
 preview performs no device writes; it still requires the action's policy gates.
-Apply requires the exact returned `plan_id` and `expected_sha256` plus native
-human elicitation within 300 seconds. Cancellation also consumes the preview.
+Apply requires the exact returned `plan_id` and `expected_sha256` within 300 seconds,
+plus native human elicitation unless that bounded action is privately preauthorized.
+Cancellation also consumes the preview.
 Private policy lists are declarations, not proof that a driver, mixer or backend
 is present. Unknown drivers/formats or mismatched firmware fail closed.
 

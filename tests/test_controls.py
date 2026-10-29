@@ -1,5 +1,6 @@
 """Host control orchestration; all station responses are synthetic."""
 
+import asyncio
 import base64
 import copy
 import hashlib
@@ -7,12 +8,13 @@ import json
 import shlex
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
-from alice_mcp import controls
+from alice_mcp import controls, server
 from alice_mcp.controls import invoke as real_invoke
-from alice_mcp.core import Controller, SafetyError
+from alice_mcp.core import Controller, SafetyError, SSHInput
 
 
 @pytest.fixture
@@ -58,6 +60,94 @@ def test_preview_and_apply_share_single_use_registry(device: Any) -> None:
     assert calls[-1]["expected_sha256"] == "b" * 64
     with pytest.raises(SafetyError):
         controller.apply_service(plan["plan_id"], plan["expected_sha256"])
+
+
+@pytest.mark.parametrize("change", ["none", "revoke", "expire", "state", "disabled", "unknown"])
+@pytest.mark.parametrize("delegation", ["bounded", "all"])
+def test_preauthorized_action_keeps_one_use_and_live_checks(device: Any, monkeypatch: Any,
+                                                          change: str, delegation: str) -> None:
+    controller, calls = device
+    data = json.loads(controller.inventory.read_text())
+    if delegation == "all":
+        data["stations"][0]["preauthorize_all_actions"] = True
+        action, params = "config.select", {"binding": "speech", "option": "local"}
+        expected_actions = ["config.select", "led.effect"]
+    else:
+        data["stations"][0]["controls"]["preauthorized_actions"] = ["led.effect"]
+        action = "led.effect"
+        params = {"red": 0, "green": 8, "blue": 0, "count": 1, "period_ms": 500}
+        expected_actions = ["led.effect"]
+    controller.inventory.write_text(json.dumps(data))
+    monkeypatch.setattr(server, "controller", controller)
+    assert controls.capabilities(controller, "desk")["preauthorized_actions"] == expected_actions
+    plan = controls.preview(controller, "desk", action, params)
+    assert plan["approval_required"] is False
+    assert [r["mode"] for r in calls] == ["inspect"]
+    if change == "revoke":
+        if delegation == "all":
+            data["stations"][0]["preauthorize_all_actions"] = False
+        else:
+            data["stations"][0]["controls"]["preauthorized_actions"] = []
+        controller.inventory.write_text(json.dumps(data))
+    elif change == "expire":
+        monkeypatch.setattr(controller, "clock", lambda: float("inf"))
+    elif change == "disabled":
+        controller.writes = False
+    elif change in {"state", "unknown"}:
+        original = controls.invoke
+
+        def invoke(*args: Any) -> dict[str, Any]:
+            result = original(*args)
+            if change == "state":
+                result["state_sha256"] = "d" * 64
+            elif args[2]["mode"] == "apply":
+                raise SafetyError("SENSITIVE_SENTINEL")
+            return result
+
+        monkeypatch.setattr(controls, "invoke", invoke)
+    context = AsyncMock()
+    result = asyncio.run(server.apply_station_action(plan["plan_id"], plan["expected_sha256"],
+                                                     context))
+    context.elicit.assert_not_called()
+    assert "SENSITIVE_SENTINEL" not in str(result)
+    if change in {"none", "unknown"}:
+        assert result["outcome"] == ("applied" if change == "none" else "unknown")
+        assert result["do_not_retry"] is True
+        assert calls[-1]["params"] == params
+        assert [r["mode"] for r in calls] == ["inspect", "inspect", "apply"]
+    else:
+        assert result["outcome"] == "blocked"
+        assert all(r["mode"] == "inspect" for r in calls)
+    again = asyncio.run(server.apply_station_action(plan["plan_id"], plan["expected_sha256"],
+                                                    context))
+    assert again["outcome"] == "blocked"
+
+
+def test_default_policy_still_requires_native_approval(device: Any, monkeypatch: Any) -> None:
+    controller, calls = device
+    monkeypatch.setattr(server, "controller", controller)
+    assert controls.capabilities(controller, "desk")["preauthorized_actions"] == []
+    plan = controls.preview(controller, "desk", "led.effect", {
+        "red": 0, "green": 8, "blue": 0, "count": 1, "period_ms": 500,
+    })
+    assert plan["approval_required"] is True
+    context = AsyncMock()
+    context.elicit.side_effect = RuntimeError("Native elicitation unavailable")
+    result = asyncio.run(server.apply_station_action(plan["plan_id"], plan["expected_sha256"],
+                                                     context))
+    assert result["outcome"] == "blocked"
+    context.elicit.assert_called_once()
+    assert [r["mode"] for r in calls] == ["inspect"]
+
+
+def test_all_action_preauthorization_does_not_enable_forbidden_actions(device: Any) -> None:
+    controller, calls = device
+    data = json.loads(controller.inventory.read_text())
+    data["stations"][0]["preauthorize_all_actions"] = True
+    controller.inventory.write_text(json.dumps(data))
+    with pytest.raises(SafetyError, match="not permitted"):
+        controls.preview(controller, "desk", "audio.volume", {"percent": 10})
+    assert not calls
 
 
 def test_private_config_values_never_appear_in_inventory_or_preview(device: Any) -> None:
@@ -171,8 +261,9 @@ def test_host_and_deployed_helper_roundtrip_without_a_device(device: Any, tmp_pa
     controller.inventory.write_text(json.dumps(data))
     observed = []
 
-    def transport(station: Any, command: str) -> str:
-        tokens = list(shlex.shlex(command, posix=True, punctuation_chars=True))
+    def transport(station: Any, command: str | SSHInput) -> str:
+        source = command.data.decode() if isinstance(command, SSHInput) else command
+        tokens = list(shlex.shlex(source, posix=True, punctuation_chars=True))
         index = tokens.index("-c")
         assert tokens[index + 1] == Path(device_runtime.__file__).read_text()
         request = json.loads(base64.b64decode(tokens[index + 2]))

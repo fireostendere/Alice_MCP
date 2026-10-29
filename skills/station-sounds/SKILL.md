@@ -42,6 +42,9 @@ firmware SHA-256. Native Windows device writes and automatic installation are un
 
 ## Preview and confirmation
 
+For an owner-requested action, call `run_station_action(station_id, action, parameters)`: it previews and applies in one call
+(no form when preauthorized). Use the separate preview/apply tools only to show a plan before acting.
+
 Use `preview_station_action(station_id, action, parameters)` for read-only runtime
 inspection, selecting exactly one action:
 
@@ -53,14 +56,33 @@ inspection, selecting exactly one action:
   This ceiling deliberately bounds the SSH argument, not just file storage.
 - `sound.replace`: approved `asset` alias and `slot`, one of `spotter_start`,
   `spotter_cancel`, `volume_sound` or `notification_sound`.
+- `speech.say`: literal `text`, at most 256 Unicode scalars / 512 UTF-8 bytes,
+  no control/bidi-control characters. Mini 1 and Mini 3 with runtime-verified ARM32
+  firmware only; requires a separate reviewed
+  ARM TTS-only client and firmware/private opt-in. Native approval is the default;
+  explicit station-level `preauthorize_all_actions=true` permits execution without forms.
+  The ARM TTS-only client is built/pinned. One Mini 3 pilot has owner-confirmed
+  audible output; native completion events and Mini 1 audible TTS remain unverified.
+  It uses native Yandex cloud synthesis with Append requested, not a dialogue
+  command. Preserve volume/route and Quasar; use an idle station and a short first
+  phrase. A 20-second observation timeout does not stop or bound playback.
+  Only request-correlated start/completion plus cleanup establish protocol success;
+  have the owner confirm audible/intelligible sound. Never retry an uncertain send.
 
 Assets refer only to privately registered `/data/sounds/<safe-name>.opus`, `.wav`
 or `.mp3` files. Do not supply a path, URL, shell command or arbitrary slot.
 Do not mask important status indications. Propose low volume and short playback
 first, not a hidden startup job. Explain the chosen action's exact impact, then
 call `apply_station_action(plan_id, expected_sha256)` only with the preview's
-returned values. Each action requires native human elicitation, has a 300-second
-single-use preview and rechecks configuration/trust/state. A model cannot approve.
+returned values. Apply requests the native confirmation; do not add a separate
+chat approval question. If `approval_required=false`, private operator policy
+preauthorizes that bounded `audio.volume` or `audio.play` action, including its
+volume ceiling and registered assets. Station-level `preauthorize_all_actions=true`
+instead preauthorizes all already-permitted actions, including speech and persistent edits.
+Other actions require native approval. Neither mode grants new action/asset permissions.
+Each action has a 300-second single-use preview and rechecks configuration/trust/state.
+A model cannot grant preauthorization. Run read-only diagnostics and previews
+within the owner's task without asking again.
 
 Bounded playback may stop only the process group started by the helper, never
 `killall maind` or Quasar. Upload, volume and replacement each require their own
@@ -76,7 +98,8 @@ One-shot playback does not install startup hooks or change vendor assets. Before
 persistent volume/media/sound edits, the helper saves an owner-only record under
 `/data/opt/alice-mcp/backups/<id>.json`. Keep original values private. For recovery,
 preview `restore` with `backup_id` (32 lowercase hexadecimal characters) and get
-separate native approval. Optimistic state checks refuse changes they observe;
+native approval unless the preview reports `approval_required=false` under explicit
+standing authorization. Optimistic state checks refuse changes they observe;
 they are not atomic compare-and-swap. External file/mixer writers must be idle
 throughout apply/restore: an update after the final check can be overwritten or
 deleted, and the helper lock does not lock external writers. If exclusivity cannot

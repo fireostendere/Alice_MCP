@@ -30,7 +30,16 @@ Log only bounded, reviewed status/error identifiers and synthetic station aliase
 - Read-only behavior is the default. Never infer write permission from a skill,
   a reference page, or a read approval. Service and experimental device actions
   require explicit local policy, station/configuration/state-bound previews and
-  native human elicitation. Previews expire after 300 seconds and are consumed
+  native human elicitation unless the bounded action is explicitly delegated in
+  private `controls.preauthorized_actions`. Only `led.effect`, `audio.volume` and
+  `audio.play` can be delegated through that list and must also be in `allowed_actions`.
+  Alternatively, station-level `preauthorize_all_actions=true` explicitly delegates
+  every already-permitted service/device action, including capture, TTS and persistent
+  edits, without native forms. It defaults to false, is for trusted local agents only
+  and does not expand action/asset/option allowlists or authorize unrelated tasks.
+  This local delegation persists until removed; choose the volume ceiling and registered
+  media for unattended use. It does not enable writes or weaken validation/state checks.
+  Previews expire after 300 seconds and are consumed
   once, including on cancellation. Never retry uncertain writes.
 - POSIX SSH files and ancestors reject symlinks, untrusted owners and group/world
   writability except trusted sticky directories. Private identities reject all
@@ -51,11 +60,38 @@ writes, rooting, recovery, or firmware procedures are implemented or verified.
 Check the current API and capability descriptions before use. Unsupported
 actions must remain unavailable rather than falling back to unrestricted SSH.
 
+## Optional resident transport
+
+The [native agent](docs/NATIVE_AGENT.md) exposes only fixed MCP tools over TLS 1.3
+with a private CA and a per-device bearer file. Keep it on an owner-controlled
+network, not a public interface or port-forwarded root service. It is not a
+multi-tenant sandbox. Local root or a stolen bearer can exercise its privately
+allowed actions. Rotate/revoke the credential in owner-only configuration;
+it is re-read on requests and bound into action policy snapshots.
+
+The host router intersects its own action allowlist with device policy; native
+failures never fall back to SSH. Existing SSH is retained only for owner-explicit
+provisioning/recovery. The operator-only installer accepts pinned project-built
+artifacts and a canonical bounded archive, consumes a five-minute state-bound
+preview once, and refuses existing destinations. Its separate startup hook does
+not edit vendor launch profiles, restart Quasar, remount filesystems or change
+SELinux. No automatic update/reinstallation endpoint exists. Persistence was
+registered, not verified by a reboot. See the native transport's narrower evidence
+and authorization limits before deployment.
+
+The optional source-tested local speech mode accepts only bounded canonical WAV
+over the authenticated resident channel, never a URL or executable. A hash-pinned
+playback child cannot select a capture device or modify the mixer. Local-only
+selection blocks cloud text TTS; host synthesis failure never triggers a fallback.
+Audio/text remain in RAM. This mode has not yet been installed or qualified on a
+Station; ALSA drain/child exit are not evidence of audible output.
+
 ## Experimental runtime controls
 
 The [control contract](docs/CONTROLS.md) documents the implemented bounded API,
-not a hardware qualification. No station access or hardware test was performed;
-integration checks are offline and synthetic only. `get_model_interfaces` is source evidence;
+not a hardware qualification. Automated integration checks are offline/synthetic;
+scoped live speech/native-agent observations are documented separately.
+`get_model_interfaces` is source evidence;
 `get_station_controls` returns declared policy aliases, not verified availability.
 `preview_station_action` is read-only remote inspection, not write authorization.
 
@@ -105,7 +141,7 @@ by restoration of the original read-only state. A failed action or remount clean
 can have an `unknown` outcome: inspect locally and never auto-retry. Transient
 effects restore captured state, but an interrupted effect is not proof that cleanup
 finished. Configuration changes never imply reload; service restart needs its own
-preview and approval and may interrupt voice/playback.
+preview and approval (or explicit standing preauthorization) and may interrupt voice/playback.
 
 ## Publication allowlist and checks
 

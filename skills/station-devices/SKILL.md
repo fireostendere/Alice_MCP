@@ -9,6 +9,8 @@ Require owner authorization for access. Keep Quasar enabled. This identification
 skill is read-only. Installation, root, OTA, flash and unsupported/high-risk
 operations remain guidance-only, never automatic. Implemented service/device
 actions belong to their separate preview/approval workflows, not identification.
+For an already authorized task, run configured read-only tools without asking
+again. Use inventory aliases and available evidence before asking for missing facts.
 
 ## Prerequisites
 
@@ -53,13 +55,18 @@ to discussing compatibility. Read the [model matrix](references/models.md).
 
 ## Preview and confirmation
 
+For an owner-requested action, call `run_station_action(station_id, action, parameters)`: it previews and applies in one call
+(no form when preauthorized). Use the separate preview/apply tools only to show a plan before acting.
+
 Return a short compatibility decision: model/platform, exact evidence, proposed
 topic, exclusions and confidence. Ask the owner to resolve an ambiguous model
 before any change plan. A support badge or server profile is not permission.
 The experimental runtime implements bounded LED/audio/media/sound/config actions,
 but identification does not call apply. `preview_station_action` is a separate
 read-only inspection under private policy gates; `apply_station_action` needs the
-exact preview digest and native human elicitation within a one-use 300-second TTL.
+exact preview digest within a one-use 300-second TTL. Native elicitation is required
+unless the preview reports `approval_required=false` under explicit private delegation;
+station-level `preauthorize_all_actions=true` covers all already-permitted actions.
 It requires secure SSH and preinstalled Python 3.8+, never automatic installation,
 rooting or ADB. Native Windows device writes are unavailable; unknown formats fail closed.
 

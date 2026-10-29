@@ -110,6 +110,43 @@ def test_policy_hostile(change):
         runtime.validate_policy(p, "station-lite")
 
 
+def test_policy_accepts_explicit_preauthorization_only_for_allowed_bounded_actions():
+    policy = {"firmware_sha256": "a" * 64,
+              "allowed_actions": ["led.effect", "audio.volume", "audio.play"],
+              "preauthorized_actions": ["led.effect", "audio.volume", "audio.play"]}
+    assert runtime.validate_policy(policy, "station-lite")["preauthorized_actions"] == [
+        "audio.play", "audio.volume", "led.effect",
+    ]
+
+
+def test_empty_preauthorization_preserves_existing_policy_and_backup_hashes():
+    policy = {"firmware_sha256": "a" * 64, "allowed_actions": ["audio.play"]}
+    original = runtime.validate_policy(policy, "station-lite")
+    assert "preauthorized_actions" not in original
+    assert runtime.validate_policy(
+        dict(policy, preauthorized_actions=[]), "station-lite",
+    ) == original
+
+
+@pytest.mark.parametrize("actions", [
+    True, "audio.play", [True], ["audio.play", "audio.play"], ["unknown"],
+    ["config.select"], ["sound.replace"], ["media.upload"], ["restore"],
+    ["led.capture"], ["speech.listen"], ["led.replay"], ["led.pulse"], ["led.animate"],
+    ["quasar:restart"],
+])
+def test_policy_rejects_unsafe_or_malformed_preauthorization(actions):
+    policy = {"firmware_sha256": "a" * 64, "allowed_actions": sorted(runtime.ACTIONS),
+              "preauthorized_actions": actions}
+    with pytest.raises(ValueError, match="invalid_policy"):
+        runtime.validate_policy(policy, "station-lite")
+
+
+def test_preauthorization_cannot_grant_an_action_missing_from_allowlist():
+    with pytest.raises(ValueError, match="invalid_policy"):
+        runtime.validate_policy({"firmware_sha256": "a" * 64, "allowed_actions": [],
+                                 "preauthorized_actions": ["audio.play"]}, "station-lite")
+
+
 @pytest.mark.parametrize("action,params", [
     ("audio.volume", {"percent": True}), ("audio.volume", {"percent": 31}),
     ("led.effect", {"red": 33, "green": 0, "blue": 0, "count": 1, "period_ms": 500}),

@@ -49,6 +49,9 @@ device writes are available. A working backend must already exist independently.
 
 ## Preview and confirmation
 
+For an owner-requested action, call `run_station_action(station_id, action, parameters)`: it previews and applies in one call
+(no form when preauthorized). Use the separate preview/apply tools only to show a plan before acting.
+
 Return a decision table for the owner's required functions and data destinations,
 using nonsensitive aliases rather than publishing private URLs. For a proposed
 manual deployment, list scope, host resources, expected lost features, log-retention
@@ -67,7 +70,8 @@ This is read-only inspection. Both aliases must match `[a-z][a-z0-9-]{0,31}` and
 exist in private policy. Do not supply a URL, value, path, shell command or key.
 Review the data/voice destination change privately with the owner, then pass the
 returned `plan_id` and `expected_sha256` to `apply_station_action`. Native human
-elicitation is required; previews are single-use with a 300-second TTL, consumed
+elicitation is required unless the preview reports `approval_required=false` under
+explicit station-level `preauthorize_all_actions=true`. Previews are single-use with a 300-second TTL, consumed
 even on cancellation, and revalidate configuration/trust/state before execution.
 
 Private bindings use JSON-only `.json`/`.cfg` files under `/data/opt/`, or the
@@ -82,7 +86,8 @@ not an arbitrary native voice or a newly installed LLM.
 
 Before persistent JSON edits, the helper saves owner-only records at
 `/data/opt/alice-mcp/backups/<id>.json`. Preview `restore` with `backup_id` (32
-lowercase hexadecimal characters), then request separate native approval. Restore
+lowercase hexadecimal characters), then apply with native approval unless explicitly
+preauthorized (`approval_required=false`). Restore
 refuses changes observed by optimistic state checks; it is not atomic
 compare-and-swap. External file/mixer writers must be idle throughout apply/restore:
 an update after the final check can be overwritten or deleted, and the helper lock

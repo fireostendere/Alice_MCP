@@ -8,6 +8,7 @@ This is a publication backstop, not a proof that arbitrary text is secret-free.
 from __future__ import annotations
 
 import argparse
+import ast
 import ipaddress
 import lzma
 import math
@@ -134,6 +135,14 @@ def source_allowed(path: str) -> bool:
     if parts[:2] == [".github", "workflows"]:
         return len(parts) == 3 and suffix in {".yml", ".yaml"}
     if parts[:2] == ["src", "alice_mcp"] and len(parts) > 2:
+        if path in {"src/alice_mcp/native/asr_once.c", "src/alice_mcp/native/vqe_audit.c",
+                    "src/alice_mcp/native/pcm_player.c"}:
+            return True  # Reviewed source only; native executables remain excluded.
+        if parts[:4] == ["src", "alice_mcp", "native", "agent"] and len(parts) == 5:
+            return parts[4] in {
+                "go.mod", "main.go", "mcp.go", "runtime.go", "mcp_test.go", "runtime_test.go",
+                "speech.go", "pcm.go",
+            }
         return suffix in {".py", ".json"} or (
             (parts[2] == "skills" or parts[2:4] == ["data", "skills"])
             and suffix == ".md"
@@ -173,10 +182,22 @@ def entropy(value: str) -> float:
 
 def scan_text(path: str, text: str) -> list[Finding]:
     findings: list[Finding] = []
+    slices: set[tuple[int, int, int | None]] = set()
+    if path.endswith(".py"):
+        try:
+            slices = {(node.lineno, node.col_offset, node.end_col_offset)
+                      for node in ast.walk(ast.parse(text)) if isinstance(node, ast.Slice)
+                      and node.lineno == node.end_lineno}
+        except (SyntaxError, ValueError, RecursionError):
+            pass  # Invalid source keeps the conservative text-only scan.
     for number, line in enumerate(text.splitlines(), 1):
         rules: set[str] = set()
         for pattern in (IPV4, IPV6):
             for match in pattern.finditer(line):
+                # Exempt only an exact parsed slice, never strings/comments containing IPv6.
+                if pattern is IPV6 and (number, len(line[:match.start()].encode()),
+                                        len(line[:match.end()].encode())) in slices:
+                    continue
                 try:
                     ipaddress.ip_address(match.group().split("%", 1)[0].rstrip("."))
                 except ValueError:

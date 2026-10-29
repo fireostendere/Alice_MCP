@@ -46,6 +46,27 @@ List only public operator aliases and declared model; never return endpoints.
 }
 ```
 
+## `station_status`
+
+Every station at once: live read-only health probe plus private-policy summary.
+
+```json
+{
+  "inputSchema": {
+    "properties": {},
+    "title": "station_statusArguments",
+    "type": "object"
+  },
+  "annotations": {
+    "title": null,
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": null,
+    "openWorldHint": false
+  }
+}
+```
+
 ## `station_probe`
 
 Run one fixed read-only probe; return typed metrics, never raw remote output.
@@ -232,7 +253,7 @@ Read service state and create a five-minute preview; no service changes.
 
 ## `apply_service_action`
 
-Consume a preview, ask the human, revalidate state, execute once and post-check.
+Consume preview, use private preauthorization or ask once, revalidate and execute once.
 
 ```json
 {
@@ -337,6 +358,12 @@ Read state and preview a policy-bound action; no device files changed during pre
       "action": {
         "enum": [
           "led.effect",
+          "led.capture",
+          "led.replay",
+          "led.pulse",
+          "led.animate",
+          "speech.listen",
+          "speech.say",
           "audio.volume",
           "audio.play",
           "media.upload",
@@ -373,7 +400,7 @@ Read state and preview a policy-bound action; no device files changed during pre
 
 ## `apply_station_action`
 
-Consume device preview, elicit human approval, recheck state, apply once with post-checks.
+Consume preview, use private preauthorization or ask once, recheck state and apply once.
 
 ```json
 {
@@ -400,6 +427,95 @@ Consume device preview, elicit human approval, recheck state, apply once with po
     "readOnlyHint": false,
     "destructiveHint": true,
     "idempotentHint": false,
+    "openWorldHint": false
+  }
+}
+```
+
+## `run_station_action`
+
+Do one device action now: fresh one-use preview, then apply; no form if preauthorized.
+
+```json
+{
+  "inputSchema": {
+    "properties": {
+      "station_id": {
+        "title": "Station Id",
+        "type": "string"
+      },
+      "action": {
+        "enum": [
+          "led.effect",
+          "led.capture",
+          "led.replay",
+          "led.pulse",
+          "led.animate",
+          "speech.listen",
+          "speech.say",
+          "audio.volume",
+          "audio.play",
+          "media.upload",
+          "sound.replace",
+          "config.select",
+          "restore"
+        ],
+        "title": "Action",
+        "type": "string"
+      },
+      "parameters": {
+        "additionalProperties": true,
+        "title": "Parameters",
+        "type": "object"
+      }
+    },
+    "required": [
+      "station_id",
+      "action",
+      "parameters"
+    ],
+    "title": "run_station_actionArguments",
+    "type": "object"
+  },
+  "annotations": {
+    "title": null,
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": false
+  }
+}
+```
+
+## `get_capture_status`
+
+Read fresh capture status: bounded LED records or one approved ASR text; never starts one.
+
+```json
+{
+  "inputSchema": {
+    "properties": {
+      "station_id": {
+        "title": "Station Id",
+        "type": "string"
+      },
+      "capture_id": {
+        "title": "Capture Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "station_id",
+      "capture_id"
+    ],
+    "title": "get_capture_statusArguments",
+    "type": "object"
+  },
+  "annotations": {
+    "title": null,
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": null,
     "openWorldHint": false
   }
 }

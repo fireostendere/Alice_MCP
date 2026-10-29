@@ -24,8 +24,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-ACTIONS = frozenset({"led.effect", "audio.volume", "audio.play", "media.upload",
-                     "sound.replace", "config.select", "restore"})
+ACTIONS = frozenset({"led.effect", "led.capture", "led.replay", "led.pulse", "led.animate",
+                     "speech.listen", "speech.say",
+                     "audio.volume", "audio.play", "media.upload", "sound.replace",
+                     "config.select", "restore"})
+PREAUTHORIZED_ACTIONS = frozenset({"led.effect", "audio.volume", "audio.play"})
+ANIMATION_MODES = frozenset({"blink", "rainbow", "rainbow_swirl"})
 SCHEMA = "alice.device.v1"
 ALIAS = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -42,6 +46,13 @@ MODELS = {"station-lite", "station-lite2", "station-mini", "station-mini2", "sta
           "station-3", "station-street", "station-gen1", "yandex-hub",
           "jbl-link-music"}
 BASE = "/data/opt/alice-mcp"
+CAPTURE_BASE = BASE + "/led-captures"
+CAPTURE_ROOTS = ("/sys/kernel/tracing", "/sys/kernel/debug/tracing")
+CAPTURE_FILTER = (
+    "((adapter_nr == 0 && addr == 60) || (adapter_nr == 1 && addr == 31)) && len <= 256"
+)
+CAPTURE_LIMIT = 1024 * 1024
+CAPTURE_MAX_SECONDS = 60
 NATIVE = "/system/vendor/quasar/quasar.cfg"
 MAX_MEDIA = 49152
 ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/data/opt/bin:/opt/bin", "LANG": "C", "LC_ALL": "C",
@@ -124,18 +135,43 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
         if policy == {}:
             return {}
         _require(_keys(policy, {"firmware_sha256", "allowed_actions"},
-                       {"max_volume", "allow_rootfs_remount", "media", "configs"}))
+                       {"max_volume", "allow_rootfs_remount", "media", "configs", "speech_client",
+                         "tts_client", "local_tts",
+                        "preauthorized_actions"}))
         _require(_match(HEX64, policy["firmware_sha256"]))
         actions = policy["allowed_actions"]
         _require(type(actions) is list and len(actions) <= len(ACTIONS)
                  and all(type(a) is str and a in ACTIONS for a in actions))
         _require(len(set(actions)) == len(actions))
+        preauthorized = policy.get("preauthorized_actions", [])
+        _require(type(preauthorized) is list and len(preauthorized) <= len(PREAUTHORIZED_ACTIONS)
+                 and all(type(a) is str and a in PREAUTHORIZED_ACTIONS and a in actions
+                         for a in preauthorized))
+        _require(len(set(preauthorized)) == len(preauthorized))
         _require(_integer(policy.get("max_volume", 30), 0, 100))
         _require(type(policy.get("allow_rootfs_remount", False)) is bool)
         result = {"firmware_sha256": policy["firmware_sha256"], "allowed_actions": sorted(actions),
                   "max_volume": policy.get("max_volume", 30),
                   "allow_rootfs_remount": policy.get("allow_rootfs_remount", False),
-                  "media": {}, "configs": {}}
+                   "media": {}, "configs": {}}
+        if preauthorized:
+            result["preauthorized_actions"] = sorted(preauthorized)
+        if "local_tts" in policy:
+            local = policy["local_tts"]
+            _require(model == "station-mini"
+                     and _keys(local, {"model_file", "model_sha256", "config_sha256"})
+                     and _safe_path(local["model_file"])
+                     and _match(HEX64, local["model_sha256"])
+                     and _match(HEX64, local["config_sha256"]))
+            result["local_tts"] = dict(local)
+        for client in ("speech_client", "tts_client"):
+            if client in policy:
+                item = policy[client]
+                _require((model == "station-mini"
+                          or client == "tts_client" and model == "station-mini3")
+                         and _keys(item, {"path", "sha256"})
+                         and _safe_path(item["path"]) and _match(HEX64, item["sha256"]))
+                result[client] = dict(item)
         for group in ("media", "configs"):
             _require(type(policy.get(group, {})) is dict and len(policy.get(group, {})) <= 32)
             for alias, item in policy.get(group, {}).items():
@@ -192,6 +228,12 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
         _require(model in MODELS and isinstance(action, str) and action in ACTIONS)
         fields = {
             "led.effect": {"red", "green", "blue", "count", "period_ms"},
+            "led.capture": {"duration_seconds"},
+            "speech.listen": {"duration_seconds"},
+            "speech.say": {"text"},
+            "led.replay": {"capture_id"},
+            "led.pulse": {"capture_id", "channel"},
+            "led.animate": {"capture_id", "mode"},
             "audio.volume": {"percent"}, "audio.play": {"asset", "duration_seconds"},
             "media.upload": {"asset", "content_base64"}, "sound.replace": {"asset", "slot"},
             "config.select": {"binding", "option"}, "restore": {"backup_id"},
@@ -200,6 +242,27 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
         if action == "led.effect":
             _require(all(_integer(params[c], 0, 32) for c in ("red", "green", "blue")))
             _require(_integer(params["count"], 1, 3) and _integer(params["period_ms"], 500, 1000))
+        elif action == "led.capture":
+            _require(model == "station-mini"
+                     and _integer(params["duration_seconds"], 5, CAPTURE_MAX_SECONDS))
+        elif action == "speech.listen":
+            _require(model == "station-mini" and "speech_client" in policy
+                     and _integer(params["duration_seconds"], 5, 60))
+        elif action == "speech.say":
+            text = params["text"]
+            _require(model in {"station-mini", "station-mini3"} and "tts_client" in policy
+                     and isinstance(text, str) and 1 <= len(text) <= 256
+                     and len(text.encode("utf-8")) <= 512 and bool(text.strip())
+                     and not any(ord(c) < 32 or 127 <= ord(c) <= 159
+                                 or 8234 <= ord(c) <= 8238 or 8294 <= ord(c) <= 8297 for c in text))
+        elif action == "led.replay":
+            _require(model == "station-mini" and _match(HEX32, params["capture_id"]))
+        elif action == "led.pulse":
+            _require(model == "station-mini" and _match(HEX32, params["capture_id"])
+                     and _integer(params["channel"], 0, 2))
+        elif action == "led.animate":
+            _require(model == "station-mini" and _match(HEX32, params["capture_id"])
+                     and isinstance(params["mode"], str) and params["mode"] in ANIMATION_MODES)
         elif action == "audio.volume":
             _require(_integer(params["percent"], 0, policy.get("max_volume", 30)))
         elif action in {"media.upload", "audio.play", "sound.replace"}:
@@ -407,6 +470,10 @@ def _snapshot(root: Path, req: dict[str, Any]) -> tuple[dict[str, Any], bytes | 
     content = None
     if action == "led.effect":
         state["led"] = _led_state(root, req["model"])
+    elif action == "led.capture":
+        state["capture"] = _capture_profile(root)
+        _require(not _path(root, CAPTURE_BASE + "/" + req["nonce"] + ".json").exists(),
+                 "nonce_used")
     elif action == "audio.volume":
         state.update(target="mixer:Master", volume=_volume(root))
     elif action == "audio.play":
@@ -619,6 +686,263 @@ def _effect(root: Path, req: dict[str, Any], state: dict[str, Any]) -> dict[str,
     return result
 
 
+def _capture_profile(root: Path) -> dict[str, Any]:
+    """Metadata only. Never mount tracefs or fall back to the global trace buffer."""
+    for address, driver in (("0-003c", "sn3236"), ("1-001f", "ledring")):
+        link = _path(root, "/sys/bus/i2c/devices/" + address + "/driver", True)
+        _require(link.is_symlink() and Path(os.readlink(link)).name == driver,
+                 "unverified_led_address")
+    cpus = os.cpu_count() if root == Path("/") else 4
+    _require(cpus is not None and 1 <= cpus <= 16, "unsupported_trace_geometry")
+    for name in CAPTURE_ROOTS:
+        path = _path(root, name)
+        if not path.is_dir() or not (path / "available_events").is_file():
+            continue
+        if root == Path("/"):
+            mounts = _read(Path("/proc/mounts"), 65536).splitlines()
+            _require(any(len(p) >= 3 and p[1] == name.encode() and p[2] == b"tracefs"
+                         or len(p) >= 3 and p[1] == b"/sys/kernel/debug" and p[2] == b"debugfs"
+                         and name == "/sys/kernel/debug/tracing"
+                         for p in (line.split() for line in mounts)), "tracefs_unmounted")
+        events = _read(path / "available_events", 128 * 1024).splitlines()
+        _require(b"i2c:i2c_write" in events, "missing_tracepoint")
+        fmt = _read(path / "events/i2c/i2c_write/format", 8192)
+        for field in (rb"field:\s*int\s+adapter_nr;",
+                      rb"field:\s*(?:__u16|u16|unsigned short)\s+addr;",
+                      rb"field:\s*(?:__u16|u16|unsigned short)\s+len;",
+                      rb"field:\s*__data_loc\s+(?:__u8|u8|unsigned char)\[\]\s+buf;"):
+            _require(re.search(field, fmt), "unknown_trace_format")
+        instances = path / "instances"
+        with _parent(instances / "unused"):
+            _require(instances.is_dir() and os.access(instances, os.W_OK), "no_trace_instances")
+        return {"trace_root": name, "format_sha256": _sha(fmt), "cpus": cpus}
+    raise ValueError("tracefs_unavailable")
+
+
+def _capture_write(path: Path, data: bytes, synthetic: bool) -> None:
+    with _parent(path) as parent:
+        fd = os.open(path.name, os.O_WRONLY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        _require(stat.S_ISREG(os.fstat(fd).st_mode), "unsafe_trace_node")
+        if synthetic:
+            os.ftruncate(fd, 0)
+        _require(os.write(fd, data) == len(data), "short_write")
+    finally:
+        os.close(fd)
+
+
+def _capture_create_instance(path: Path) -> tuple[int, int]:
+    with _parent(path) as parent:
+        os.mkdir(path.name, dir_fd=parent)  # Never reuse or modify another instance.
+        info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+    _require(stat.S_ISDIR(info.st_mode), "unsafe_trace_instance")
+    return info.st_dev, info.st_ino
+
+
+def _capture_remove_instance(path: Path) -> None:
+    with _parent(path) as parent:
+        os.rmdir(path.name, dir_fd=parent)  # Tracefs owns its files; never recursively delete.
+
+
+def _capture_worker_identity(root: Path, pid: int) -> list[Any]:
+    _require(type(pid) is int and 0 < pid < 2 ** 31, "invalid_worker")
+    fields = _read(_path(root, "/proc/" + str(pid) + "/stat"), 4096).rsplit(b")", 1)[1].split()
+    _require(len(fields) > 19 and fields[0] not in {b"Z", b"X"} and fields[19].isdigit(),
+             "worker_not_running")
+    return [pid, fields[19].decode("ascii")]
+
+
+def _capture_record_path(root: Path, capture_id: str) -> Path:
+    _require(_match(HEX32, capture_id), "invalid_capture")
+    return _path(root, CAPTURE_BASE + "/" + capture_id + ".json")
+
+
+def _capture_save(root: Path, record: dict[str, Any]) -> None:
+    _atomic(_capture_record_path(root, record["id"]), _encode(record),
+            0o600, os.geteuid(), os.getegid())
+
+
+def _capture_record(root: Path, req: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    directory = _private_dir(root, CAPTURE_BASE)
+    # ponytail: retain at most 16 bounded results; operator archives/removes old results.
+    _require(len(list(directory.iterdir())) < 16, "capture_storage_full")
+    record = {"id": req["nonce"], "model": req["model"], "status": "starting",
+              "policy_sha256": _sha(_encode(validate_policy(req["policy"], req["model"]))),
+              "trace_root": state["capture"]["trace_root"], "worker": [], "stamp": [],
+              "deadline_ns": time.monotonic_ns() + req["params"]["duration_seconds"] * 10 ** 9,
+              "cleanup_verified": False, "records": [], "truncated": False}
+    path = _capture_record_path(root, req["nonce"])
+    with _parent(path) as parent:
+        fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=parent)
+    with os.fdopen(fd, "wb") as output:
+        output.write(_encode(record))
+    return record
+
+
+def _capture_instance(root: Path, record: dict[str, Any]) -> Path:
+    _require(record["trace_root"] in CAPTURE_ROOTS and _match(HEX32, record["id"]),
+             "invalid_capture")
+    return _path(root, record["trace_root"] + "/instances/alice-led-" + record["id"])
+
+
+def _capture_active(root: Path, record: dict[str, Any]) -> bool:
+    try:
+        instance = _capture_instance(root, record)
+        info = instance.lstat()
+        _require(stat.S_ISDIR(info.st_mode)
+                 and list((info.st_dev, info.st_ino)) == record["stamp"], "instance_changed")
+        _require(_capture_worker_identity(root, record["worker"][0]) == record["worker"],
+                 "worker_changed")
+        for name, expected in (("tracing_on", b"1"), ("current_tracer", b"nop"),
+                               ("events/i2c/i2c_write/enable", b"1"),
+                               ("events/i2c/i2c_write/filter", CAPTURE_FILTER.encode())):
+            _require(_read(instance / name, 1024).strip() == expected, "capture_not_active")
+        return True
+    except (OSError, ValueError, IndexError, KeyError, TypeError):
+        return False
+
+
+def _capture_parse(raw: bytes) -> tuple[list[dict[str, Any]], bool]:
+    records: list[dict[str, Any]] = []
+    pattern = re.compile(
+        rb"\bi2c_write: i2c-([01]) #\d+ a=([0-9a-f]{3,4}) f=[0-9a-f]{4} "
+        rb"l=(\d{1,3}) \[([0-9a-f-]*)\]\s*$")
+    for line in raw[:CAPTURE_LIMIT].splitlines():
+        match = pattern.search(line)
+        if not match:
+            continue
+        bus, address, length = int(match[1]), int(match[2], 16), int(match[3])
+        if (bus, address) not in {(0, 60), (1, 31)} or length > 256:
+            continue
+        payload = match[4].split(b"-") if match[4] else []
+        if len(payload) != length or any(not re.fullmatch(rb"[0-9a-f]{2}", p) for p in payload):
+            continue
+        if len(records) == 64:
+            return records, True
+        records.append({"bus": bus, "address": address,
+                        "data_hex": b"".join(payload).decode("ascii")})
+    return records, len(raw) > CAPTURE_LIMIT
+
+
+def _capture_report(root: Path, req: dict[str, Any]) -> dict[str, Any]:
+    path = _capture_record_path(root, req["nonce"])
+    info = path.lstat()
+    _require(info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o600,
+             "invalid_capture")
+    record = _json(_read(path, 65536))
+    _require(record["id"] == req["nonce"] and record["model"] == req["model"]
+             and record["policy_sha256"] == _sha(_encode(validate_policy(
+                 req["policy"], req["model"]))), "capture_policy_changed")
+    _require(type(record["deadline_ns"]) is int, "invalid_capture")
+    remaining = max(0, min(CAPTURE_MAX_SECONDS,
+                           (record["deadline_ns"] - time.monotonic_ns()) // 10 ** 9))
+    active = record["status"] == "capturing" and remaining >= 2 and _capture_active(root, record)
+    complete = (record["status"] == "complete" and record["cleanup_verified"] is True
+                and not _capture_instance(root, record).exists())
+    return {"outcome": "capturing" if active else "complete" if complete else "unknown",
+            "capture_id": record["id"], "capture_ready": active,
+            "remaining_seconds": remaining if active else 0,
+            "cleanup_verified": record["cleanup_verified"] is True,
+            "records": record["records"] if complete else [],
+            "truncated": record["truncated"] is True}
+
+
+def _capture_worker(root: Path, req: dict[str, Any], record: dict[str, Any]) -> None:
+    instance = _capture_instance(root, record)
+    event = instance / "events/i2c/i2c_write"
+    stamp: tuple[int, int] | None = None
+    completed = False
+    previous = signal.getsignal(signal.SIGALRM)
+
+    def deadline(signum: int, frame: Any) -> None:
+        raise TimeoutError("capture_deadline")
+
+    try:
+        with _signals():
+            signal.signal(signal.SIGALRM, deadline)
+            remaining = (record["deadline_ns"] - time.monotonic_ns()) / 10 ** 9
+            _require(0 < remaining <= CAPTURE_MAX_SECONDS, "capture_expired")
+            signal.setitimer(signal.ITIMER_REAL, remaining)
+            record["worker"] = _capture_worker_identity(root, os.getpid())
+            stamp = _capture_create_instance(instance)
+            record["stamp"] = list(stamp)
+            synthetic = root != Path("/")
+            _capture_write(instance / "tracing_on", b"0", synthetic)
+            _capture_write(instance / "events/enable", b"0", synthetic)
+            _require(_read(instance / "current_tracer", 128).strip() == b"nop",
+                     "unexpected_tracer")
+            _capture_write(instance / "buffer_size_kb", b"16", synthetic)
+            _capture_write(event / "filter", CAPTURE_FILTER.encode(), synthetic)
+            _require(_read(event / "filter", 1024).strip() == CAPTURE_FILTER.encode(),
+                     "filter_not_installed")
+            _capture_write(event / "enable", b"1", synthetic)
+            _capture_write(instance / "tracing_on", b"1", synthetic)
+            _require(_capture_active(root, record), "capture_not_active")
+            record["status"] = "capturing"
+            _capture_save(root, record)
+            time.sleep(max(0, (record["deadline_ns"] - time.monotonic_ns()) / 10 ** 9))
+            completed = True
+    except TimeoutError:
+        completed = record["status"] == "capturing"
+    except BaseException:
+        pass
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        if stamp is not None:
+            try:
+                info = instance.lstat()
+                _require(stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == stamp,
+                         "instance_changed")
+                try:
+                    _capture_write(instance / "tracing_on", b"0", root != Path("/"))
+                    _capture_write(event / "enable", b"0", root != Path("/"))
+                    _require(_read(instance / "tracing_on", 32).strip() == b"0"
+                             and _read(event / "enable", 32).strip() == b"0", "stop_failed")
+                    if completed:
+                        with _parent(instance / "trace") as parent:
+                            fd = os.open("trace", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+                        with os.fdopen(fd, "rb") as trace:
+                            record["records"], record["truncated"] = _capture_parse(
+                                trace.read(CAPTURE_LIMIT + 1))
+                except BaseException:
+                    completed = False
+                finally:
+                    _capture_remove_instance(instance)
+                    record["cleanup_verified"] = not instance.exists()
+            except BaseException:
+                completed = False
+        record["status"] = "complete" if completed and record["cleanup_verified"] else "unknown"
+        try:
+            _capture_save(root, record)
+        except Exception:
+            pass  # Live status checks must fail closed if the final record cannot be saved.
+
+
+def _start_capture(root: Path, req: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    record = _capture_record(root, req, state)
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setsid()
+            os.umask(0o077)
+            with open(os.devnull, "r+b", buffering=0) as null:
+                for fd in (0, 1, 2):
+                    os.dup2(null.fileno(), fd)
+            # Inherits the control lock; does not inherit the SSH terminal/session.
+            _capture_worker(root, req, record)
+        finally:
+            os._exit(0)
+    until = time.monotonic() + 2
+    while time.monotonic() < until:
+        result = _capture_report(root, req)
+        if result["capture_ready"] or os.waitpid(pid, os.WNOHANG)[0]:
+            return result
+        time.sleep(0.025)
+    return _capture_report(root, req)  # Unknown is not permission to restart the capture.
+
+
 def _play(root: Path, req: dict[str, Any]) -> dict[str, Any]:
     _require(root == Path("/"), "synthetic_command_disabled")
     item = req["policy"]["media"][req["params"]["asset"]]
@@ -670,6 +994,10 @@ def _mutate(root: Path, req: dict[str, Any], state: dict[str, Any],
     action, params, policy = req["action"], req["params"], req["policy"]
     if action == "led.effect":
         return _effect(root, req, state)
+    if action == "led.capture":
+        captured = _start_capture(root, req, state)
+        captured["status"] = captured.pop("outcome")
+        return captured
     if action == "audio.play":
         return _play(root, req)
     restore = action == "restore"
@@ -734,6 +1062,16 @@ def dispatch(request: dict[str, Any], root: Path = Path("/")) -> dict[str, Any]:
     try:
         _require(_keys(request, {"schema", "mode", "model", "policy", "action", "params", "nonce"},
                        {"expected_sha256"}), "invalid_request")
+        if request["mode"] == "capture_status":
+            _require(request["schema"] == SCHEMA and request["action"] == "led.capture"
+                     and request["model"] == "station-mini" and "expected_sha256" not in request
+                     and _keys(request["params"], {"capture_id"})
+                     and _match(HEX32, request["nonce"])
+                     and request["params"]["capture_id"] == request["nonce"], "invalid_request")
+            policy = validate_policy(request["policy"], request["model"])
+            _require("led.capture" in policy.get("allowed_actions", [])
+                     and _firmware(root) == policy["firmware_sha256"], "capture_disabled")
+            return _capture_report(root, request)
         _require(request["schema"] == SCHEMA and request["mode"] in {"inspect", "apply"}
                  and _match(HEX32, request["nonce"]), "invalid_request")
         _require((request["mode"] == "apply" and _match(HEX64, request.get("expected_sha256")))

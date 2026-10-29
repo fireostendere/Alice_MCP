@@ -16,7 +16,10 @@ import pytest
 
 @pytest.fixture
 def short_socket_root() -> Iterator[Path]:
-    with tempfile.TemporaryDirectory(prefix="vqa-", dir="/tmp/opencode") as directory:
+    preferred = Path("/tmp/opencode")
+    with tempfile.TemporaryDirectory(
+        prefix="vqa-", dir=preferred if preferred.is_dir() else None,
+    ) as directory:
         yield Path(directory)
 
 

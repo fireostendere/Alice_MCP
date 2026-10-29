@@ -164,16 +164,23 @@ def _owned_daemon(pid: int, root: Path) -> bool:
 
 @pytest.fixture
 def startup(tmp_path: Path) -> Any:
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("Synthetic daemon requires an existing host C compiler")
     root = tmp_path / "runtime"
     root.mkdir()
-    shutil.copyfile(shutil.which("sleep"), root / "agent")
+    daemon = tmp_path / "daemon.c"
+    daemon.write_text("#include <unistd.h>\n"
+                      "int main(void) { alarm(20); for (;;) pause(); }\n")
+    subprocess.run([compiler, "-O2", "-Wall", "-Wextra", "-Werror", str(daemon),
+                    "-o", str(root / "agent")], capture_output=True, check=True, timeout=30)
     (root / "agent").chmod(0o500)
     script = root / "start"
     script.write_text(agent_provision.start_script("direct").replace(
         "/data/opt/alice-mcp-agent", str(root)))
     tools = tmp_path / "tools"
     tools.mkdir()
-    # Delay exec to expose the PID publication race; the fake daemon is a bounded sleep.
+    # Delay exec to expose the PID publication race; the compiled daemon has a hard alarm.
     shim = tools / "setsid"
     shim.write_text("#!/bin/sh\nsleep 0.2\n"
                     f"printf '%s\\n' \"$$\" > {root}/launched.$$\n"

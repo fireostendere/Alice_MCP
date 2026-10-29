@@ -207,7 +207,7 @@ int main(void) {
                ALICE_TEST_DAEMON_ROOT=str(root))
 
     def run(action: str) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(["sh", str(script), action], env=env,
+        return subprocess.run(["sh", "-x", str(script), action], env=env,
                               capture_output=True, timeout=5)
 
     try:
@@ -234,11 +234,14 @@ def test_generated_start_serializes_concurrent_launches(startup: Any) -> None:
         results = list(pool.map(lambda _: start(), range(2)))
     launchers = {record.read_text() for record in root.glob("launched.*")}
     daemons = {record.read_text() for record in root.glob("daemon.*")}
-    assert any(result.returncode == 0 for result in results), {
+    diagnostic = {
         "exit_codes": [result.returncode for result in results],
         "launchers": len(launchers), "daemons": len(daemons),
         "launcher_matches_daemon": launchers == daemons,
     }
+    assert any(result.returncode == 0 for result in results), (
+        json.dumps(diagnostic) + "\n" + "\n".join(
+            result.stderr.decode(errors="replace")[-6000:] for result in results))
     records = list(root.glob("launched.*"))
     assert len(records) == 1
     pid = int(records[0].read_text())

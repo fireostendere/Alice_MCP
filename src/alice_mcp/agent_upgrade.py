@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from alice_mcp import agent_provision, pcm_pilot
+from alice_mcp import device_runtime as rt
 from alice_mcp.core import Controller, SafetyError, SSHInput, Station, _unique
 from alice_mcp.speech_capture import CLIENT_SHA256 as ASR_CLIENT_SHA256
 from alice_mcp.speech_capture import TTS_CLIENT_SHA256
@@ -63,15 +64,18 @@ def _configuration(station: Station, old: bytes, hashes: tuple[str, ...],
                 "firmware_sha256": station.controls["firmware_sha256"],
                 "tts_client": root + "/tts-once", "asr_client": root + "/asr-once",
                 "preauthorize_all_actions": True}
-    if (type(value) is not dict or set(value) != set(expected) | {"listen", "allowed_actions"}
+    actions = value.get("allowed_actions", rt.ALL) if type(value) is dict else None
+    if (type(value) is not dict
+        or set(value) - {"allowed_actions"} != set(expected) | {"listen"}
         or any(value[k] != v for k, v in expected.items())
         or not _hex(value["firmware_sha256"])
         or value["preauthorize_all_actions"] is not True
-        or type(value["allowed_actions"]) is not list
-        or any(type(a) is not str or a not in {"speech.say", "speech.listen"}
-               for a in value["allowed_actions"])
-        or len(set(value["allowed_actions"])) != len(value["allowed_actions"])
-        or "speech.say" not in value["allowed_actions"]
+        or actions != rt.ALL and (
+            type(actions) is not list
+            or any(type(a) is not str or a not in {"speech.say", "speech.listen"}
+                   for a in actions)
+            or len(set(actions)) != len(actions))
+        or not rt.allows(value, "speech.say")
         or type(value["listen"]) is not str):
         raise ValueError
     address = urlsplit("//" + value["listen"])
@@ -191,7 +195,7 @@ def _command(station: Station, package: UpgradeBundle, nonce: str, script: str,
 def _permitted(controller: Controller, station: Station) -> None:
     if (controller.writes is not True or station.preauthorize_all_actions is not True
         or not station.native_mcp or station.model != "station-mini"
-        or "speech.say" not in station.controls.get("allowed_actions", [])):
+        or not rt.allows(station.controls, "speech.say")):
         raise SafetyError("Native-agent upgrade not authorized")
 
 

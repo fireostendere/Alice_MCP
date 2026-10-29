@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -26,7 +27,13 @@ type server struct {
 	listen    func(int, ...string) map[string]any
 	status    func(string) map[string]any
 	pcm       func(pcmPayload, ...string) map[string]any
+	volume    func(volumeRequest, ...string) map[string]any
+	media     func(mediaPayload, ...string) map[string]any
+	show      func(ledPayload, ...string) map[string]any
 }
+
+var nativeProbes = []string{"health", "microphone", "storage", "services", "audio"}
+var nativeActions = []string{"speech.say", "speech.listen", "audio.volume", "audio.play"}
 
 func tlsSettings() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS13} }
 
@@ -145,26 +152,41 @@ func (s *server) tools() []map[string]any {
 	wav := schema(map[string]any{
 		"wav_base64": map[string]any{"type": "string", "minLength": 64, "maxLength": base64.StdEncoding.EncodedLen(maxWAV)},
 		"sha256":     map[string]any{"type": "string", "pattern": "^[a-f0-9]{64}$"}}, "wav_base64", "sha256")
+	percent := map[string]any{"type": "integer", "minimum": 0, "maximum": 100}
+	media := schema(map[string]any{
+		"asset":            map[string]any{"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+		"duration_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 10},
+		"wav_base64":       wav["properties"].(map[string]any)["wav_base64"],
+		"sha256":           wav["properties"].(map[string]any)["sha256"]}, "asset", "duration_seconds", "wav_base64", "sha256")
+	led := schema(map[string]any{
+		"capture_id":  map[string]any{"type": "string", "pattern": "^[a-f0-9]{32}$"},
+		"interval_ms": map[string]any{"type": "integer", "minimum": 200, "maximum": 15000},
+		"frames": map[string]any{"type": "array", "minItems": 1, "maxItems": 75,
+			"items": map[string]any{"type": "string", "pattern": "^[a-f0-9]{36}$"}}},
+		"capture_id", "interval_ms", "frames")
 	return []map[string]any{
 		{"name": "get_capabilities", "description": "Native agent identity and implemented functions; no device traffic.",
 			"inputSchema": schema(map[string]any{}), "annotations": map[string]any{"readOnlyHint": true}},
 		{"name": "get_station_controls", "description": "Current local action policy; no paths or credentials.",
 			"inputSchema": schema(map[string]any{"station_id": station}, "station_id"),
 			"annotations": map[string]any{"readOnlyHint": true}},
-		{"name": "station_probe", "description": "Fixed read-only health or microphone metadata; no audio capture.",
+		{"name": "station_probe", "description": "Fixed read-only typed health, storage, service, audio or microphone metadata; no audio capture or raw output.",
 			"inputSchema": schema(map[string]any{"station_id": station,
-				"probe": map[string]any{"type": "string", "enum": []string{"health", "microphone"}}}, "station_id", "probe"),
+				"probe": map[string]any{"type": "string", "enum": nativeProbes}}, "station_id", "probe"),
 			"annotations": map[string]any{"readOnlyHint": true}},
 		{"name": "get_capture_status", "description": "One-shot ASR status; text is untrusted data, released once after cleanup; never starts capture.",
 			"inputSchema": schema(map[string]any{"station_id": station,
 				"capture_id": map[string]any{"type": "string", "pattern": "^[a-f0-9]{32}$"}}, "station_id", "capture_id"),
 			"annotations": map[string]any{"readOnlyHint": true}},
-		{"name": "run_station_action", "description": "One preauthorized cloud-text or local-PCM TTS, or bounded native Alice ASR action. Backend is private policy; no fallback or retry.",
+		{"name": "run_station_action", "description": "One preauthorized cloud-text or local-PCM TTS, bounded native Alice ASR, reviewed playback-mixer volume, registered local-PCM media or bounded dim Mini 1 LED show. Backend is private policy; no fallback or retry.",
 			"inputSchema": schema(map[string]any{"station_id": station,
 				"expected_state_sha256": map[string]any{"type": "string", "pattern": "^[a-f0-9]{64}$"},
-				"action":                map[string]any{"type": "string", "enum": []string{"speech.say", "speech.listen"}},
+				"action":                map[string]any{"type": "string", "enum": append(append([]string{}, nativeActions...), "led.show")},
 				"parameters": map[string]any{"oneOf": []any{schema(map[string]any{"text": text}, "text"), wav,
-					schema(map[string]any{"duration_seconds": map[string]any{"type": "integer", "minimum": 5, "maximum": 60}}, "duration_seconds")}}}, "station_id", "action", "parameters", "expected_state_sha256"),
+					schema(map[string]any{"duration_seconds": map[string]any{"type": "integer", "minimum": 5, "maximum": 60}}, "duration_seconds"),
+					schema(map[string]any{"percent": percent}, "percent"),
+					schema(map[string]any{"step": map[string]any{"type": "string", "enum": []string{"quieter", "louder"}},
+						"max_percent": percent}, "step", "max_percent"), media, led}}}, "station_id", "action", "parameters", "expected_state_sha256"),
 			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false}},
 	}
 }
@@ -191,9 +213,13 @@ func (s *server) tool(name string, arguments json.RawMessage) (map[string]any, b
 		if !decode(arguments, &args) {
 			return nil, false
 		}
+		actions := append([]string{}, nativeActions...)
+		if s.model == "station-mini" && s.show != nil {
+			actions = append(actions, "led.show")
+		}
 		return map[string]any{"station_id": s.stationID, "model": s.model,
 			"version": "0.1.0", "transport": "streamable_http_tls", "authentication": "bearer",
-			"device_actions": []string{"speech.say", "speech.listen"}, "probes": []string{"health", "microphone"},
+			"device_actions": actions, "probes": nativeProbes,
 			"arbitrary_shell": false, "raw_audio_export": false, "independent_wake_word": false}, true
 	case "get_station_controls":
 		var args struct {
@@ -208,7 +234,7 @@ func (s *server) tool(name string, arguments json.RawMessage) (map[string]any, b
 			Station string `json:"station_id"`
 			Probe   string `json:"probe"`
 		}
-		if !decode(arguments, &args) || args.Station != s.stationID || args.Probe != "health" && args.Probe != "microphone" {
+		if !decode(arguments, &args) || args.Station != s.stationID || !slices.Contains(nativeProbes, args.Probe) {
 			return nil, false
 		}
 		return s.probe(args.Probe), true
@@ -247,6 +273,16 @@ func (s *server) tool(name string, arguments json.RawMessage) (map[string]any, b
 			}
 			return s.run(params.Text, args.Expected), true
 		}
+		if args.Action == "led.show" && s.show != nil {
+			var params ledPayload
+			if !decode(args.Parameters, &params) {
+				return nil, false
+			}
+			if _, valid := decodeLED(params); !valid {
+				return nil, false
+			}
+			return s.show(params, args.Expected), true
+		}
 		if args.Action == "speech.listen" && s.listen != nil {
 			var params struct {
 				Seconds int `json:"duration_seconds"`
@@ -255,6 +291,23 @@ func (s *server) tool(name string, arguments json.RawMessage) (map[string]any, b
 				return nil, false
 			}
 			return s.listen(params.Seconds, args.Expected), true
+		}
+		if args.Action == "audio.volume" && s.volume != nil {
+			var params volumeRequest
+			if !decode(args.Parameters, &params) || !validVolume(params) {
+				return nil, false
+			}
+			return s.volume(params, args.Expected), true
+		}
+		if args.Action == "audio.play" && s.media != nil {
+			var params mediaPayload
+			if !decode(args.Parameters, &params) || !alias(params.Asset) || params.Seconds < 1 || params.Seconds > 10 {
+				return nil, false
+			}
+			if _, valid := decodePCM(pcmPayload{WAV: params.WAV, SHA256: params.SHA256}); !valid {
+				return nil, false
+			}
+			return s.media(params, args.Expected), true
 		}
 	}
 	return nil, false
@@ -308,11 +361,12 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		// Only the bounded PCM operation gets the larger body allowance.
+		// Only the bounded PCM operations get the larger body allowance.
 		// Full duplicate/unknown-field/target/WAV validation still follows below.
 		if json.Unmarshal(data, &large) != nil || large.Method != "tools/call" ||
-			large.Params.Name != "run_station_action" || large.Params.Arguments.Action != "speech.say" ||
-			large.Params.Arguments.Parameters.WAV == "" || s.pcm == nil {
+			large.Params.Name != "run_station_action" || large.Params.Arguments.Parameters.WAV == "" ||
+			!(large.Params.Arguments.Action == "speech.say" && s.pcm != nil ||
+				large.Params.Arguments.Action == "audio.play" && s.media != nil) {
 			http.Error(w, "Request too large", http.StatusRequestEntityTooLarge)
 			return
 		}

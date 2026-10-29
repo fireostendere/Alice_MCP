@@ -33,6 +33,7 @@ def speech(tmp_path: Path, monkeypatch: Any) -> tuple[Controller, list[str]]:
     inventory.write_text(json.dumps({"stations": [{
         "id": "desk", "model": "station-mini", "host": "station.invalid", "port": 2222,
         "user": "root", "identity_file": str(key), "known_hosts_file": str(hosts),
+        "preauthorize_all_actions": False,  # Exercises the explicit approval-form path.
         "controls": {"firmware_sha256": "a" * 64, "allowed_actions": ["speech.listen"],
                      "speech_client": {"path": str(binary), "sha256": digest}},
     }]}))
@@ -113,7 +114,8 @@ def tts(speech: Any, monkeypatch: Any) -> Any:
     item = j["stations"][0]
     station = Station("desk", "station-mini", "station.invalid", 2222, "root",
                       Path(item["identity_file"]), Path(item["known_hosts_file"]), False, "",
-                      "c" * 64, "d" * 64, device_runtime.validate_policy(policy, "station-mini"))
+                      "c" * 64, "d" * 64, device_runtime.validate_policy(policy, "station-mini"),
+                      preauthorize_all_actions=False)
     monkeypatch.setattr(controller, "station", lambda _: station)
     return controller, calls
 

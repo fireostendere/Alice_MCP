@@ -113,6 +113,11 @@ func pcmFlags(raw []byte, frames, rate int) (map[string]any, bool) {
 }
 
 func (n *nativeRuntime) playPCM(p pcmPayload, expected ...string) map[string]any {
+	return n.playLocal("speech.say", p, func(config, []byte) bool { return true }, expected...)
+}
+
+// Shared by local TTS and registered media; admit adds the action's own limits.
+func (n *nativeRuntime) playLocal(action string, p pcmPayload, admit func(config, []byte) bool, expected ...string) map[string]any {
 	if !n.lock.TryLock() {
 		return blocked("Another native action is active")
 	}
@@ -123,11 +128,11 @@ func (n *nativeRuntime) playPCM(p pcmPayload, expected ...string) map[string]any
 		return blocked("Fresh state-bound preview required")
 	}
 	c, stamp, err := n.policy()
-	if err != nil || c.LocalPCM == nil || !c.permits("speech.say") || n.model != "station-mini" {
+	if err != nil || c.LocalPCM == nil || !c.permits(action) || n.model != "station-mini" {
 		return blocked("Local PCM is not preauthorized by the resident policy")
 	}
 	wav, valid := decodePCM(p)
-	if !valid {
+	if !valid || !admit(c, wav) {
 		return blocked("Local PCM outside reviewed bounds")
 	}
 	library, err := filepath.EvalSymlinks("/system/vendor/quasar/libs/libasound.so.2")

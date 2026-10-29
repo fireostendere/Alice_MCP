@@ -7,8 +7,10 @@ and keep Quasar enabled. Unsupported/high-risk operations remain guidance-only.
 
 ## API and approval lifecycle
 
-The server exposes 16 tools in total; these six add runtime control to the
-existing knowledge, probe and service tools:
+The server exposes 19 tools in total; these six add runtime control to the
+existing knowledge, probe and service tools. Owned jobs (`start_job`, `list_jobs`,
+`cancel_job`), the generated-tone siren, presets and the guarded reboot are in
+[JOBS.md](JOBS.md) (source-tested, not live-accepted):
 
 | Tool | Boundary |
 |---|---|
@@ -36,7 +38,9 @@ instead run on the resident agent over TLS, with no SSH fallback or per-call
 upload. Use `run_station_action`; legacy separate preview/apply and service actions
 are not implemented on that transport. Both host and device policies must allow
 the action and standing preauthorization is required. See [native agent](NATIVE_AGENT.md)
-for its narrower tool/action set and verification limits.
+for its narrower tool/action set and verification limits, and
+[native typed audio and probes](#native-typed-audio-and-probes-source-tested-not-live-accepted)
+for `audio.volume`, `audio.play` and the `storage`/`services`/`audio` probes.
 
 Plans expire 300 seconds after preview creation, not after the human responds.
 Use the exact returned digest; it is not a firmware hash to type manually.
@@ -64,14 +68,17 @@ an outstanding plan. No approval token is reused.
 
 For standing authorization of all already-permitted actions, set the boolean
 `preauthorize_all_actions` on the **station entry**, alongside `controls`. Default
-is `false`; strings/numbers are rejected. When true, service start/restart and all
+is `true` (owner decision, 2026-10-29), as for `allow_service_actions` and
+`allow_reboot`; an explicit `false` stays false. Strings and numbers are rejected.
+When true, service start/restart and all
 device actions, including capture, TTS, replay and persistent edits, skip native
 elicitation. `get_station_controls` reports the flag and the effective device
 `preauthorized_actions`; both service and device previews report `approval_required`.
 This does not enable any action, widen parameters/assets/options, waive firmware/SSH
 trust checks, extend TTL, allow retries, or authorize tasks outside the owner's request.
-Use only with trusted local agents. Setting false/removing the flag revokes standing
-authorization and invalidates outstanding previews. Other actions require native approval.
+Use only with trusted local agents. Setting it to `false` revokes standing
+authorization and invalidates outstanding previews; then other actions require native
+approval.
 The MCP client can independently ask for permission to call a tool.
 
 ## Exact actions
@@ -87,6 +94,7 @@ and unapproved aliases are not valid parameters. Aliases match
 | `led.replay` | `capture_id`: 32 lowercase hexadecimal characters | Mini 1 only: repeat the exact recorded bytes `25 aa` once, not an arbitrary packet. Requires a completed, cleaned capture on the same firmware containing that packet. No new PWM/color/current values. |
 | `led.pulse` | `capture_id`: 32 lowercase hexadecimal characters; `channel`: integer 0–2 | Mini 1 only: one second at fixed PWM 16/255 on one observed triplet position, then return to the captured idle zero frame. Requires same-boot recent PWM/update evidence; no arbitrary level, duration, register or RGB mapping. |
 | `led.animate` | `capture_id`: 32 lowercase hexadecimal characters; `mode`: `blink`, `rainbow`, `rainbow_swirl` | Mini 1 only: fixed low-brightness show for 3–6 s nominal, then the captured idle zero frame. No raw frame input, arbitrary level, duration, loops or daemon. |
+| `led.show` | `effect`: `rainbow`, `breathe`, `spin`, `spin_color`, `static`, `off`, `notify`, `police`, `calibrate`; `duration_seconds` 1–15; optional `speed` 1–5; `red`/`green`/`blue` 0–16 for colour effects only; `channel` for `calibrate` only; `capture_id` on Mini 1 only | Mini 1, Lite, Mini 3: bounded reference-effect equivalents at ≤16/255, ≤2.5 flashes/s, hard deadline, then restore (Lite/Mini 3 yield to a firmware write instead). Private `led_map` calibrates channels. **Source-tested, not live-accepted**; see [LED parity](LED_PARITY.md). |
 | `audio.volume` | `percent`: integer 0–private `max_volume` (default 30) | Sets a probed `Master` control and preserves a restore record; not proof of room loudness or every model's mixer layout. |
 | `audio.play` | `asset`: approved media alias; `duration_seconds`: integer 1–10 | Bounded playback of the approved asset; no supplied path/stream URL, microphone recording or Quasar stop. |
 | `media.upload` | `asset`: approved media alias; `content_base64`: encoded content, decoded size at most 49,152 bytes | Decoded SHA-256 must match the asset's preregistered policy hash. This limit deliberately bounds SSH arguments; it is not a streaming upload API. |
@@ -123,8 +131,9 @@ Do not paste the resulting inventory, private URLs or keys into chat or issues.
 | Field | Meaning |
 |---|---|
 | `firmware_sha256` | Locally reviewed SHA-256 of `/system/vendor/quasar/maind`, as 64 lowercase hexadecimal characters; binds actions to that exact firmware binary. Not a hash copied blindly from a public example. |
-| `allowed_actions` | Explicit subset of the eleven action names above; possession of an alias never grants action permission. Include `restore` if runtime recovery is to be available. |
-| `preauthorized_actions` | Optional unique subset of `allowed_actions`, limited to `led.effect`, `audio.volume` and `audio.play`; permits apply without native elicitation. Default empty. Does not enable writes or bypass any preview, parameter, firmware, trust or state check. |
+| `allowed_actions` | `"all"` (the default when absent, per the owner decision of 2026-10-29) allows every implemented action, including ones added later. An explicit list allows exactly those names. Unknown names are rejected; an alias never grants a permission. The resident agent expands `"all"` to the implemented actions whose local prerequisites are configured. |
+| `preauthorized_actions` | Optional unique subset of `allowed_actions`, or `"all"`, limited to `led.effect`, `audio.volume` and `audio.play`; permits apply without native elicitation. Default empty. Does not enable writes or bypass any preview, parameter, firmware, trust or state check. |
+| `led_map` | Optional Mini 1/Lite/Mini 3 calibration for `led.show`: `channels` (per physical channel `[zone, colour]` or `null`) and `gain_percent` (0–100 per colour). Produced by the owner-run calibration runner; see [LED parity](LED_PARITY.md). |
 | `max_volume` | Private volume ceiling; default 30 percent. Use a conservative ceiling suitable for the owner and room. |
 | `allow_rootfs_remount` | Boolean, default `false`; explicit per-station permission for guarded temporary rootfs read-write access. |
 | `media` | Object mapping approved asset aliases to `{"path": ..., "sha256": ...}`. Paths must be `/data/sounds/<safe-name>.opus`, `.wav` or `.mp3`; SHA-256 pins the exact approved content. |
@@ -401,6 +410,78 @@ Playback passes an unlinked owner-only snapshot of the hash-verified bytes throu
 an inherited descriptor at `/proc/self/fd/<fd>`, not the mutable asset path. This
 requires procfs and a native player that preserves the descriptor; compatibility
 is unverified on real firmware. No fallback to an unchecked path is provided.
+
+## Native typed audio and probes (source-tested, not live-accepted)
+
+The resident agent adds typed equivalents of SSH behavior without new tools: the
+same five native tools gain `audio.volume`/`audio.play` actions and `storage`,
+`services` and `audio` probes. They use the existing native contract: host **and**
+resident private policies must allow the action, standing preauthorization, a
+fresh 300-second preview bound to station/trust/configuration and resident state,
+`expected_state_sha256`, one consumption, serialized execution and no retry or
+SSH fallback. Older residents reject the new policy fields and fail closed.
+
+**Volume.** Parameters are `{"percent": N}` (0 to host `max_volume`) or
+`{"step": "quieter" | "louder"}`. The resident needs a private, operator-reviewed
+mapping; without it `audio.volume` cannot be allowed:
+
+```json
+"volume": {"amixer": "/PRIVATE/amixer", "amixer_sha256": "REVIEWED_SHA256",
+           "card": 0, "control": "Master", "max_percent": 30}
+```
+
+The pinned `amixer` is executed from its verified descriptor with the SSH helper's
+environment. Only one exact simple control whose capabilities are playback-only
+(`pvolume`, optional `pvolume-joined`/`pswitch`) is accepted; any capture/joined
+capability, capture line, unequal channels or ambiguous output fails closed, so
+microphone gain is never touched. Steps are 10 points; `louder` never exceeds
+`min(host max_volume, resident max_percent)`, `quieter` never raises the level and
+an absolute set above the resident ceiling is refused. The prior and read-back
+values are returned as `previous_percent`/`percent`; restore by setting
+`previous_percent` with another bounded action. A failed or mismatched read-back
+is `unknown`/`do_not_retry`. No resident restore record is written. The Mini 1
+mixer mapping has **not** been reviewed: whether `Master` exists, whether
+`amixer` and its ALSA configuration run with the vendor library, and whether
+Quasar's output follows this mixer are all unknown.
+
+**Registered media.** `{"asset": ALIAS, "duration_seconds": 1-10}` plays only a
+host `controls.local_media` entry (native stations only):
+
+```json
+"local_media": {"chime": {"file": "/PRIVATE/chime.wav", "sha256": "REVIEWED_SHA256"}}
+```
+
+The host re-reads the file at preview and dispatch, requires the exact SHA-256,
+canonical mono S16 16–48 kHz WAV with peak amplitude at most 8191, and a length
+within `duration_seconds`. It sends that WAV over the existing local-PCM TLS path;
+the resident additionally requires its own `"media": {"chime": "REVIEWED_SHA256"}`
+registration, the `local_pcm` player configuration and Mini 1, then plays it once
+through the pinned `pcm-player`. No station file, URL, executable upload, mixer
+change or Quasar stop is involved. Results reuse the local-PCM correlation checks.
+
+**Probes.** `storage` (statfs of `/data`: `total_kib`, `used_kib`, `free_kib`),
+`services` (booleans for `maind`, `quasar_launcher2`, `dropbear`, `shairport-sync`,
+`updatesd` and `agent`, from 15-byte kernel process names; presence, not health
+or OTA state) and `audio` (`sound_devices`, `volume_control`
+`ready|unconfigured|unavailable|busy`, `volume_percent` from the reviewed mapping
+only). `health` keeps memory/uptime. Raw process, mixer and filesystem output never
+leaves the resident.
+
+Owner-run acceptance, read-only unless `--live` (a terminal and an exact word are
+required; one write path each, no retry). Run in order with the owner beside the
+Station after a resident containing this source is deployed:
+
+```sh
+python -m alice_mcp.native_acceptance health --station ALIAS
+python -m alice_mcp.native_acceptance volume --station ALIAS --live
+python -m alice_mcp.native_acceptance media --station ALIAS --asset ALIAS --seconds 3 --live
+```
+
+`volume` refuses unless the current level is readable and within the host ceiling,
+asks for `VOLUME`, lowers one step, asks `QUIETER`/`SAME` about Alice's next reply,
+then restores the prior value once (also after an interrupted answer, never after an
+`unknown` step). `media` asks for `PLAY`, plays once and asks `HEARD`/`NOTHING`.
+Tests use synthetic peers and a synthetic `amixer`; nothing here was run on a Station.
 
 ## Verification and limitations
 

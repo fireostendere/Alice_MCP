@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from alice_mcp import network_probe
+from alice_mcp import capture_probe, network_probe
 
 MODELS = frozenset({
     "station-lite", "station-lite2", "station-mini", "station-mini2", "station-mini3",
@@ -79,6 +79,8 @@ I2C_TRACE_CHECKS = {
 }
 PROBES = {
     "network": network_probe.COMMAND,
+    # Capture-coexistence metadata only: never opens PCM nodes or captures audio.
+    "capture": capture_probe.COMMAND,
     # Metadata only: no enable writes, trace-buffer reads, or implicit mounts.
     "i2c_trace": "LC_ALL=C; export LC_ALL; " + " ".join(
         f"if {check}; then echo {key}=1; else echo {key}=0; fi;"
@@ -129,8 +131,10 @@ class Station:
     trust_sha256: str
     controls: dict[str, Any] = field(default_factory=dict)
     host_key_alias: str = ""
-    preauthorize_all_actions: bool = False
+    preauthorize_all_actions: bool = True
     native_mcp: dict[str, str] = field(default_factory=dict)
+    allow_reboot: bool = True
+    jobs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -144,6 +148,12 @@ class SSHInput:
         if (not isinstance(self.command, str) or len(self.command.encode()) > 4096
             or not isinstance(self.data, bytes) or len(self.data) > 120 * 1024):
             raise SafetyError("Bundled helper exceeds SSH input bounds")
+
+
+def confirm(answer: str, word: str) -> dict[str, str] | None:
+    """Owner-typed confirmation: surrounding whitespace ignored, otherwise exact and
+    case-sensitive. None when confirmed, else a short diagnostic for the report."""
+    return None if answer.strip() == word else {"received": repr(answer[:20])}
 
 
 def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -203,7 +213,7 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
             optional = {
                 "allow_service_actions", "quasar_script_sha256", "controls", "host_key_alias",
                 "preauthorize_all_actions",
-                "native_mcp",
+                "native_mcp", "allow_reboot", "jobs",
             }
             if entry.keys() - required - optional - ssh_fields:
                 raise ValueError("unexpected fields")
@@ -247,19 +257,25 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
             if not native:
                 _check_ssh_file(key_path, private=True)
                 _check_ssh_file(hosts_path)
-            enabled = entry.get("allow_service_actions", False)
-            preauthorized = entry.get("preauthorize_all_actions", False)
+            # Owner default (2026-10-29): everything allowed and preauthorized unless set false.
+            enabled = entry.get("allow_service_actions", True)
+            preauthorized = entry.get("preauthorize_all_actions", True)
+            reboot = entry.get("allow_reboot", True)  # Owner default (2026-10-29).
             script_sha = entry.get("quasar_script_sha256", "")
             if (type(enabled) is not bool or type(preauthorized) is not bool
-                or not isinstance(script_sha, str)):
+                or type(reboot) is not bool or not isinstance(script_sha, str)):
                 raise ValueError("invalid policy")
             if script_sha and not re.fullmatch(r"[a-f0-9]{64}", script_sha):
                 raise ValueError("invalid digest")
             from alice_mcp.device_runtime import validate_policy
 
             control_policy = validate_policy(entry.get("controls", {}), entry["model"])
-            if "local_tts" in control_policy and not native:
+            if ("local_tts" in control_policy or "local_media" in control_policy) and not native:
                 raise ValueError("Local speech requires the resident transport")
+            from alice_mcp.owned_jobs import validate_policy as validate_jobs
+
+            jobs = validate_jobs(entry.get("jobs", {}), control_policy, entry["model"],
+                                 bool(native))
             # Bind previews to public trust data and key metadata, without reading private keys.
             trust_path = Path(native["token_file"]) if native else key_path
             public_path = Path(native["ca_file"]) if native else hosts_path
@@ -278,7 +294,7 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
                 hashlib.sha256(raw).hexdigest(), hashlib.sha256(trust).hexdigest(),
                 control_policy, host_key_alias=host_key_alias,
                 preauthorize_all_actions=preauthorized,
-                native_mcp=native,
+                native_mcp=native, allow_reboot=reboot, jobs=jobs,
             )
         return result
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
@@ -377,6 +393,11 @@ def _number(fields: dict[str, str], key: str) -> int:
 
 def parse_probe(probe: str, text: str) -> dict[str, Any]:
     """Return only typed allowlisted values, never raw remote strings."""
+    if probe == "capture":
+        try:
+            return capture_probe.parse(text)
+        except ValueError:
+            raise SafetyError("Capture probe unavailable or incompatible") from None
     fields = _fields(text)
     if probe == "network":
         data = {key: _number(fields, key) for key in network_probe.COUNTERS}
@@ -460,6 +481,7 @@ class Controller:
         self.clock = clock
         self.plans: dict[str, Plan] = {}
         self.speech_sessions: dict[str, Any] = {}
+        self.jobs: dict[str, Any] = {}  # Owned jobs live only as long as this process.
         self._probe_slots = threading.BoundedSemaphore(2)
         self._plan_lock = threading.Lock()
         self._execution_lock = threading.Lock()
@@ -482,7 +504,8 @@ class Controller:
             if probe == "microphone":
                 raise SafetyError("Microphone metadata requires the native MCP agent")
             source = PROBES[probe]
-            command = SSHInput("sh -s", source.encode()) if probe == "network" else source
+            command = (SSHInput("sh -s", source.encode()) if probe in {"network", "capture"}
+                       else source)
             return {"evidence_class": "analytical", "data": parse_probe(
                 probe, self.runner(station, command),
             )}
@@ -512,6 +535,10 @@ class Controller:
         return digest, running
 
     def preview_service(self, station_id: str, action: str) -> dict[str, Any]:
+        if action == "reboot":
+            from alice_mcp.owned_jobs import preview_reboot
+
+            return preview_reboot(self, station_id)
         if action not in {"start", "restart"}:
             raise SafetyError("Only Quasar start and restart are supported; stop is prohibited")
         station = self.station(station_id)
@@ -554,6 +581,10 @@ class Controller:
     def _execute_plan(self, plan: Plan) -> dict[str, Any]:
         if not math.isfinite(plan.expires) or self.clock() >= plan.expires:
             raise SafetyError("Preview expired")
+        if plan.action == "reboot" and not plan.request:
+            from alice_mcp.owned_jobs import execute_reboot
+
+            return execute_reboot(self, plan)
         if plan.request:
             if plan.request.get("schema") == "alice.native.v1":
                 from alice_mcp import native_transport

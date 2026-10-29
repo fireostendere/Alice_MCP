@@ -16,6 +16,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+from alice_mcp import device_runtime as rt
 from alice_mcp import local_tts, native_transport, speech_capture
 from alice_mcp.core import MAX_OUTPUT, Controller, SafetyError, Station, ssh_argv
 from alice_mcp.vqe_experiment import _ssh
@@ -132,7 +133,7 @@ exit 0
 def _permitted(controller: Controller, station: Station) -> None:
     if (not controller.writes or not station.preauthorize_all_actions
         or station.model != "station-mini"
-        or "speech.say" not in station.controls.get("allowed_actions", [])):
+        or not rt.allows(station.controls, "speech.say")):
         raise SafetyError("Local playback pilot is not authorized")
 
 

@@ -91,7 +91,8 @@ def test_expired_approval_reports_wait_without_extending_or_reusing_preview(
     now = [100.0]
     controller = Controller(None, writes=True, clock=lambda: now[0])
     station = Station("desk", "station-mini", "station.invalid", 22, "root",
-                      Path("/PRIVATE/key"), Path("/PRIVATE/hosts"), False, "", "", "")
+                      Path("/PRIVATE/key"), Path("/PRIVATE/hosts"), False, "", "", "",
+                      preauthorize_all_actions=False)
     plan_id = controller.store_plan(station, "start", "a" * 64)
     monkeypatch.setattr(server, "controller", controller)
     runner = Mock()
@@ -364,7 +365,7 @@ def test_stdio_handshake_tools_and_no_private_inventory() -> None:
                 "get_knowledge", "list_skills", "read_skill", "preview_service_action",
                 "apply_service_action", "get_model_interfaces", "get_station_controls",
                 "preview_station_action", "apply_station_action", "run_station_action",
-                "get_capture_status",
+                "get_capture_status", "start_job", "list_jobs", "cancel_job",
             }
             result = await session.call_tool("list_stations", {})
             assert not result.isError

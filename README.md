@@ -126,7 +126,7 @@ involved; reboot persistence and other firmware remain unqualified. Host tests
 and an ARM build alone do not prove sound. See [native local voice](docs/NATIVE_AGENT.md)
 and [speech clients](docs/SPEECH_CLIENT.md).
 
-The server exposes **16 tools**. See the generated [MCP contract](docs/TOOLS.md)
+The server exposes **19 tools**. See the generated [MCP contract](docs/TOOLS.md)
 and the [runtime control contract](docs/CONTROLS.md).
 
 | Tools | Behavior |
@@ -144,6 +144,7 @@ and the [runtime control contract](docs/CONTROLS.md).
 | `apply_station_action(plan_id, expected_sha256)` | Private preauthorization or native human approval, fresh-state validation, bounded device action, post-check |
 | `run_station_action(station_id, action, parameters)` | Preview and apply in one call: fresh one-use preview, then private preauthorization or one native approval form |
 | `get_capture_status(station_id, capture_id)` | Read fresh capture readiness, bounded LED records or one approved ASR text; never starts capture |
+| `start_job`, `list_jobs`, `cancel_job` | Owned host timers, declarative presets and a bounded generated-tone siren; cancel by owned ID; lost when this process exits ([jobs](docs/JOBS.md)) |
 
 ### Fewer approval prompts and bounded diagnostics
 
@@ -262,6 +263,8 @@ The runtime implements `led.effect`, `led.capture`, `led.replay`, `led.pulse`, `
 `speech.listen`, `speech.say`,
 `audio.volume`, `audio.play`, `media.upload`,
 `sound.replace`, `config.select`, and narrow backup-record `restore`.
+`led.show` (source-tested, not live-accepted) adds bounded reference-effect equivalents
+and a channel-calibration runner; see [LED parity](docs/LED_PARITY.md).
 They require `ALICE_MCP_ALLOW_WRITES=1`, a private per-station `controls` policy
 allowing the action, and a locally reviewed SHA-256 of
 `/system/vendor/quasar/maind`. This digest binds the reviewed firmware, not a
@@ -327,7 +330,7 @@ offline and synthetic only.
 
 An SSH timeout can occur after execution; an `unknown` outcome is **not a failure
 safe to retry**. Inspect locally first. There is no automatic retry, Quasar stop,
-reboot, flash, root, OTA change or installer endpoint. Those unsupported/high-risk
+implicit reboot, flash, root, OTA change or installer endpoint. Those unsupported/high-risk
 recipes remain guidance-only, with prerequisites and recovery planning. Quasar is
 preserved even for AirPlay/standalone requests.
 

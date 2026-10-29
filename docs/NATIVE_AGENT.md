@@ -43,6 +43,8 @@ arbitrary shell, file browser, package manager or unauthenticated root API.
   cloud-text fallback and does not alter ordinary Quasar operation.
   Uncorrelated completion remains `unknown`/`do_not_retry`; a functioning TLS channel
   does not prove audible sound.
+- Source (not installed) adds Mini 1 `led.show`: host-mapped, bounded dim PWM frames
+  with the SSH helper's capture evidence and lock; see [LED parity](LED_PARITY.md).
 
 ## Operator provisioning and inventory
 

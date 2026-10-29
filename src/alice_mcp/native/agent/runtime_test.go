@@ -302,3 +302,36 @@ func TestResidentPreviewExpiresWithoutReadOnlyRenewal(t *testing.T) {
 		t.Fatal("expired state token was not invalidated")
 	}
 }
+
+func TestAllowedActionsAllExpandsToConfiguredImplementedActions(t *testing.T) {
+	path, _ := privateConfig(t)
+	raw, _ := os.ReadFile(path)
+	list := `"allowed_actions":["speech.say"],`
+	write := func(replacement string) {
+		if os.WriteFile(path, []byte(strings.Replace(string(raw), list, replacement, 1)), 0600) != nil {
+			t.Fatal("cannot prepare synthetic policy")
+		}
+	}
+	for _, replacement := range []string{`"allowed_actions":"all",`, ""} {
+		write(replacement)
+		c, _, err := loadConfig(path)
+		// Only actions whose local prerequisites exist: no ASR client, mixer or media here.
+		if err != nil || strings.Join(c.AllowedActions, ",") != "speech.say,led.show" {
+			t.Fatalf("%q did not expand to every configured implemented action", replacement)
+		}
+		if !c.permits("led.show") && c.PreauthorizeAllActions || c.permits("shell") {
+			t.Fatal("expanded allowlist permits the wrong actions")
+		}
+	}
+	write(`"allowed_actions":[],`)
+	if c, _, err := loadConfig(path); err != nil || len(c.AllowedActions) != 0 {
+		t.Fatal("an explicit empty allowlist was not kept empty")
+	}
+	for _, replacement := range []string{`"allowed_actions":"everything",`,
+		`"allowed_actions":["all","speech.say"],`, `"allowed_actions":["shell"],`} {
+		write(replacement)
+		if _, _, err := loadConfig(path); err == nil {
+			t.Fatal("invalid allowlist accepted: " + replacement)
+		}
+	}
+}

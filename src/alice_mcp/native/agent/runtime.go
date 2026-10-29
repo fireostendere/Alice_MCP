@@ -247,6 +247,9 @@ func kernelMachine() string {
 }
 
 func (n *nativeRuntime) probe(name string) map[string]any {
+	if result, ok := n.typedProbe(name); ok {
+		return result
+	}
 	if name == "microphone" {
 		status, _ := readLocal("/proc/asound/card0/pcm2c/sub0/status", 4096)
 		state := "unknown"

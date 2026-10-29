@@ -25,11 +25,24 @@ from typing import Any
 from urllib.parse import urlsplit
 
 ACTIONS = frozenset({"led.effect", "led.capture", "led.replay", "led.pulse", "led.animate",
+                     "led.show",
                      "speech.listen", "speech.say",
                      "audio.volume", "audio.play", "media.upload", "sound.replace",
                      "config.select", "restore"})
 PREAUTHORIZED_ACTIONS = frozenset({"led.effect", "audio.volume", "audio.play"})
+ALL = "all"
 ANIMATION_MODES = frozenset({"blink", "rainbow", "rainbow_swirl"})
+# Bounded equivalents of the reference RGB effects: no loop, strobe, GCC/current or shutdown.
+SHOW_COLOR_EFFECTS = frozenset({"breathe", "spin_color", "static", "notify"})
+SHOW_EFFECTS = SHOW_COLOR_EFFECTS | {"rainbow", "spin", "off", "police", "calibrate"}
+# Speed 1-5; >=200 ms frames keep on/off flashing at or below 2.5 Hz (WCAG: three per second).
+SHOW_INTERVAL_MS = {1: 500, 2: 400, 3: 300, 4: 250, 5: 200}
+SHOW_LEVEL = 16
+COLORS = ("red", "green", "blue")
+LED_ZONES = {"station-mini": 6, "station-lite": 3, "station-mini3": 6}
+HUES = ((16, 0, 0), (16, 6, 0), (16, 16, 0), (6, 16, 0), (0, 16, 0), (0, 16, 6),
+        (0, 16, 16), (0, 6, 16), (0, 0, 16), (6, 0, 16), (16, 0, 16), (16, 0, 6))
+BREATH = (1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2)  # Eighths of the requested colour.
 SCHEMA = "alice.device.v1"
 ALIAS = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -128,26 +141,51 @@ def _endpoint(value: str, insecure: bool) -> bool:
         return False
 
 
+def allowed_actions(policy: dict[str, Any]) -> list[str]:
+    """Owner default (2026-10-29): "all" or an absent list means every implemented action.
+
+    An empty policy (no controls) still allows nothing; unknown names never match.
+    """
+    if not policy:
+        return []
+    actions = policy.get("allowed_actions", ALL)
+    return sorted(ACTIONS) if actions == ALL else [a for a in actions if a in ACTIONS]
+
+
+def allows(policy: dict[str, Any], action: str) -> bool:
+    return action in allowed_actions(policy)
+
+
+def preauthorized_actions(policy: dict[str, Any]) -> list[str]:
+    value = policy.get("preauthorized_actions", [])
+    allowed = allowed_actions(policy)
+    return sorted(PREAUTHORIZED_ACTIONS.intersection(allowed)) if value == ALL else [
+        a for a in value if a in allowed]
+
+
 def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
     """Validate private operator configuration; never include its values in errors."""
     try:
         _require(model in MODELS)
         if policy == {}:
             return {}
-        _require(_keys(policy, {"firmware_sha256", "allowed_actions"},
-                       {"max_volume", "allow_rootfs_remount", "media", "configs", "speech_client",
-                         "tts_client", "local_tts",
-                        "preauthorized_actions"}))
+        _require(_keys(policy, {"firmware_sha256"},
+                       {"allowed_actions", "max_volume", "allow_rootfs_remount", "media",
+                        "configs", "speech_client", "tts_client", "local_tts", "local_media",
+                        "led_map", "preauthorized_actions"}))
         _require(_match(HEX64, policy["firmware_sha256"]))
-        actions = policy["allowed_actions"]
-        _require(type(actions) is list and len(actions) <= len(ACTIONS)
+        actions = policy.get("allowed_actions", ALL)
+        _require(actions == ALL or type(actions) is list and len(actions) <= len(ACTIONS)
+                 and len(set(actions)) == len(actions)
                  and all(type(a) is str and a in ACTIONS for a in actions))
-        _require(len(set(actions)) == len(actions))
+        actions = allowed_actions(policy)
         preauthorized = policy.get("preauthorized_actions", [])
-        _require(type(preauthorized) is list and len(preauthorized) <= len(PREAUTHORIZED_ACTIONS)
+        _require(preauthorized == ALL or type(preauthorized) is list
+                 and len(preauthorized) <= len(PREAUTHORIZED_ACTIONS)
+                 and len(set(preauthorized)) == len(preauthorized)
                  and all(type(a) is str and a in PREAUTHORIZED_ACTIONS and a in actions
                          for a in preauthorized))
-        _require(len(set(preauthorized)) == len(preauthorized))
+        preauthorized = preauthorized_actions(policy)
         _require(_integer(policy.get("max_volume", 30), 0, 100))
         _require(type(policy.get("allow_rootfs_remount", False)) is bool)
         result = {"firmware_sha256": policy["firmware_sha256"], "allowed_actions": sorted(actions),
@@ -156,6 +194,8 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
                    "media": {}, "configs": {}}
         if preauthorized:
             result["preauthorized_actions"] = sorted(preauthorized)
+        if "led_map" in policy:
+            result["led_map"] = validate_led_map(model, policy["led_map"])
         if "local_tts" in policy:
             local = policy["local_tts"]
             _require(model == "station-mini"
@@ -164,6 +204,15 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
                      and _match(HEX64, local["model_sha256"])
                      and _match(HEX64, local["config_sha256"]))
             result["local_tts"] = dict(local)
+        if "local_media" in policy:
+            # Host-side WAV files for the resident local-PCM player, never station paths.
+            local_media = policy["local_media"]
+            _require(type(local_media) is dict and 1 <= len(local_media) <= 32)
+            for alias, item in local_media.items():
+                _require(_match(ALIAS, alias) and _keys(item, {"file", "sha256"})
+                         and _safe_path(item["file"]) and item["file"].endswith(".wav")
+                         and _match(HEX64, item["sha256"]))
+            result["local_media"] = {alias: dict(item) for alias, item in local_media.items()}
         for client in ("speech_client", "tts_client"):
             if client in policy:
                 item = policy[client]
@@ -211,6 +260,101 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
         raise ValueError("invalid_policy") from None
 
 
+def led_layout(model: str) -> list[list[Any]]:
+    """Paper channel map in device write order: [logical zone, colour] per channel.
+
+    Mini 1 is the unqualified SN3236 triplet assumption; Lite is the documented
+    micro:{red,green,blue}:ring{1,2,3} node order; Mini 3 is its BGR framebuffer.
+    """
+    _require(model in LED_ZONES, "unsupported_led")
+    if model == "station-lite":
+        return [[j % 3, COLORS[j // 3]] for j in range(9)]
+    order = (2, 1, 0) if model == "station-mini3" else (0, 1, 2)
+    return [[j // 3, COLORS[order[j % 3]]] for j in range(18)]
+
+
+def validate_led_map(model: str, value: Any) -> dict[str, Any]:
+    """Private calibration knob: channel -> zone/colour (or unused) and per-colour gain."""
+    layout = led_layout(model)
+    _require(_keys(value, set(), {"channels", "gain_percent"}) and value)
+    channels = value.get("channels", layout)
+    _require(type(channels) is list and len(channels) == len(layout))
+    for entry in channels:
+        _require(entry is None or type(entry) is list and len(entry) == 2
+                 and _integer(entry[0], 0, LED_ZONES[model] - 1)
+                 and isinstance(entry[1], str) and entry[1] in COLORS)
+    gains = value.get("gain_percent", {})
+    _require(type(gains) is dict and all(isinstance(k, str) and k in COLORS
+                                         and _integer(v, 0, 100) for k, v in gains.items()))
+    return {"channels": [None if e is None else list(e) for e in channels],
+            "gain_percent": {c: gains.get(c, 100) for c in COLORS}}
+
+
+def _show_parameters(params: Any, model: str) -> dict[str, Any]:
+    _require(model in LED_ZONES and type(params) is dict and isinstance(params.get("effect"), str)
+             and params["effect"] in SHOW_EFFECTS)
+    effect = params["effect"]
+    required = {"effect", "duration_seconds"}
+    if effect in SHOW_COLOR_EFFECTS:
+        required |= set(COLORS)
+    if effect == "calibrate":
+        required.add("channel")
+    if model == "station-mini":
+        required.add("capture_id")  # Same captured same-boot idle evidence as led.animate.
+    _require(_keys(params, required, {"speed"}))
+    result = {"speed": 3, **params}
+    _require(_integer(result["speed"], 1, 5) and _integer(
+        params["duration_seconds"], 1, 3 if effect == "calibrate" else 15))
+    _require(all(_integer(result.get(c, 0), 0, SHOW_LEVEL) for c in COLORS))
+    if effect == "calibrate":
+        _require(_integer(params["channel"], 0, len(led_layout(model)) - 1))
+    if "capture_id" in params:
+        _require(_match(HEX32, params["capture_id"]))
+    return result
+
+
+def _show_frame(effect: str, i: int, zones: int,
+                color: tuple[int, ...]) -> list[tuple[int, ...]]:
+    dark = (0, 0, 0)
+    if effect == "rainbow":
+        return [HUES[i % len(HUES)]] * zones
+    if effect == "breathe":
+        return [tuple(v * BREATH[i % len(BREATH)] // 8 for v in color)] * zones
+    if effect == "notify":
+        return [color if i % 2 == 0 else dark] * zones
+    if effect == "police":
+        red = i % 2 == 0
+        lit = range((zones + 1) // 2) if red else range(zones // 2, zones)
+        on = (SHOW_LEVEL, 0, 0) if red else (0, 0, SHOW_LEVEL)
+        return [on if z in lit else dark for z in range(zones)]
+    head = color if effect == "spin_color" else HUES[i * 2 % len(HUES)]
+    tail = tuple(v // 3 for v in head)
+    return [head if z == i % zones else tail if z == (i - 1) % zones else dark
+            for z in range(zones)]
+
+
+def show_frames(params: dict[str, Any], model: str,
+                led_map: dict[str, Any] | None = None) -> tuple[int, list[list[int]]]:
+    """Validated parameters -> (frame interval ms, physical channel frames); pure, <=15 s."""
+    layout = led_layout(model)
+    if params["effect"] == "calibrate":  # Raw physical channel: it measures, so bypasses the map.
+        return params["duration_seconds"] * 1000, [
+            [SHOW_LEVEL if j == params["channel"] else 0 for j in range(len(layout))]]
+    channels = (led_map or {}).get("channels") or layout
+    gains = (led_map or {}).get("gain_percent", {})
+    zones, total = LED_ZONES[model], params["duration_seconds"] * 1000
+    color = tuple(params.get(c, 0) for c in COLORS)
+    interval = SHOW_INTERVAL_MS[params["speed"]]
+    if params["effect"] in {"static", "off"}:
+        interval = total
+        logical = [[color if params["effect"] == "static" else (0, 0, 0)] * zones]
+    else:
+        logical = [_show_frame(params["effect"], i, zones, color)
+                   for i in range(max(1, total // interval))]
+    return interval, [[0 if e is None else frame[e[0]][COLORS.index(e[1])]
+                       * gains.get(e[1], 100) // 100 for e in channels] for frame in logical]
+
+
 def _media(data: bytes, path: str) -> bool:
     if not 0 < len(data) <= MAX_MEDIA:
         return False
@@ -226,6 +370,8 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
                         model: str) -> dict[str, Any]:
     try:
         _require(model in MODELS and isinstance(action, str) and action in ACTIONS)
+        if action == "led.show":
+            return _show_parameters(params, model)
         fields = {
             "led.effect": {"red", "green", "blue", "count", "period_ms"},
             "led.capture": {"duration_seconds"},
@@ -468,7 +614,7 @@ def _snapshot(root: Path, req: dict[str, Any]) -> tuple[dict[str, Any], bytes | 
     _require(_firmware(root) == policy["firmware_sha256"], "firmware_mismatch")
     state: dict[str, Any] = {"request": req, "firmware": policy["firmware_sha256"]}
     content = None
-    if action == "led.effect":
+    if action in {"led.effect", "led.show"}:
         state["led"] = _led_state(root, req["model"])
     elif action == "led.capture":
         state["capture"] = _capture_profile(root)
@@ -683,6 +829,56 @@ def _effect(root: Path, req: dict[str, Any], state: dict[str, Any]) -> dict[str,
             if not restored:
                 result["status"] = "unknown"
                 result["error_code"] = "restoration_failed"
+    return result
+
+
+def _levels(root: Path, nodes: list[dict[str, Any]]) -> list[int]:
+    return [int(_read(_path(root, n["path"], True), 32, True).strip()) for n in nodes]
+
+
+def _show(root: Path, req: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """Sysfs show with a hard deadline; yields instead of overwriting a foreign writer."""
+    interval, frames = show_frames(req["params"], req["model"], req["policy"].get("led_map"))
+    nodes = state["led"]
+    _require(all("color" in n for n in nodes) and len(nodes) == len(frames[0]), "unsupported_led")
+    original = [int(base64.b64decode(n["data"]).strip()) for n in nodes]
+    expected = original
+    deadline = time.monotonic() + len(frames) * interval / 1000 + 2
+    result: dict[str, Any] = {"status": "unknown", "restoration_verified": False,
+                              "yielded": False}
+    with _signals():
+        try:
+            for frame in [*frames, None]:
+                # Another writer (normally the firmware's mute/listening indication) changed
+                # the ring since our last frame: it owns it now; never restore over it.
+                if _levels(root, nodes) != expected:
+                    result.update(status="applied", yielded=True)
+                    break
+                if frame is None:
+                    result["status"] = "applied"
+                    break
+                for index, node in enumerate(nodes):  # Device Python 3.8: no zip(strict=).
+                    _node_write(root, node["path"], str(frame[index]).encode())
+                expected = frame
+                time.sleep(interval / 1000)
+                _require(time.monotonic() <= deadline, "deadline_exceeded")
+        except Exception:
+            result.update(status="unknown", error_code="effect_interrupted")
+        finally:
+            if not result["yielded"]:
+                restored = True
+                for node in nodes:
+                    try:
+                        _node_write(root, node["path"], base64.b64decode(node["data"]))
+                    except Exception:
+                        restored = False
+                try:
+                    restored = restored and _levels(root, nodes) == original
+                except Exception:
+                    restored = False
+                result["restoration_verified"] = restored
+                if not restored:
+                    result.update(status="unknown", error_code="restoration_failed")
     return result
 
 
@@ -994,6 +1190,8 @@ def _mutate(root: Path, req: dict[str, Any], state: dict[str, Any],
     action, params, policy = req["action"], req["params"], req["policy"]
     if action == "led.effect":
         return _effect(root, req, state)
+    if action == "led.show":
+        return _show(root, req, state)
     if action == "led.capture":
         captured = _start_capture(root, req, state)
         captured["status"] = captured.pop("outcome")
@@ -1069,7 +1267,7 @@ def dispatch(request: dict[str, Any], root: Path = Path("/")) -> dict[str, Any]:
                      and _match(HEX32, request["nonce"])
                      and request["params"]["capture_id"] == request["nonce"], "invalid_request")
             policy = validate_policy(request["policy"], request["model"])
-            _require("led.capture" in policy.get("allowed_actions", [])
+            _require(allows(policy, "led.capture")
                      and _firmware(root) == policy["firmware_sha256"], "capture_disabled")
             return _capture_report(root, request)
         _require(request["schema"] == SCHEMA and request["mode"] in {"inspect", "apply"}
@@ -1082,7 +1280,7 @@ def dispatch(request: dict[str, Any], root: Path = Path("/")) -> dict[str, Any]:
         req["policy"] = validate_policy(req["policy"], req["model"])
         req["params"] = validate_parameters(req["action"], req["params"],
                                             req["policy"], req["model"])
-        _require(req["action"] in req["policy"].get("allowed_actions", []), "action_disabled")
+        _require(allows(req["policy"], req["action"]), "action_disabled")
         if request["mode"] == "inspect":
             state, _ = _snapshot(root, req)
             result = {"status": "ready", "state_sha256": _sha(_encode(state))}

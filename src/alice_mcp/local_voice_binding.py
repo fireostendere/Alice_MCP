@@ -29,7 +29,7 @@ def bind(controller: Controller, expected_station: Station,
         if (os.name != "posix" or not controller.writes or path is None
             or expected_station.model != "station-mini" or not expected_station.native_mcp
             or not expected_station.preauthorize_all_actions
-            or "speech.say" not in expected_station.controls.get("allowed_actions", [])):
+            or not rt.allows(expected_station.controls, "speech.say")):
             raise ValueError("gates")
         _check_ssh_file(path, private=True)
         if controller.station(expected_station.id) != expected_station:

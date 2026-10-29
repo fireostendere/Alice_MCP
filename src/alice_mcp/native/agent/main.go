@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
@@ -26,9 +27,44 @@ type config struct {
 	FirmwareSHA256         string     `json:"firmware_sha256"`
 	TTSClient              string     `json:"tts_client"`
 	ASRClient              string     `json:"asr_client,omitempty"`
-	AllowedActions         []string   `json:"allowed_actions"`
+	AllowedActions         actionList `json:"allowed_actions"`
 	PreauthorizeAllActions bool       `json:"preauthorize_all_actions"`
 	LocalPCM               *pcmConfig `json:"local_pcm,omitempty"`
+	audioPolicy
+}
+
+// actionList is a JSON list or "all". Owner default (2026-10-29): "all" or an absent
+// list allows every implemented action whose local prerequisites are configured.
+type actionList []string
+
+const allActions = "all"
+
+func (a *actionList) UnmarshalJSON(data []byte) error {
+	if string(data) == `"`+allActions+`"` {
+		*a = actionList{allActions}
+		return nil
+	}
+	var names []string
+	if err := json.Unmarshal(data, &names); err != nil {
+		return err
+	}
+	*a = names
+	return nil
+}
+
+func (c config) implementedActions() actionList {
+	actions := actionList{}
+	for _, item := range []struct {
+		name  string
+		ready bool
+	}{{"speech.say", c.LocalPCM != nil || filepath.IsAbs(c.TTSClient)},
+		{"speech.listen", filepath.IsAbs(c.ASRClient)}, {"audio.volume", c.Volume != nil},
+		{"audio.play", c.Media != nil}, {"led.show", c.Model == "station-mini"}} {
+		if item.ready {
+			actions = append(actions, item.name)
+		}
+	}
+	return actions
 }
 
 func hex64(value string) bool {
@@ -116,10 +152,19 @@ func loadConfig(path string) (config, []byte, error) {
 		!hex64(c.LocalPCM.ALSAConfigSHA256) || !hex64(c.LocalPCM.LibrarySHA256)) {
 		return config{}, nil, bad
 	}
+	if c.Volume != nil && !c.Volume.valid() || c.Media != nil && (c.LocalPCM == nil || !validMedia(c.Media)) {
+		return config{}, nil, bad
+	}
+	if c.AllowedActions == nil || len(c.AllowedActions) == 1 && c.AllowedActions[0] == allActions {
+		c.AllowedActions = c.implementedActions()
+	}
 	for _, action := range c.AllowedActions {
-		if seen[action] || action != "speech.say" && action != "speech.listen" ||
+		if seen[action] || action != "speech.say" && action != "speech.listen" &&
+			action != "audio.volume" && action != "audio.play" &&
+			!(action == "led.show" && c.Model == "station-mini") ||
 			action == "speech.say" && c.LocalPCM == nil && !filepath.IsAbs(c.TTSClient) ||
-			action == "speech.listen" && !filepath.IsAbs(c.ASRClient) {
+			action == "speech.listen" && !filepath.IsAbs(c.ASRClient) ||
+			action == "audio.volume" && c.Volume == nil || action == "audio.play" && c.Media == nil {
 			return config{}, nil, bad
 		}
 		seen[action] = true
@@ -145,7 +190,8 @@ func main() {
 	device := &nativeRuntime{configPath: *configPath, stationID: c.StationID, model: c.Model}
 	api := &server{stationID: c.StationID, model: c.Model, tokenFile: c.CredentialFile,
 		controls: device.controls, probe: device.probe, run: device.say,
-		listen: device.listen, status: device.captureStatus, pcm: device.playPCM}
+		listen: device.listen, status: device.captureStatus, pcm: device.playPCM,
+		volume: device.setVolume, media: device.playMedia, show: device.showLED}
 	httpServer := &http.Server{Addr: c.Listen, Handler: api, TLSConfig: tlsSettings(),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 40 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 4096,

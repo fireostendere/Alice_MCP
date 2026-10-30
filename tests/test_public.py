@@ -155,6 +155,15 @@ def test_only_root_env_template_is_public_and_its_values_are_still_scanned() -> 
     assert scan_text(".env_example", "REAL_TIME_API_" + 'KEY="PRIVATE_SENTINEL"\n')
 
 
+def test_opencode_integration_allows_reviewed_source_but_no_local_configuration() -> None:
+    base = "integrations/opencode/alice-voice/"
+    for name in ("README.md", "package.json", "index.js", "lib.js", "lib.test.js",
+                 "panel.jsx", "tui.js"):
+        assert path_rule(base + name) is None
+    for name in ("config.json", ".env", "other.js", "nested/index.js"):
+        assert path_rule(base + name) is not None
+
+
 @pytest.mark.parametrize(
     "path",
     [

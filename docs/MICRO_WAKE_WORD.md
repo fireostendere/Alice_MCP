@@ -445,3 +445,26 @@ source already delivers it:
 - «маруся» is not usable as trained; «окей дом» is borderline.
 - ARM32 execution, RSS and CPU are unmeasured; nothing was deployed.
 
+
+## Preserved workstation owner-recording workflow
+
+The integrated source retains the unpublished owner preparation, segmentation,
+hard-negative mining, fine-tuning and held-out evaluation in `scripts/voice`,
+without putting these tools back into the MCP wheel:
+
+```sh
+python -m scripts.voice.mww_train owner --word komp --data DATA --owner PRIVATE_DIR --helper HOST_HELPER
+python -m scripts.voice.mww_train features --word komp --data DATA
+python -m scripts.voice.mww_train train --word komp --data DATA --mww MWW_SRC \
+  --finetune-from DATA/komp/trained --steps 3000 --learning-rate 0.0002
+python -m scripts.voice.mww_eval owner --helper HOST_HELPER --owner PRIVATE_DIR \
+  --holdout DATA/komp/owner/holdout.json --model-name komp
+```
+
+Only explicitly selected private inputs are read when the operator runs these
+commands. Preparation verifies each recording against its manifest hash and
+selects the latest manifest-timestamped clips for a new held-out split. That rule
+does not identify a historical 5/15 split or turn earlier training examples into
+held-out evidence. Existing contextual-label and model-selection fixes remain.
+No recording, model, dataset or training result was imported or produced during
+the merge; synthetic segmentation tests are separate from acoustic acceptance.

@@ -221,7 +221,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 GOTOOLCHAIN=local \
 
 Two clean builds in different source directories with independent empty Go caches
 produced identical 7,340,156-byte ARM32 ELF executables, SHA-256
-`23ca5fd6969b9a72865384a1ef21d816b7d410855746abd82ed48e37a6c9b9df`.
+`32f709fd80a9769f02bf44473719e403a8ce665234924be44270999e15f46f5e`.
 `agent_provision.AGENT_SHA256` is the shared target pin; `agent_upgrade.BASE_AGENT_SHA256`
 is the distinct W0 baseline. Binaries remain outside the source/distribution tree.
 
@@ -678,7 +678,9 @@ mapping and state synchronization have been qualified through read-only research
 The resident defaults missing `preauthorize_all_actions` to true, matching the host
 and owner decision; explicit false remains effective. No private policy was edited.
 
-These Go additions change the binary digest. PR #4's pinned combined target is a
-previous reviewed build. After composing the final source with #4, reproduce the
-ARM build and review/update its target pin and guarded config migration together.
-Do not reuse the current #4 pin for a different binary or install an unpinned build.
+The integrated source composes PR #4's LED metadata/guarded migration with the
+wake and ALSA adapters. Its reproduced target pin is the hash in the build section
+above and `agent_provision.AGENT_SHA256`; the W0 baseline pin is unchanged.
+No composed resident was installed. The migrator still accepts only its reviewed
+optional fields; wake artifacts and the ioctl mapping need separate qualification.
+Never reuse the target pin for a different binary or install an unpinned build.

@@ -25,7 +25,7 @@ packages = ["src/alice_mcp"]
 "skills" = "alice_mcp/data/skills"
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/skills", "/docs", "/tests", "/scripts", "/README.md", "/SECURITY.md", "/CONTRIBUTING.md", "/AGENTS.md", "/pyproject.toml", "/.gitignore", "/.env_example", "/.github/workflows/ci.yml"]
+include = ["/src", "/skills", "/docs", "/tests", "/scripts", "/integrations", "/README.md", "/SECURITY.md", "/CONTRIBUTING.md", "/AGENTS.md", "/pyproject.toml", "/.gitignore", "/.env_example", "/.github/workflows/ci.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

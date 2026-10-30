@@ -152,6 +152,8 @@ use cloud STT → Responses → mini TTS. «Компьютер, давай по�
 `gpt-realtime-2.1` conversation; «компьютер, начни диктовку» uses
 `gpt-live-transcribe`. Wake detection stays local and lights the ring before the
 command ends. See [voice routes, setup and limits](docs/VOICE_ARCHITECTURE.md).
+The optional [OpenCode plugin source](integrations/opencode/alice-voice/README.md)
+is published separately from private `.opencode` settings.
 
 ### Fewer approval prompts and bounded diagnostics
 

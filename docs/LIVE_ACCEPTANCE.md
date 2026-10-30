@@ -66,8 +66,12 @@ uncertain earlier write safe to repeat. Quasar stays enabled throughout.
    alice.voice_listen_stop()
    ```
 
-   Expect one untrusted command event, then verified cleanup/unchanged Quasar.
-   Verify the opencode voice-session/plugin chain separately in the active client.
+   Without a Realtime key, expect one untrusted command event and verify the
+   OpenCode voice-session/plugin chain. With the project Realtime key configured,
+   follow [VOICE_ARCHITECTURE.md](VOICE_ARCHITECTURE.md): a command uses cloud STT,
+   Responses and mini TTS; «компьютер, давай поговорим» starts the ongoing Realtime
+   conversation. Inspect `voice_status().realtime`; no duplicate command event is
+   dispatched to the legacy agent. Require verified cleanup/unchanged Quasar at stop.
    Do not change or restart its active worktree configuration as a test side effect.
    `source="station"` currently emits wake-only events with empty commands and is
    not a replacement for this end-to-end command test.
@@ -115,8 +119,8 @@ uncertain earlier write safe to repeat. Quasar stays enabled throughout.
    the old amixer-based volume acceptance or invent ioctl control metadata.
 
 No resident update, volume mapping installation, reboot or policy change is part
-of this checklist. The final source must be composed with PR #4, rebuilt and
-repinned before a separately authorized guarded upgrade. The new ALSA backend
+of this checklist. The composed source and reproduced target pin are recorded
+in NATIVE_AGENT.md; deployment remains a separately authorized guarded upgrade. The new ALSA backend
 and station-source helper configuration have synthetic tests and ARM builds only.
 
 ## Guarded combined-upgrade precondition

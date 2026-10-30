@@ -10,8 +10,12 @@ MCP server. Datasets, generated audio, features and weights stay outside Git.
     python -m scripts.voice.mww_train generate --word komp --voices DIR --data DATA \
         --multispeaker LIBRITTS_DIR --multispeaker-count 2500
       (then keep only clips Vosk transcribes as the wake phrase: wav/positive_lt)
+    python -m scripts.voice.mww_train owner    --word komp --data DATA --owner PRIVATE_DIR \
+        --helper HOST_HELPER
     python -m scripts.voice.mww_train features --word komp --data DATA
     python -m scripts.voice.mww_train train    --word komp --data DATA --mww MWW_SRC
+    python -m scripts.voice.mww_train train    --word komp --data DATA --mww MWW_SRC \
+        --finetune-from DATA/komp/trained --steps 3000 --learning-rate 0.0002
 
 Follows kahrendt/microWakeWord's basic_training_notebook at MWW_COMMIT, with
 Russian Piper positives, Russian near-miss negatives and FLEURS ru speech added.
@@ -28,6 +32,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -331,6 +336,106 @@ def _synth_jobs(voices: str, out: str, jobs: list[tuple[str, str, str, int]]) ->
     return len(jobs)
 
 
+def word_segment(audio: Any) -> tuple[int, int] | None:
+    """Loudest speech segment of a short owner clip, in samples, or None if unusable.
+
+    10 ms frames more than 12 dB above the clip's 20th-percentile level are speech;
+    gaps up to 250 ms are bridged. A segment shorter than 0.3 s or touching the clip
+    end (word cut off, so no post-word silence to align on) is rejected.
+    """
+    np = _optional("numpy")
+
+    frames = len(audio) // 160
+    level = 20 * np.log10(np.sqrt(np.mean(
+        np.asarray(audio[: frames * 160], dtype=np.float64).reshape(frames, 160) ** 2,
+        axis=1)) + 1e-12)
+    loud = level > np.percentile(level, 20) + 12
+    segments: list[list[int]] = []
+    for index in np.flatnonzero(loud):
+        if segments and index - segments[-1][1] <= 25:
+            segments[-1][1] = int(index) + 1
+        else:
+            segments.append([int(index), int(index) + 1])
+    if not segments:
+        return None
+    start, end = max(segments, key=lambda seg: float(np.sum(10 ** (level[seg[0]:seg[1]] / 10))))
+    if end - start < 30 or end >= frames - 3:
+        return None
+    return max(0, start - 5) * 160, min(frames, end + 5) * 160
+
+
+def owner(word: str, source: Path, data: Path, helper: Path | None,
+          holdout_positive: int = 5, holdout_negative: int = 3) -> None:
+    """Owner recordings (private, outside Git) -> scratch training copies.
+
+    Every file must match its manifest SHA-256. The latest clips by manifest
+    timestamp are held out (never trained on) and listed in owner/holdout.json.
+    Training positives are trimmed and peak-normalised like the TTS clips; with
+    `helper`, its own confident firings in training negatives become end-aligned
+    hard negatives ("similar-word segments").
+    """
+    np = _optional("numpy")
+    from scripts.voice.mww_eval import detect, read_wav16k, run_helper, trace_of
+
+    rows = [json.loads(line) for line in
+            (source / "manifest.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    audio: dict[str, Any] = {}
+    for row in rows:
+        name = str(row["file"])
+        if Path(name).name != name or not name.endswith(".wav"):
+            raise SystemExit("manifest names must be plain .wav files")
+        if hashlib.sha256((source / name).read_bytes()).hexdigest() != row["sha256"]:
+            raise SystemExit(f"manifest digest mismatch: {name}")
+        pcm = read_wav16k(source / name)
+        audio[name] = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768
+    positives = sorted((r for r in rows if r["label"] == "positive" and r["word"] == word),
+                       key=lambda r: r["timestamp"])
+    negatives = sorted((r for r in rows if r["label"] == "negative"),
+                       key=lambda r: r["timestamp"])
+    held = (positives[len(positives) - holdout_positive:]
+            + negatives[len(negatives) - holdout_negative:])
+    train_positive = positives[:len(positives) - holdout_positive]
+    train_negative = negatives[:len(negatives) - holdout_negative]
+    base = data / word / "owner"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "holdout.json").write_text(json.dumps({
+        "rule": f"latest {holdout_positive} positives and {holdout_negative} negatives by "
+                "manifest timestamp", "files": [r["file"] for r in held]}), encoding="utf-8")
+
+    def peak_normalised(x: Any) -> Any:
+        return x * (10 ** (-1 / 20) / max(float(np.abs(x).max()), 1e-6))
+
+    unusable = 0
+    for kind, chosen in (("owner_positive", train_positive), ("owner_negative", train_negative)):
+        (data / word / "wav" / kind).mkdir(parents=True, exist_ok=True)
+        for row in chosen:
+            x = audio[row["file"]]
+            if kind == "owner_positive":
+                segment = word_segment(x)
+                if segment is None:
+                    unusable += 1
+                    continue
+                x = x[segment[0]:segment[1]]
+            write_wav(data / word / "wav" / kind / row["file"], peak_normalised(x) * 32767)
+    hard = 0
+    if helper is not None:
+        (data / word / "wav" / "owner_hard").mkdir(parents=True, exist_ok=True)
+        for row in train_negative:
+            x = audio[row["file"]]
+            pcm = np.clip(x * 32768, -32768, 32767).astype("<i2").tobytes()
+            trace = trace_of(run_helper(helper, pcm, ["--trace", "--max-seconds", "60"])["lines"])
+            for event in detect(trace, 0.5, 1, 1000):  # every confident firing, not just wakes
+                end = max(int((event["t_ms"] / 1000 - 0.15) * RATE), RATE // 2)
+                segment = peak_normalised(x[max(0, end - int(2.5 * RATE)):end])
+                write_wav(data / word / "wav" / "owner_hard" / f"{row['file'][:-4]}_{end}.wav",
+                          segment * 32767)
+                hard += 1
+    print(json.dumps({"word": word, "train_positive": len(train_positive) - unusable,
+                      "unusable_positive": unusable,
+                      "train_negative": len(train_negative), "held_out": len(held),
+                      "hard_negatives": hard}))
+
+
 def _augmenter(backgrounds: list[str], rirs: str) -> Any:
     Augmentation = _optional("microwakeword.audio.augmentation").Augmentation
 
@@ -375,6 +480,23 @@ def features(word: str, data: Path) -> None:
             RaggedMmap.from_generator(
                 out_dir=str(out), batch_size=100, verbose=False,
                 sample_generator=spectrograms.spectrogram_generator(split=name, repeat=repeat))
+    # Owner recordings: few clips, so many augmented repetitions, training split only.
+    owner_sets: tuple[tuple[str, int, int | None, float | None], ...] = (
+        ("owner_positive", 40, 10, None), ("owner_hard", 30, 10, None),
+        ("owner_negative", 10, None, 3.0))
+    for kind, repeat, owner_slide, split_s in owner_sets:
+        out = root / kind / "training" / "wakeword_mmap"
+        if not (data / word / "wav" / kind).is_dir() or out.exists():
+            continue
+        out.parent.mkdir(parents=True, exist_ok=True)
+        clips = Clips(input_directory=str(data / word / "wav" / kind), file_pattern="*.wav",
+                      max_clip_duration_s=None, remove_silence=False, random_split_seed=None)
+        spectrograms = SpectrogramGeneration(
+            clips=clips, augmenter=augmenter if split_s is None else _long_augmenter(data),
+            slide_frames=owner_slide, step_ms=10, split_spectrogram_duration_s=split_s)
+        RaggedMmap.from_generator(out_dir=str(out), batch_size=100, verbose=False,
+                                  sample_generator=spectrograms.spectrogram_generator(
+                                      repeat=repeat))
     # Long Russian negatives: per-word sentences (clean/augmented) and, shared by all
     # words, FLEURS ru train speech (augmented and clean). FLEURS ru dev, whole and
     # clean, is validation ambient: checkpoint selection then penalises Russian FAs.
@@ -452,7 +574,8 @@ def subsample(data: Path, keep: float = NEGATIVE_KEEP) -> None:
                 sample_generator=(f[: len(f) // fraction] for f in features))
 
 
-def training_config(word: str, data: Path, steps: int) -> dict[str, Any]:
+def training_config(word: str, data: Path, steps: int, train_dir: Path | None = None,
+                    learning_rate: float = 0.001) -> dict[str, Any]:
     root, negatives = data / word / "features", data / "negative_subset"
 
     def feature(path: Path, weight: float, truth: bool, strategy: str) -> dict[str, Any]:
@@ -460,12 +583,19 @@ def training_config(word: str, data: Path, steps: int) -> dict[str, Any]:
                 "truth": truth, "truncation_strategy": strategy, "type": "mmap"}
 
     return {
-        "window_step_ms": 10, "train_dir": str(data / word / "trained"),
+        "window_step_ms": 10, "train_dir": str(train_dir or data / word / "trained"),
         "features": [
             feature(root / "positive", 1.5, True, "truncate_start"),
             *([feature(root / "positive_lt", 1.5, True, "truncate_start")]
               if (root / "positive_lt").is_dir() else []),
             feature(root / "near_miss", 3.0, False, "truncate_start"),
+            # The target speaker's own clips are few but most relevant: weight 2.
+            *[feature(root / name, weight, truth, strategy)
+              for name, weight, truth, strategy in (
+                  ("owner_positive", 2.0, True, "truncate_start"),
+                  ("owner_hard", 2.0, False, "truncate_start"),
+                  ("owner_negative", 1.0, False, "random"))
+              if (root / name).is_dir()],
             feature(root / "ru_sentences_0", 2.0, False, "random"),
             feature(root / "ru_sentences_1", 2.0, False, "random"),
             feature(data / "ru_features" / "fleurs_dev_ambient", 0.0, False, "split"),
@@ -477,7 +607,7 @@ def training_config(word: str, data: Path, steps: int) -> dict[str, Any]:
             feature(negatives / "dinner_party_eval", 0.0, False, "split"),
         ],
         "training_steps": [steps], "positive_class_weight": [1],
-        "negative_class_weight": [20], "learning_rates": [0.001], "batch_size": 128,
+        "negative_class_weight": [20], "learning_rates": [learning_rate], "batch_size": 128,
         "time_mask_max_size": [0], "time_mask_count": [0], "freq_mask_max_size": [0],
         "freq_mask_count": [0], "eval_step_interval": 500, "clip_duration_ms": 1500,
         "target_minimization": 0.9, "minimization_metric": None,
@@ -492,11 +622,31 @@ MIXEDNET = ["mixednet", "--pointwise_filters", "64,64,64,64", "--repeat_in_block
             "--first_conv_kernel_size", "5", "--stride", "3"]
 
 
-def train(word: str, data: Path, mww: Path, steps: int) -> int:
+def train(word: str, data: Path, mww: Path, steps: int, finetune_from: Path | None = None,
+          learning_rate: float = 0.001) -> int:
+    """Recipe training; with `finetune_from` (an earlier train_dir) it continues from that
+    run's best-weights checkpoint into `trained_ft`, leaving the earlier model intact."""
     yaml = _optional("yaml")
 
-    config = data / word / "training_parameters.yaml"
-    config.write_text(yaml.safe_dump(training_config(word, data, steps)), encoding="utf-8")
+    train_dir = None
+    if finetune_from is not None:
+        train_dir = data / word / "trained_ft"
+        if train_dir.exists():
+            raise SystemExit("trained_ft exists; move it away first")
+        # The recipe saves ckpt-N at every new best and once more at the end, and its
+        # index names only the last; the best-weights checkpoint is the second highest N.
+        numbers = sorted(int(m.group(1)) for f in (finetune_from / "restore").glob("ckpt-*.index")
+                         if (m := re.fullmatch(r"ckpt-(\d+)\.index", f.name)))
+        best = f"ckpt-{numbers[-2] if len(numbers) > 1 else numbers[-1]}"
+        (train_dir / "restore").mkdir(parents=True)
+        for f in (finetune_from / "restore").glob(f"{best}.*"):
+            shutil.copy2(f, train_dir / "restore" / f.name)
+        (train_dir / "restore" / "checkpoint").write_text(
+            f'model_checkpoint_path: "{best}"\nall_model_checkpoint_paths: "{best}"\n')
+    config = data / word / ("finetune_parameters.yaml" if train_dir else
+                            "training_parameters.yaml")
+    config.write_text(yaml.safe_dump(training_config(word, data, steps, train_dir,
+                                                     learning_rate)), encoding="utf-8")
     command = [sys.executable, "-m", "microwakeword.model_train_eval",
                f"--training_config={config}", "--train", "1", "--restore_checkpoint", "1",
                "--test_tf_nonstreaming", "0", "--test_tflite_nonstreaming", "0",
@@ -511,8 +661,8 @@ def train(word: str, data: Path, mww: Path, steps: int) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("step", choices=["prepare", "subsample", "generate", "features",
-                                         "train"])
+    parser.add_argument("step", choices=["prepare", "subsample", "generate", "owner",
+                                         "features", "train"])
     parser.add_argument("--word", choices=sorted(WORDS), default="komp")
     parser.add_argument("--dl", type=Path)
     parser.add_argument("--data", type=Path, required=True)
@@ -523,6 +673,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--count", type=int, default=600)
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--steps", type=int, default=10000)
+    parser.add_argument("--owner", type=Path, help="private owner recordings + manifest")
+    parser.add_argument("--helper", type=Path, help="host helper for hard-negative mining")
+    parser.add_argument("--finetune-from", type=Path, help="earlier train_dir")
+    parser.add_argument("--learning-rate", type=float, default=0.001)
     args = parser.parse_args(argv)
     if args.step == "prepare" and args.dl:
         prepare(args.dl, args.data)
@@ -531,10 +685,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.step == "generate" and args.voices:
         generate(args.word, args.voices, args.data, args.count, args.workers,
                  args.multispeaker, args.multispeaker_count)
+    elif args.step == "owner" and args.owner:
+        owner(args.word, args.owner, args.data, args.helper)
     elif args.step == "features":
         features(args.word, args.data)
     elif args.step == "train" and args.mww:
-        return train(args.word, args.data, args.mww, args.steps)
+        return train(args.word, args.data, args.mww, args.steps, args.finetune_from,
+                     args.learning_rate)
     else:
         parser.error("missing argument for this step")
     return 0

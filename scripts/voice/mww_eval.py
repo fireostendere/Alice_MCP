@@ -5,6 +5,7 @@
     python -m scripts.voice.mww_eval faph   --helper BIN --data DATA
     python -m scripts.voice.mww_eval sweep  --corpus-trace C.json --faph-trace F.json
     python -m scripts.voice.mww_eval clips  --helper BIN --positive DIR --negative DIR [--snr DB]
+    python -m scripts.voice.mww_eval owner  --helper BIN --owner PRIVATE_DIR --holdout JSON
 
 Host-only and synthetic/offline: the helper runs on this machine reading stdin.
 `parity` needs the isolated training venv (pymicro-features + ai-edge-litert);
@@ -316,6 +317,27 @@ def clip_stream(positive: Path, negative: Path, word: str, noise_dir: Path | Non
     return stream.tobytes(), {"rate": RATE, "speaking": [], "regions": regions}
 
 
+def owner_holdout(helper: Path, source: Path, files: list[str], decision: list[str],
+                  model: str | None = None) -> list[dict[str, Any]]:
+    """Held-out owner clips at their recorded level (+0.5 s of zeros so a word at the
+    very end can still be decided). Returns label, peak probability and wake count only."""
+    labels = {}
+    for line in (source / "manifest.jsonl").read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            row = json.loads(line)
+            labels[row["file"]] = row["label"]
+    rows = []
+    for name in files:
+        pcm = read_wav16k(source / Path(name).name) + bytes(RATE)
+        run = run_helper(helper, pcm, ["--trace", "--max-seconds", "60", *decision])
+        trace = trace_of(run["lines"], model)
+        wakes = [e for e in run["lines"]
+                 if e.get("event") == "wake" and (model is None or e["model"] == model)]
+        rows.append({"label": labels[Path(name).name], "peak": round(
+            max((q for _, q in trace), default=0) / 256, 3), "wakes": len(wakes)})
+    return rows
+
+
 def sweep(trace: list[tuple[int, int]], hours: float, positives: list[list[tuple[int, int]]],
           negatives: list[list[tuple[int, int]]], thresholds: list[float], windows: list[int],
           cooldown_ms: int) -> list[dict[str, Any]]:
@@ -336,7 +358,8 @@ def sweep(trace: list[tuple[int, int]], hours: float, positives: list[list[tuple
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("step", choices=["parity", "corpus", "faph", "sweep", "clips"])
+    parser.add_argument("step", choices=["parity", "corpus", "faph", "sweep", "clips",
+                                         "owner"])
     parser.add_argument("--helper", type=Path)
     parser.add_argument("--corpus-trace", type=Path)
     parser.add_argument("--faph-trace", type=Path)
@@ -347,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--positive", type=Path)
     parser.add_argument("--negative", type=Path)
     parser.add_argument("--snr", type=float)
+    parser.add_argument("--owner", type=Path, help="private owner recordings + manifest")
+    parser.add_argument("--holdout", type=Path, help="holdout.json from mww_train owner")
+    parser.add_argument("--model-name", help="score only this embedded model")
     parser.add_argument("--word", choices=sorted(TARGET_PHRASE), default="komp")
     parser.add_argument("--threshold", type=float, default=0.98)
     parser.add_argument("--window", type=int, default=5)
@@ -401,6 +427,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.out:
             args.out.write_text(json.dumps({"trace": trace_of(run["lines"], args.word),
                                             "meta": meta}))
+    elif args.step == "owner" and args.owner and args.holdout:
+        files = json.loads(args.holdout.read_text(encoding="utf-8"))["files"]
+        rows = owner_holdout(args.helper, args.owner, files, decision, args.model_name)
+        pos_rows = [r for r in rows if r["label"] == "positive"]
+        neg_rows = [r for r in rows if r["label"] != "positive"]
+        result = base | {"synthetic": False, "evidence_class": "owner_recording_host_replay",
+                         "decision": decision, "clips": rows,
+                         "false_rejects": f"{sum(not r['wakes'] for r in pos_rows)}/"
+                                          f"{len(pos_rows)}",
+                         "false_accepts": f"{sum(r['wakes'] for r in neg_rows)} in "
+                                          f"{len(neg_rows)} clips"}
     elif args.step == "faph" and args.data:
         pcm, info = long_negative_stream(args.data)
         run = benchmark_run(args.helper, pcm, ["--trace", "--max-seconds", "86400", *decision],

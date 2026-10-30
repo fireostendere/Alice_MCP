@@ -125,10 +125,20 @@ while True:
     (root / "mounts").write_text(f"tmpfs {root}/tmp tmpfs rw 0 0\n")
     shims = tmp_path / "shims"
     shims.mkdir()
-    # BusyBox pidof matches the process name; led_util runs under its own name.
-    (shims / "pidof").write_text('#!/bin/sh\nfor d in /proc/[0-9]*; do\n'
-                                 '  [ "$(cat "$d/comm" 2>/dev/null)" = "$1" ] && '
-                                 'printf "%s " "${d#/proc/}"\ndone\necho\n')
+    # Match BusyBox pidof without spawning cat for every process on a busy CI host.
+    (shims / "pidof").write_text(f"""#!{sys.executable}
+import os, sys
+for pid in os.listdir("/proc"):
+    if not pid.isdigit():
+        continue
+    try:
+        with open("/proc/" + pid + "/comm") as comm:
+            if comm.read().strip() == sys.argv[1]:
+                print(pid, end=" ")
+    except OSError:
+        pass
+print()
+""")
     (shims / "pidof").chmod(0o700)
     env = {**os.environ, "PATH": f"{shims}:{os.environ['PATH']}"}
     script = (vi.SCRIPT.replace("OWNER_UID=0", f"OWNER_UID={os.getuid()}")

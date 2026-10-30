@@ -14,16 +14,18 @@ import ssl
 import subprocess
 import tarfile
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from alice_mcp import device_runtime as rt
 from alice_mcp.core import Controller, SafetyError, Station, _check_ssh_file, _unique, ssh_argv
 from alice_mcp.speech_capture import CLIENT_SHA256 as ASR_CLIENT_SHA256
 from alice_mcp.speech_capture import TTS_CLIENT_SHA256
 
-AGENT_SHA256 = "6a4bb805d26dea1c144ee0ec310b0776b9deaf673c4dd7e852ae79093cc2db2f"
+AGENT_SHA256 = "23ca5fd6969b9a72865384a1ef21d816b7d410855746abd82ed48e37a6c9b9df"
 NAMES = ("agent", "tts-once", "asr-once", "config.json", "certificate.pem", "private-key.pem",
          "credential", "start")
 MAX_PACKAGE = 20 * 1024 * 1024
@@ -265,7 +267,7 @@ def _validate_content(station: Station, content: dict[str, bytes], layout: str) 
                 "private_key_file": root + "/private-key.pem", "token_file": root + "/credential",
                 "firmware_sha256": station.controls["firmware_sha256"],
                 "tts_client": root + "/tts-once", "asr_client": root + "/asr-once",
-                "allowed_actions": ["speech.say", "speech.listen"],
+                "allowed_actions": rt.ALL,
                 "preauthorize_all_actions": True}
     if (type(value) is not dict or set(value) != set(expected) | {"listen"}
         or any(value[k] != v for k, v in expected.items())
@@ -330,6 +332,10 @@ def bundle(station: Station, directory: Path, *, layout: str,
                 raise ValueError
             content[name] = data
         content["start"] = start_script(layout).encode()
+        # This is a new-binary install, never a legacy resident configuration edit.
+        config = json.loads(content["config.json"], object_pairs_hook=_unique)
+        config["allowed_actions"] = rt.ALL
+        content["config.json"] = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
         _validate_content(station, content, layout)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(directory / "certificate.pem", directory / "private-key.pem")
@@ -375,7 +381,8 @@ def preview(controller: Controller, station_id: str, package: AgentBundle) -> di
                       "preserve Quasar, vendor profiles and SSH. No microphone recording."}
 
 
-def _transfer(station: Station, command: str, data: bytes) -> dict[str, Any]:
+def _transfer(station: Station, command: str, data: bytes, *,
+              verify_tls: Callable[[], None] | None = None) -> dict[str, Any]:
     if len(data) > MAX_PACKAGE:
         raise SafetyError("Native-agent transfer exceeds reviewed size")
     with subprocess.Popen(ssh_argv(station, command), stdin=subprocess.PIPE,
@@ -384,19 +391,45 @@ def _transfer(station: Station, command: str, data: bytes) -> dict[str, Any]:
         sink, source = process.stdin, process.stdout
         output: list[bytes] = []
         failed: list[bool] = []
+        tls_verified: list[bool] = []
 
         def write() -> None:
             try:
-                with sink:
-                    sink.write(data)
-            except OSError:
+                sink.write(data)
+                sink.flush()
+            except (OSError, ValueError):
                 failed.append(True)
+            finally:
+                if verify_tls is None or failed:
+                    try:
+                        sink.close()  # EOF releases a transaction waiting for missing bytes.
+                    except OSError:
+                        failed.append(True)
 
         def read() -> None:
-            body = source.read(4097)
-            output.append(body)
-            if len(body) > 4096:
-                process.kill()
+            try:
+                if verify_tls is not None:
+                    first = source.readline(4097)
+                    if first == b'{"outcome":"awaiting_tls"}\n':
+                        # Keep the one SSH transaction open. Only a verified TLS
+                        # response authorizes its first config rename; EOF rolls back.
+                        verify_tls()
+                        tls_verified.append(True)
+                        sink.write(b"TLS-OK\n")
+                        sink.flush()
+                        first = b""
+                    sink.close()
+                    body = first + source.read(4097)
+                else:
+                    body = source.read(4097)
+                output.append(body)
+                if len(body) > 4096:
+                    process.kill()
+            except Exception:
+                failed.append(True)
+            finally:
+                if verify_tls is not None:
+                    sink.close()
 
         writer = threading.Thread(target=write, daemon=True)
         reader = threading.Thread(target=read, daemon=True)
@@ -413,12 +446,17 @@ def _transfer(station: Station, command: str, data: bytes) -> dict[str, Any]:
         if (status or failed or writer.is_alive() or reader.is_alive() or not output
             or len(output[0]) > 4096):
             raise SafetyError("Native-agent transfer uncertain; do not retry")
-        result = json.loads(output[0])
+        try:
+            result = json.loads(output[0])
+        except ValueError:
+            raise SafetyError("Native-agent transfer returned incompatible metadata") from None
         if (type(result) is not dict
             or result.get("outcome") not in {"installed", "blocked", "unknown"}
             or result.keys() - {"outcome", "error_code", "quasar_changed", "autostart_registered",
                                "package_verified", "staging_cleaned", "do_not_retry"}):
             raise SafetyError("Native-agent transfer returned incompatible metadata")
+        if verify_tls is not None and result.get("outcome") == "installed" and not tls_verified:
+            raise SafetyError("Native-agent TLS barrier missing; do not retry")
         for key in ("quasar_changed", "autostart_registered", "package_verified",
                     "staging_cleaned", "do_not_retry"):
             if key in result and type(result[key]) is not bool:

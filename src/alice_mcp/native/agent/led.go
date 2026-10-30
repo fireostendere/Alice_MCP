@@ -22,6 +22,42 @@ type ledPayload struct {
 	Frames     []string `json:"frames"`
 }
 
+// Calibration metadata is state-bound with the device policy. Frames are already
+// mapped and gain-limited by the host; do not apply this mapping a second time.
+type ledMap struct {
+	Channels    [][]any        `json:"channels,omitempty"`
+	GainPercent map[string]int `json:"gain_percent,omitempty"`
+}
+
+func (m *ledMap) valid(model string) bool {
+	if model != "station-mini" && model != "station-mini3" || m.Channels == nil && m.GainPercent == nil {
+		return false
+	}
+	if m.Channels != nil && len(m.Channels) != 18 {
+		return false
+	}
+	for _, channel := range m.Channels {
+		if channel == nil {
+			continue
+		}
+		if len(channel) != 2 {
+			return false
+		}
+		zone, zoneOK := channel[0].(float64)
+		color, colorOK := channel[1].(string)
+		if !zoneOK || zone < 0 || zone > 5 || zone != float64(int(zone)) || !colorOK ||
+			color != "red" && color != "green" && color != "blue" {
+			return false
+		}
+	}
+	for color, gain := range m.GainPercent {
+		if color != "red" && color != "green" && color != "blue" || gain < 0 || gain > 100 {
+			return false
+		}
+	}
+	return true
+}
+
 // Test-only prefix for synthetic sysfs/data trees; /proc/uptime is always real.
 var ledRoot = ""
 

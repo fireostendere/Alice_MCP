@@ -54,3 +54,12 @@ enabling forms. Do not narrow existing private policy as test cleanup.
 Overnight station activity: **none**. No sound, LEDs, reboot, update, settings,
 Quasar stop, microphone capture or replay occurred. Read-only station work and the
 allowed quiet replay were blocked at access setup; the rejection was not bypassed.
+
+## Composed guarded upgrade
+
+The integration also includes PR #4: the exact pinned W0 baseline and PCM player,
+new-binary startup with the legacy config, production authenticated TLS verification,
+then bound migration to `all` and optional reviewed volume/media/LED metadata.
+Both `wake` and `led_map` resident schemas and validations are retained.
+The composed executable must be rebuilt and its target pin refreshed before publication;
+no station installation is part of merging this code.

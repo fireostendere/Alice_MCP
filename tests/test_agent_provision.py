@@ -10,6 +10,7 @@ import shutil
 import signal
 import ssl
 import subprocess
+import sys
 import tarfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -91,6 +92,55 @@ def test_bundle_only_contains_pinned_roles_and_fixed_paths(provision: Any) -> No
                              else 0o600)
                    for x in members)
     assert bundle.sha256 == hashlib.sha256(bundle.package).hexdigest()
+
+
+def test_new_provisioning_writes_all_instead_of_a_legacy_action_list(provision: Any) -> None:
+    controller, directory, _ = provision
+    package = agent_provision.bundle(controller.station("desk"), directory, layout="direct")
+    with tarfile.open(fileobj=io.BytesIO(package.package)) as archive:
+        config = json.load(archive.extractfile("config.json"))
+    assert config["allowed_actions"] == "all"
+    assert config["preauthorize_all_actions"] is True
+
+
+@pytest.mark.parametrize("mode", ["ok", "tls_fails", "missing_gate", "invalid_gate"])
+def test_duplex_transfer_only_acknowledges_the_exact_gate_after_tls(
+    provision: Any, tmp_path: Path, monkeypatch: Any, mode: str,
+) -> None:
+    controller, _, _ = provision
+    receipt = tmp_path / "ack"
+    program = '''import json, pathlib, sys
+assert sys.stdin.buffer.read(7) == b'package'
+if sys.argv[2] == 'missing_gate':
+    print('{"outcome":"installed"}', flush=True)
+else:
+    print('{"outcome":"awaiting_tls"}' if sys.argv[2] != 'invalid_gate' else
+          '{"outcome":"awaiting_tls","unexpected":true}', flush=True)
+    ack = sys.stdin.buffer.readline()
+    pathlib.Path(sys.argv[1]).write_bytes(ack)
+    print(json.dumps({"outcome": "installed" if ack == b'TLS-OK\\n' else "unknown"}), flush=True)
+'''
+    monkeypatch.setattr(agent_provision, "ssh_argv",
+                        lambda *_: [sys.executable, "-c", program, str(receipt), mode])
+    checks = []
+
+    def verify() -> None:
+        checks.append(1)
+        assert not receipt.exists()
+        if mode == "tls_fails":
+            raise SafetyError("PRIVATE_SENTINEL")
+
+    if mode in {"tls_fails", "missing_gate", "invalid_gate"}:
+        with pytest.raises(SafetyError):
+            agent_provision._transfer(controller.station("desk"), "unused", b"package",
+                                      verify_tls=verify)
+    else:
+        result = agent_provision._transfer(controller.station("desk"), "unused", b"package",
+                                          verify_tls=verify)
+        assert result["outcome"] == "installed"
+    assert checks == ([1] if mode in {"ok", "tls_fails"} else [])
+    if receipt.exists():
+        assert receipt.read_bytes() == (b"TLS-OK\n" if mode == "ok" else b"")
 
 
 @pytest.mark.parametrize("change", ["agent", "tts-once", "asr-once", "symlink", "wrong_target",

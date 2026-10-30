@@ -118,3 +118,16 @@ No resident update, volume mapping installation, reboot or policy change is part
 of this checklist. The final source must be composed with PR #4, rebuilt and
 repinned before a separately authorized guarded upgrade. The new ALSA backend
 and station-source helper configuration have synthetic tests and ARM builds only.
+
+## Guarded combined-upgrade precondition
+
+The integrated operator API and CLI are documented in
+[NATIVE_AGENT.md](NATIVE_AGENT.md#operator-api-and-cli). They accept the pinned
+installed W0 resident and PCM player, start the new binary with the exact old
+configuration, verify the production TLS/state contract, then migrate the
+action policy and optional reviewed `volume`, `media` and `led_map` fields.
+The non-TTY API uses standing owner authorization; `--live` CLI requires `UPGRADE`.
+Keep the five-minute one-use preview and no-uncertain-retry rules.
+No guessed Mini 1 mixer, automatic wake configuration or device installation is
+authorized by a source merge. Use the composed source target pin, never the
+older PR #4-only build.

@@ -131,6 +131,8 @@ def source_allowed(path: str) -> bool:
     suffix = Path(path).suffix
     if len(parts) == 1:
         return path in ROOT_FILES
+    if parts[:3] == ["integrations", "opencode", "agent-sessions"] and len(parts) == 4:
+        return parts[3] in {"README.md", "package.json", "index.js", "lib.js", "lib.test.js"}
     if parts[:3] == ["integrations", "opencode", "alice-voice"] and len(parts) == 4:
         return parts[3] in {"README.md", "package.json", "index.js", "lib.js", "lib.test.js",
                             "panel.jsx", "tui.js"}

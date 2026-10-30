@@ -164,6 +164,14 @@ def test_opencode_integration_allows_reviewed_source_but_no_local_configuration(
         assert path_rule(base + name) is not None
 
 
+def test_agent_sessions_plugin_has_a_bounded_public_source_allowlist() -> None:
+    base = "integrations/opencode/agent-sessions/"
+    for name in ("README.md", "package.json", "index.js", "lib.js", "lib.test.js"):
+        assert path_rule(base + name) is None
+    for name in ("settings.json", ".env", "other.js", "nested/index.js", "state.sqlite3"):
+        assert path_rule(base + name) is not None
+
+
 @pytest.mark.parametrize(
     "path",
     [

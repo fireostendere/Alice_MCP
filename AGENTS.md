@@ -31,7 +31,13 @@ MCP actions in this project without per-call forms. Honor and preserve the priva
 station-level `preauthorize_all_actions` setting; do not revoke it as temporary test
 cleanup or ask redundant chat confirmations. Fresh one-use previews, live policy/
 state/trust checks and no-uncertain-retry rules still apply. This does not authorize
-unrequested tasks, new action permissions, unrelated workspaces or unsupported operations.
+unrequested tasks, unrelated workspaces or unsupported operations.
+
+Owner decision (2026-10-29): every implemented action, including service actions
+and actions added later, is allowed and preauthorized on every station by default.
+Do not ask the owner to enable an action, do not narrow private allowlists, and give
+new actions and new stations this default. Hard limits above (no arbitrary shell,
+no factory reset/flashing, keep Quasar enabled, no uncertain retry) still apply.
 
 Use one project-local `alice` MCP connection for all implemented features. Do not
 persist separate LED/speech test aliases. Preserve existing station entries and

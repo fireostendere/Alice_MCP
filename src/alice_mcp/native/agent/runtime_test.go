@@ -258,7 +258,7 @@ func TestLocalPCMModeCannotInvokeCloudTextTTS(t *testing.T) {
 }
 
 func TestLocalPCMOnlyAcceptsCorrelatedCompletion(t *testing.T) {
-	valid := []byte(`{"outcome":"complete","playback_started":true,"playback_completed":true,"cleanup_verified":true,"frames_written":2205,"sample_rate":22050,"input_frames":2205,"stage":"complete","alsa_return_code":0}`)
+	valid := []byte(`{"outcome":"complete","playback_started":true,"playback_completed":true,"cleanup_verified":true,"frames_written":2205,"sample_rate":22050,"input_frames":2205,"stage":"complete","alsa_return_code":0,"hardware_parameters_verified":true,"playback_elapsed_ms":100}`)
 	if result, ok := pcmFlags(valid, 2205, 22050); !ok || result["outcome"] != "applied" {
 		t.Fatal("valid synthetic playback completion rejected")
 	}
@@ -268,11 +268,20 @@ func TestLocalPCMOnlyAcceptsCorrelatedCompletion(t *testing.T) {
 		strings.Replace(string(valid), `"input_frames":2205`, `"input_frames":2206`, 1),
 		strings.Replace(string(valid), `"stage":"complete"`, `"stage":"PRIVATE_SENTINEL"`, 1),
 		strings.Replace(string(valid), `"alsa_return_code":0`, `"alsa_return_code":true`, 1),
+		strings.Replace(string(valid), `"hardware_parameters_verified":true`, `"hardware_parameters_verified":false`, 1),
+		strings.Replace(string(valid), `,"hardware_parameters_verified":true`, ``, 1),
+		strings.Replace(string(valid), `"playback_elapsed_ms":100`, `"playback_elapsed_ms":-1`, 1),
+		strings.Replace(string(valid), `"playback_elapsed_ms":100`, `"playback_elapsed_ms":25001`, 1),
+		strings.Replace(string(valid), `"playback_elapsed_ms":100`, `"playback_elapsed_ms":true`, 1),
 		strings.TrimSuffix(string(valid), "}") + `,"private":"PRIVATE_SENTINEL"}`,
 	} {
 		if _, ok := pcmFlags([]byte(invalid), 2205, 22050); ok {
 			t.Fatal("unverified PCM completion accepted")
 		}
+	}
+	blocked := []byte(`{"outcome":"blocked","playback_started":false,"playback_completed":false,"cleanup_verified":true,"frames_written":0,"sample_rate":22050,"input_frames":2205,"stage":"hardware","alsa_return_code":0,"hardware_parameters_verified":false,"playback_elapsed_ms":-1}`)
+	if result, ok := pcmFlags(blocked, 2205, 22050); !ok || result["outcome"] != "blocked" {
+		t.Fatal("pre-write hardware mismatch rejected as invalid protocol")
 	}
 }
 
@@ -291,5 +300,61 @@ func TestResidentPreviewExpiresWithoutReadOnlyRenewal(t *testing.T) {
 	n.previewState()
 	if n.generation == generation || !n.previewExpires.After(expires) {
 		t.Fatal("expired state token was not invalidated")
+	}
+}
+
+func TestAllowedActionsAllExpandsToConfiguredImplementedActions(t *testing.T) {
+	path, _ := privateConfig(t)
+	raw, _ := os.ReadFile(path)
+	list := `"allowed_actions":["speech.say"],`
+	write := func(replacement string) {
+		if os.WriteFile(path, []byte(strings.Replace(string(raw), list, replacement, 1)), 0600) != nil {
+			t.Fatal("cannot prepare synthetic policy")
+		}
+	}
+	for _, replacement := range []string{`"allowed_actions":"all",`, ""} {
+		write(replacement)
+		c, _, err := loadConfig(path)
+		// Only actions whose local prerequisites exist: no ASR client, mixer or media here.
+		if err != nil || strings.Join(c.AllowedActions, ",") != "speech.say,led.show" {
+			t.Fatalf("%q did not expand to every configured implemented action", replacement)
+		}
+		if !c.permits("led.show") && c.PreauthorizeAllActions || c.permits("shell") {
+			t.Fatal("expanded allowlist permits the wrong actions")
+		}
+	}
+	write(`"allowed_actions":[],`)
+	if c, _, err := loadConfig(path); err != nil || len(c.AllowedActions) != 0 {
+		t.Fatal("an explicit empty allowlist was not kept empty")
+	}
+	for _, replacement := range []string{`"allowed_actions":"everything",`,
+		`"allowed_actions":["all","speech.say"],`, `"allowed_actions":["shell"],`} {
+		write(replacement)
+		if _, _, err := loadConfig(path); err == nil {
+			t.Fatal("invalid allowlist accepted: " + replacement)
+		}
+	}
+}
+
+func TestMigratedLEDMapIsValidatedCalibrationMetadata(t *testing.T) {
+	path, _ := privateConfig(t)
+	raw, _ := os.ReadFile(path)
+	for _, item := range []struct {
+		value string
+		valid bool
+	}{
+		{`{"channels":[[0,"red"],null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]}`, true},
+		{`{"channels":[]}`, false},
+		{`{"channels":[[6,"red"],null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]}`, false},
+		{`{"gain_percent":{"red":101}}`, false},
+		{`{"channels":[[0,"white"],null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]}`, false},
+	} {
+		data := strings.TrimSuffix(string(raw), "}") + `,"led_map":` + item.value + "}"
+		if os.WriteFile(path, []byte(data), 0600) != nil {
+			t.Fatal("synthetic calibration unavailable")
+		}
+		if _, _, err := loadConfig(path); (err == nil) != item.valid {
+			t.Fatal("migrated calibration validation mismatch")
+		}
 	}
 }

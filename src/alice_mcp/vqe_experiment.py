@@ -23,7 +23,15 @@ from pathlib import Path
 from typing import Any
 
 from alice_mcp import speech_capture
-from alice_mcp.core import Controller, SafetyError, SSHInput, Station, _check_ssh_file, _unique
+from alice_mcp.core import (
+    Controller,
+    SafetyError,
+    SSHInput,
+    Station,
+    _check_ssh_file,
+    _unique,
+    confirm,
+)
 
 PREFIX = "/bkupgrade/data/opt/alice-mcp-vqe-audit-"
 VQE_SHA256 = "2357a939be8cf526787463d1316df78f7fe64098f7db1f7b17edf26b9aef64e2"
@@ -906,11 +914,12 @@ def operator_levels(controller: Controller, station_id: str, audit: bytes, colle
     phases: dict[str, dict[str, Any]] = {}
     item: Candidate | None = None
     try:
-        if ask("Temporary VQE statistics profile: brief Quasar interruption; no speech recording. "
-               "Rollback is requested at finish or at 900 seconds (15 minutes); stock startup "
-               "then takes a few seconds. Be beside Mini 1. Type START 900 to begin: "
-               ) != "START 900":
-            return dict(report, outcome="cancelled")
+        if miss := confirm(ask(
+                "Temporary VQE statistics profile: brief Quasar interruption; no speech recording. "
+                "Rollback is requested at finish or at 900 seconds (15 minutes); stock startup "
+                "then takes a few seconds. Be beside Mini 1. Type START 900 to begin: "),
+                "START 900"):
+            return dict(report, outcome="cancelled", **miss)
         station = controller.station(station_id)
         stock = controller.runner(_ssh(station), SSHInput(
             "sh -s", b"exec 2>/dev/null\nhead -c 32768 /system/vendor/quasar/launch.json\n",
@@ -921,9 +930,10 @@ def operator_levels(controller: Controller, station_id: str, audit: bytes, colle
         if result.get("outcome") != "prepared":
             return dict(report, error_code="start_unverified_inspect_guard")
         started = True
-        if ask("First leave microphones ON (red OFF). Type BASELINE for a 20-second "
-               "statistics-only readiness check before touching mute: ") != "BASELINE":
-            return report
+        if miss := confirm(ask("First leave microphones ON (red OFF). Type BASELINE for a "
+                               "20-second statistics-only readiness check before touching "
+                               "mute: "), "BASELINE"):
+            return dict(report, **miss)
         baseline = measure_phase(controller, station_id, item.identifier, "baseline")
         if baseline.get("outcome") != "complete":
             return report
@@ -932,17 +942,18 @@ def operator_levels(controller: Controller, station_id: str, audit: bytes, colle
         if not baseline_ready(baseline):
             report["error_code"] = "baseline_not_ready"
             return report
-        if ask("Short-press microphone mute, RELEASE; red indicator must stay on. "
-               "Keep it muted. Type MUTED to start its 8-second level window: ") != "MUTED":
-            return report
+        if miss := confirm(ask("Short-press microphone mute, RELEASE; red indicator must "
+                               "stay on. Keep it muted. Type MUTED to start its 8-second level "
+                               "window: "), "MUTED"):
+            return dict(report, **miss)
         phases["muted"] = measure_phase(controller, station_id, item.identifier, "muted")
         if phases["muted"].get("outcome") != "complete":
             return report
         _, report["phase_diagnostics"]["muted"] = _phase_window(phases["muted"])
-        if ask("Short-press once again, RELEASE; red must disappear. "
-               "Type UNMUTED, then slowly repeat 'raz, dva, tri' for 8 seconds. "
-               "Do NOT say Alice or any activation word: ") != "UNMUTED":
-            return report
+        if miss := confirm(ask("Short-press once again, RELEASE; red must disappear. "
+                               "Type UNMUTED, then slowly repeat 'raz, dva, tri' for 8 seconds. "
+                               "Do NOT say Alice or any activation word: "), "UNMUTED"):
+            return dict(report, **miss)
         phases["unmuted"] = measure_phase(controller, station_id, item.identifier, "unmuted")
         if phases["unmuted"].get("outcome") == "complete":
             _, report["phase_diagnostics"]["unmuted"] = _phase_window(phases["unmuted"])

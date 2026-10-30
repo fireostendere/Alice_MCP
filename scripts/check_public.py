@@ -31,6 +31,7 @@ ROOT_FILES = {
     "README.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md", "CHANGELOG.md",
     "LICENSE", "LICENSE.md", "LICENSE.txt", "NOTICE", "NOTICE.md",
     ".gitignore", ".gitattributes", ".editorconfig", "pyproject.toml", "MANIFEST.in",
+    ".env_example",
 }
 TREE_EXCLUDES = {
     ".git", ".venv", "venv", ".tox", ".nox", "dist", "build", "__pycache__",
@@ -79,7 +80,7 @@ CREDENTIAL = re.compile(
     r"(?P<value>\"[^\"\n]*\"|'[^'\n]*'|[^\s,;#}\]]+)"
 )
 PROVIDER = re.compile(
-    r"(?:sk-(?:proj-|ant-)?|gh[pousr]_|github_pat_|glpat-|"
+    r"(?<![A-Za-z0-9])(?:sk-(?:proj-|ant-)?|gh[pousr]_|github_pat_|glpat-|"
     r"xox[baprs]-|hf_|npm_|y0_|ya29\.|SG\.|(?:sk|rk)_(?:live|test)_)[a-zA-Z0-9_.-]{20,}"
     r"|(?:AKIA|ASIA)[A-Z0-9]{16}(?![\w])"
     r"|AIza[a-zA-Z0-9_-]{30,}"
@@ -112,6 +113,8 @@ def valid_path(path: str) -> bool:
 
 
 def private_path(path: str) -> bool:
+    if path == ".env_example":
+        return False  # Only this root template; content still passes the secret scanner.
     parts = path.lower().split("/")
     return any(
         part in PRIVATE_DIRS
@@ -128,6 +131,9 @@ def source_allowed(path: str) -> bool:
     suffix = Path(path).suffix
     if len(parts) == 1:
         return path in ROOT_FILES
+    if parts[:3] == ["integrations", "opencode", "alice-voice"] and len(parts) == 4:
+        return parts[3] in {"README.md", "package.json", "index.js", "lib.js", "lib.test.js",
+                            "panel.jsx", "tui.js"}
     if parts[0] in {"tests", "scripts"}:
         return suffix == ".py"
     if parts[0] in {"docs", "skills"}:
@@ -136,12 +142,16 @@ def source_allowed(path: str) -> bool:
         return len(parts) == 3 and suffix in {".yml", ".yaml"}
     if parts[:2] == ["src", "alice_mcp"] and len(parts) > 2:
         if path in {"src/alice_mcp/native/asr_once.c", "src/alice_mcp/native/vqe_audit.c",
-                    "src/alice_mcp/native/pcm_player.c"}:
+                    "src/alice_mcp/native/pcm_player.c",
+                    "src/alice_mcp/native/io_channel_levels.c",
+                    "src/alice_mcp/native/mww/mww_detect.cc"}:
             return True  # Reviewed source only; native executables remain excluded.
         if parts[:4] == ["src", "alice_mcp", "native", "agent"] and len(parts) == 5:
             return parts[4] in {
                 "go.mod", "main.go", "mcp.go", "runtime.go", "mcp_test.go", "runtime_test.go",
-                "speech.go", "pcm.go",
+                "speech.go", "pcm.go", "audio.go", "audio_test.go", "led.go", "led_test.go",
+                "wake.go", "wake_test.go",
+                "alsa_control.go", "alsa_control_test.go",
             }
         return suffix in {".py", ".json"} or (
             (parts[2] == "skills" or parts[2:4] == ["data", "skills"])
@@ -331,9 +341,9 @@ def scan_git(root: Path) -> list[Finding]:
 def archive_path_rule(path: str, wheel: bool) -> str | None:
     if not valid_path(path):
         return "path-invalid"
-    if private_path(path):
-        return "path-private"
     parts = path.split("/")
+    if private_path(path) and (wheel or len(parts) != 2 or parts[1] != ".env_example"):
+        return "path-private"
     if wheel:
         if re.fullmatch(
             r"alice_(?:station_)?mcp-[0-9][a-zA-Z0-9_.+!-]*\.dist-info", parts[0]

@@ -62,7 +62,8 @@ def test_pcm_pilot_is_pinned_single_use_and_has_no_quasar_or_cloud_action(
                   "playback_completed": True, "cleanup_verified": True,
                    "frames_written": 88199 if change == "short_frames" else 88200,
                    "sample_rate": 22050, "input_frames": 88200,
-                   "stage": "complete", "alsa_return_code": 0}
+                    "stage": "complete", "alsa_return_code": 0,
+                    "hardware_parameters_verified": True, "playback_elapsed_ms": 4000}
         if change == "private":
             result["private"] = "PRIVATE_SENTINEL"
         return json.dumps(result) + "\n" + json.dumps({
@@ -136,7 +137,8 @@ int main(int argc, char **argv) {
     puts("{\"outcome\":\"complete\",\"playback_started\":true,"
           "\"playback_completed\":true,\"cleanup_verified\":true,"
           "\"frames_written\":960000,\"sample_rate\":48000,"
-          "\"input_frames\":960000,\"stage\":\"complete\",\"alsa_return_code\":0}"); return 0;
+          "\"input_frames\":960000,\"stage\":\"complete\",\"alsa_return_code\":0,"
+          "\"hardware_parameters_verified\":true,\"playback_elapsed_ms\":20000}"); return 0;
 #endif
 #endif
 }
@@ -290,13 +292,15 @@ def test_playback_failure_keeps_input_frame_count_and_safe_alsa_stage() -> None:
                "quasar_unchanged": True, "helper_stage": "player_returned", "player_exit_status": 1}
     report = {"outcome": "unknown", "playback_started": True, "playback_completed": False,
               "cleanup_verified": True, "frames_written": 2205, "sample_rate": 22050,
-              "input_frames": 2205, "stage": "drain", "alsa_return_code": -5}
+              "input_frames": 2205, "stage": "drain", "alsa_return_code": -5,
+              "hardware_parameters_verified": True, "playback_elapsed_ms": 100}
     result = pcm_pilot._result(json.dumps(report) + "\n" + json.dumps(trailer), stream.getvalue())
     assert result["outcome"] == "unknown" and result["do_not_retry"]
     assert result["input_frames"] == 2205 and result["stage"] == "drain"
     assert result["alsa_return_code"] == -5
     for key, value in [("stage", "PRIVATE_SENTINEL"), ("input_frames", 2206),
-                       ("alsa_return_code", True)]:
+                       ("alsa_return_code", True), ("hardware_parameters_verified", False),
+                       ("playback_elapsed_ms", 25001)]:
         rejected = pcm_pilot._result(json.dumps(dict(report, **{key: value})) + "\n" +
                                      json.dumps(trailer), stream.getvalue())
         assert rejected["outcome"] == "unknown" and rejected["do_not_retry"]

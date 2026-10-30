@@ -31,9 +31,11 @@ RESULT_KEYS = {
     "outcome", "state_sha256", "backup_id", "restoration_verified", "reload_required",
     "error_code", "command_succeeded", "effect_observed", "evidence_class",
     "capture_id", "capture_ready", "remaining_seconds", "cleanup_verified", "records", "truncated",
-    "restoration_command_succeeded",
+    "restoration_command_succeeded", "yielded",
 }
 OUTCOMES = {"ready", "applied", "blocked", "conflict", "unknown", "capturing", "complete"}
+# The installed Mini 1 resident has no LED adapter: these use explicit pinned SSH on request.
+SSH_LED_ACTIONS = frozenset({"led.capture", "led.animate", "led.pulse", "led.show"})
 
 
 def parse_response(text: str) -> dict[str, Any]:
@@ -54,7 +56,7 @@ def parse_response(text: str) -> dict[str, Any]:
         if data["outcome"] == "ready" and "state_sha256" not in data:
             raise ValueError
         for key in ("restoration_verified", "reload_required", "command_succeeded",
-                    "effect_observed", "restoration_command_succeeded"):
+                    "effect_observed", "restoration_command_succeeded", "yielded"):
             if key in data and type(data[key]) is not bool:
                 raise ValueError
         capture_fields = {"capture_id", "capture_ready", "remaining_seconds", "cleanup_verified",
@@ -103,18 +105,21 @@ def invoke(controller: Controller, station: Station, request: dict[str, Any]) ->
         from alice_mcp import speech_capture
 
         return speech_capture.invoke(controller, station, request)
-    if request.get("action") == "led.effect" and request.get("model") == "station-mini3":
+    if (request.get("action") in {"led.effect", "led.show"}
+            and request.get("model") == "station-mini3"):
         from alice_mcp import led_framebuffer
 
         return parse_response(controller.runner(station, led_framebuffer.command(request)))
-    if request.get("action") in {"led.capture", "led.replay", "led.pulse", "led.animate"}:
+    mini1_show = request.get("action") == "led.show" and request.get("model") == "station-mini"
+    if mini1_show or request.get("action") in {"led.capture", "led.replay", "led.pulse",
+                                               "led.animate"}:
         from alice_mcp import led_capture
 
         capture_command = led_capture.command(request)
         started = time.monotonic()
         raw = controller.runner(station, capture_command)
         result = parse_response(json.dumps(led_capture.decode(raw)))
-        if request.get("action") in {"led.pulse", "led.animate"}:
+        if request.get("action") in {"led.pulse", "led.animate", "led.show"}:
             result["restoration_verified"] = False  # Write-only PWM has no hardware readback.
         return _fresh_capture(result, time.monotonic() - started)
     source = files("alice_mcp").joinpath("device_runtime.py").read_text(encoding="utf-8")
@@ -144,27 +149,34 @@ def _fresh_capture(result: dict[str, Any], elapsed: float) -> dict[str, Any]:
 
 def capabilities(controller: Controller, station_id: str) -> dict[str, Any]:
     station = controller.station(station_id)
+    # Aliases only: preset steps and siren media stay private.
+    jobs = {"presets": sorted(station.jobs.get("presets", {})),
+            "siren_declared": "siren" in station.jobs, "allow_reboot": station.allow_reboot}
     if station.native_mcp:
         from alice_mcp import native_transport
 
-        return native_transport.capabilities(controller, station)
+        return {**native_transport.capabilities(controller, station), **jobs}
     policy = station.controls
     return {
+        **jobs,
         "evidence_class": "caller", "station_id": station.id, "model": station.model,
         "writes_enabled": controller.writes and os.name != "nt",
-        "allowed_actions": policy.get("allowed_actions", []),
+        "allowed_actions": device_runtime.allowed_actions(policy),
         "preauthorize_all_actions": station.preauthorize_all_actions,
-        "preauthorized_actions": (policy.get("allowed_actions", [])
+        "preauthorized_actions": (device_runtime.allowed_actions(policy)
                                   if station.preauthorize_all_actions
-                                  else policy.get("preauthorized_actions", [])),
+                                  else device_runtime.preauthorized_actions(policy)),
         "led_modes": (sorted(device_runtime.ANIMATION_MODES)
                       if station.model == "station-mini" else []),
+        "led_show_effects": (sorted(device_runtime.SHOW_EFFECTS)
+                             if station.model in device_runtime.LED_ZONES else []),
         "assets": sorted(policy.get("media", {})),
         "bindings": [{"name": name, "kind": value["kind"],
                       "options": sorted(value["choices"])}
                      for name, value in policy.get("configs", {}).items()],
-        "runtime": "Mini 3 led.effect and Mini 1 capture/replay/pulse/animate use stock shell; "
-                   "replay/pulse/animate also require i2cset; speech.listen/say temporarily deploy "
+        "runtime": "Mini 3 led.effect/show and Mini 1 capture/replay/pulse/animate/show use "
+                   "stock shell; replay/pulse/animate/show also require i2cset; "
+                   "speech.listen/say temporarily deploy "
                    "one exact reviewed ARM32 client with stock shell; "
                    "other actions require Python 3.8+; no persistent installation",
         "availability": "declared policy only; a successful read-only preview is required",
@@ -172,12 +184,26 @@ def capabilities(controller: Controller, station_id: str) -> dict[str, Any]:
     }
 
 
+def _station(controller: Controller, station_id: str, action: str, ssh: bool) -> Station:
+    """With `ssh`, a native Mini 1 is reached over its pinned SSH entry: never a fallback."""
+    station = controller.station(station_id)
+    if not ssh:
+        return station
+    if station.model != "station-mini" or action not in SSH_LED_ACTIONS:
+        raise SafetyError("Explicit SSH is only for Mini 1 LED capture, pulses, shows and presets")
+    if not station.native_mcp:
+        return station
+    from alice_mcp.vqe_experiment import _ssh
+
+    return _ssh(station)
+
+
 def _check_permission(controller: Controller, station: Station, action: str) -> None:
     if not controller.writes or os.name == "nt":
         raise SafetyError("Device writes disabled or POSIX trust checks unavailable")
     if station.model not in BUILDROOT_MODELS:
         raise SafetyError("No device-control adapter for this OS family")
-    if action not in station.controls.get("allowed_actions", []):
+    if not device_runtime.allows(station.controls, action):
         raise SafetyError("Device action not permitted by the private station policy")
 
 
@@ -212,6 +238,18 @@ def describe(request: dict[str, Any]) -> str:
                 "continues. Keep Quasar enabled; no SSH/config/autostart changes or retry. "
                 "Remove the temporary executable/directory on exit; failed cleanup is unknown. "
                 "Compatibility is unverified; do not speak until fresh capture_ready=true")
+    if action == "led.show":
+        mini1 = request["model"] == "station-mini"
+        return (f"LED show {params['effect']} on {request['model']}: hard limit "
+                f"{params['duration_seconds']} s, level at most 16/255, at most 2.5 flashes per "
+                "second, mapped by the private led_map (calibrate lights one raw channel). Then "
+                + ("send the captured idle zero frame; no hardware readback, so a mute/listening "
+                   "indicator shown meanwhile can be overwritten until the firmware redraws. "
+                   if mini1 else
+                   "restore the captured state; if the firmware (e.g. a mute indicator) writes "
+                   "meanwhile, stop and leave its state instead of restoring. ")
+                + "Approve only while the ring is idle. Bus/sysfs/framebuffer LED values only: "
+                "no strobe, current/GCC, shutdown, driver force, daemon, Quasar stop or retry")
     if action == "led.animate":
         from alice_mcp.led_capture import animation_frames
 
@@ -275,8 +313,8 @@ def _digest(station: Station, request: dict[str, Any], state: str) -> str:
 
 
 def preview(controller: Controller, station_id: str, action: str,
-            parameters: dict[str, Any]) -> dict[str, Any]:
-    station = controller.station(station_id)
+            parameters: dict[str, Any], *, ssh: bool = False) -> dict[str, Any]:
+    station = _station(controller, station_id, action, ssh)
     if station.native_mcp:
         raise SafetyError("Use run_station_action for native MCP atomic preview/application")
     _check_permission(controller, station, action)
@@ -301,13 +339,15 @@ def preview(controller: Controller, station_id: str, action: str,
     return {"plan_id": plan_id, "expected_sha256": digest, "station_id": station_id,
             "action": action, "expires_in_seconds": 300, "impact": describe(request),
             "approval_required": (not station.preauthorize_all_actions
-                                  and action not in station.controls.get(
-                                      "preauthorized_actions", [])),
+                                  and action not in device_runtime.preauthorized_actions(
+                                      station.controls)),
             "evidence_class": "analytical", "physical_effects_verified": False}
 
 
 def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
     station = controller.station(plan.station.id)
+    if station.native_mcp and not plan.station.native_mcp:  # Previewed with explicit SSH.
+        station = _station(controller, plan.station.id, plan.action, True)
     _check_permission(controller, station, plan.action)
     if station != plan.station:
         raise SafetyError("Private station configuration or trust changed; create a new preview")
@@ -342,11 +382,12 @@ def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
              "physical_effects_verified": False}
 
 
-def capture_status(controller: Controller, station_id: str, capture_id: str) -> dict[str, Any]:
+def capture_status(controller: Controller, station_id: str, capture_id: str, *,
+                   ssh: bool = False) -> dict[str, Any]:
     """Read status even after global writes are disabled; never start or stop a capture."""
     if not device_runtime._match(device_runtime.HEX32, capture_id):
         raise SafetyError("Invalid capture id")
-    station = controller.station(station_id)
+    station = _station(controller, station_id, "led.capture", ssh)
     if station.native_mcp:
         from alice_mcp import native_transport
 
@@ -355,9 +396,8 @@ def capture_status(controller: Controller, station_id: str, capture_id: str) -> 
         from alice_mcp import speech_capture
 
         return speech_capture.status(controller, station, capture_id)
-    if station.model != "station-mini" or "led.capture" not in station.controls.get(
-        "allowed_actions", [],
-    ):
+    if station.model != "station-mini" or not device_runtime.allows(station.controls,
+                                                                    "led.capture"):
         raise SafetyError("Capture not permitted by the private station policy")
     result = invoke(controller, station, {
         "schema": device_runtime.SCHEMA, "mode": "capture_status", "model": station.model,

@@ -140,7 +140,7 @@ func (n *nativeRuntime) controls() map[string]any {
 	return map[string]any{"station_id": n.stationID, "model": n.model,
 		"writes_enabled": len(actions) != 0, "allowed_actions": actions,
 		"preauthorize_all_actions": c.PreauthorizeAllActions, "preauthorized_actions": preauthorized,
-		"transport": "streamable_http_tls", "independent_wake_word": false,
+		"transport": "streamable_http_tls", "independent_wake_word": c.Wake != nil,
 		"tts_backend":    backend,
 		"state_contract": "alice.native.state.v1", "state_sha256": n.previewState(),
 		"evidence_class": "caller", "physical_effects_verified": false}
@@ -247,6 +247,9 @@ func kernelMachine() string {
 }
 
 func (n *nativeRuntime) probe(name string) map[string]any {
+	if result, ok := n.typedProbe(name); ok {
+		return result
+	}
 	if name == "microphone" {
 		status, _ := readLocal("/proc/asound/card0/pcm2c/sub0/status", 4096)
 		state := "unknown"

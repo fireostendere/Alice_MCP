@@ -16,6 +16,7 @@ alice-mcp = "alice_mcp.server:main"
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1", "mypy>=1.15,<2", "build>=1.2,<2"]
 tts = ["piper-tts==1.8.0"]
+realtime = ["websockets>=15,<18"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/alice_mcp"]
@@ -24,7 +25,7 @@ packages = ["src/alice_mcp"]
 "skills" = "alice_mcp/data/skills"
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/skills", "/docs", "/tests", "/scripts", "/README.md", "/SECURITY.md", "/CONTRIBUTING.md", "/AGENTS.md", "/pyproject.toml", "/.gitignore", "/.github/workflows/ci.yml"]
+include = ["/src", "/skills", "/docs", "/tests", "/scripts", "/integrations", "/README.md", "/SECURITY.md", "/CONTRIBUTING.md", "/AGENTS.md", "/pyproject.toml", "/.gitignore", "/.env_example", "/.github/workflows/ci.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

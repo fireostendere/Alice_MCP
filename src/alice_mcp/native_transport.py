@@ -15,11 +15,14 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from alice_mcp import device_runtime as rt
+from alice_mcp import native_typed
 from alice_mcp.core import Controller, Plan, SafetyError, Station, _check_ssh_file
 
 PROTOCOL = "2025-11-25"
 TOOLS = {"get_capabilities", "get_station_controls", "station_probe", "run_station_action",
          "get_capture_status"}
+# led.show: Mini 1 adapter only.
+NATIVE_ACTIONS = {"speech.say", "speech.listen", "led.show", "wake.listen"} | native_typed.ACTIONS
 
 
 def validate_config(value: Any) -> dict[str, str]:
@@ -120,14 +123,14 @@ def _capabilities(controller: Controller, station: Station,
     if (result.get("station_id") != station.id or result.get("model") != station.model
         or result.get("transport") != "streamable_http_tls"
         or type(actions) is not list
-        or any(a not in {"speech.say", "speech.listen"} for a in actions)
+        or any(a not in NATIVE_ACTIONS for a in actions)
         or len(actions) != len(set(actions))
         or type(preauthorized) is not list or preauthorized not in ([], actions)
         or type(result.get("preauthorize_all_actions")) is not bool
         or type(result.get("writes_enabled")) is not bool
         or result.get("tts_backend", "yandex") not in {"yandex", "local_pcm"}):
         raise SafetyError("Native policy response unavailable or incompatible")
-    permitted = [a for a in actions if a in station.controls.get("allowed_actions", [])]
+    permitted = [a for a in actions if rt.allows(station.controls, a)]
     return {
         "station_id": station.id, "model": station.model, "evidence_class": "caller",
         "writes_enabled": controller.writes and result["writes_enabled"],
@@ -136,7 +139,8 @@ def _capabilities(controller: Controller, station: Station,
                                      and result["preauthorize_all_actions"]),
         "preauthorized_actions": ([a for a in preauthorized if a in permitted]
                                   if station.preauthorize_all_actions else []),
-        "transport": "native_mcp", "led_modes": [], "assets": [], "bindings": [],
+        "transport": "native_mcp", "led_modes": [], "bindings": [],
+        "assets": sorted(station.controls.get("local_media", {})),
         "runtime": "Resident ARM32 MCP agent; no SSH or per-call executable transfer",
         "availability": "declared local policies; physical effects are not verified",
         "independent_wake_word": False, "physical_effects_verified": False,
@@ -146,12 +150,14 @@ def _capabilities(controller: Controller, station: Station,
 
 
 def probe(station: Station, name: str) -> dict[str, Any]:
-    if name not in {"health", "microphone"}:
+    if name not in {"health", "microphone"} | native_typed.PROBES:
         raise SafetyError("Probe is not implemented by the native agent")
     result = call(station, "station_probe", {"station_id": station.id, "probe": name})
     data = result.get("data")
     if type(data) is not dict:
         raise SafetyError("Native probe unavailable or incompatible")
+    if name in native_typed.PROBES:
+        return {"evidence_class": "analytical", "data": native_typed.probe_data(name, data)}
     if name == "health":
         fields = {"uptime_seconds", "memory_total_kib", "memory_available_kib", "kernel_arch"}
         if not fields <= data.keys() or data.keys() - fields - {"agent_rss_kib"}:
@@ -188,8 +194,8 @@ def run_action(controller: Controller, station: Station, action: str,
 
 def _permission(controller: Controller, station: Station, action: str) -> None:
     if (not controller.writes or not station.preauthorize_all_actions
-        or action not in {"speech.say", "speech.listen"}
-        or action not in station.controls.get("allowed_actions", [])):
+        or action not in NATIVE_ACTIONS
+        or not rt.allows(station.controls, action)):
         raise SafetyError("Native action is not preauthorized by the host policy")
 
 
@@ -207,7 +213,8 @@ def _state(controller: Controller, station: Station, action: str) -> str:
         or action not in result["allowed_actions"]
         or raw.get("state_contract") != "alice.native.state.v1"
         or not rt._match(rt.HEX64, stamp)
-        or action == "speech.say" and raw.get("tts_backend", "yandex") != backend):
+        or action == "speech.say" and raw.get("tts_backend", "yandex") != backend
+        or action == "audio.play" and raw.get("tts_backend") != "local_pcm"):
         raise SafetyError("Native state-bound action contract unavailable or policy changed")
     return str(stamp)
 
@@ -221,8 +228,10 @@ def preview_action(controller: Controller, station: Station, action: str,
     _permission(controller, station, action)
     try:
         # The binary is owned/pinned on the device; text/model validation is shared.
-        parameters = rt.validate_parameters(action, parameters,
-                                             {"tts_client": {}, "speech_client": {}}, station.model)
+        parameters = (native_typed.parameters(station, action, parameters)
+                      if action in native_typed.ACTIONS else rt.validate_parameters(
+                          action, parameters, {"tts_client": {}, "speech_client": {}},
+                          station.model))
     except (ValueError, TypeError, KeyError):
         raise SafetyError("Invalid native action parameters") from None
     state = _state(controller, station, action)
@@ -241,6 +250,10 @@ def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
     if station != plan.station or _digest(station, plan.request, plan.remote_sha256) != plan.digest:
         raise SafetyError("Native station configuration, trust or request changed")
     parameters = copy.deepcopy(plan.request["parameters"])
+    if action == "led.show":
+        from alice_mcp import led_parity
+
+        parameters = led_parity.native_parameters(station, parameters)
     local = station.controls.get("local_tts") if action == "speech.say" else None
     audio = b""
     if local is not None:
@@ -252,6 +265,11 @@ def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
             parameters = wav_parameters(audio)
         except Exception:
             return {"outcome": "blocked", "error": "Local synthesis unavailable; no cloud fallback"}
+    if action in native_typed.ACTIONS:
+        try:
+            parameters = native_typed.wire(station, action, parameters)
+        except SafetyError as error:
+            return {"outcome": "blocked", "error": str(error)}
     if controller.clock() >= plan.expires:
         raise SafetyError("Native preview expired during synthesis")
     if _state(controller, station, action) != plan.remote_sha256:
@@ -267,8 +285,12 @@ def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
             "station_id": station.id, "action": action, "parameters": parameters,
             "expected_state_sha256": plan.remote_sha256,
         })
+        if action in native_typed.ACTIONS:
+            return native_typed.result(station, action, result, parameters)
         if action == "speech.listen":
             return _capture_result(result, allow_text=False)
+        if action == "led.show":
+            return led_parity.native_result(result)
         if local is not None:
             return _pcm_result(result, expected_frames=(len(audio) - 44) // 2,
                                expected_rate=int.from_bytes(audio[24:28], "little"))
@@ -298,6 +320,33 @@ def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
                  "do_not_retry": True, "physical_effects_verified": False}
 
 
+def play_pcm(controller: Controller, station: Station, audio: bytes) -> dict[str, Any]:
+    """A host-pinned canonical WAV through the resident's local-PCM speech path, without
+    synthesis (e.g. Alice's stock error phrase). Bound to the resident state; once."""
+    from alice_mcp.local_tts import wav_parameters
+
+    _permission(controller, station, "speech.say")
+    if "local_tts" not in station.controls:
+        raise SafetyError("Resident local PCM playback is not configured")
+    parameters = wav_parameters(audio)
+    with controller._execution_lock:  # Never over the agent's own speech.
+        state = _state(controller, station, "speech.say")
+        fresh = controller.station(station.id)
+        _permission(controller, fresh, "speech.say")
+        if fresh != station:
+            raise SafetyError("Native station configuration or trust changed")
+        try:
+            result = call(station, "run_station_action", {
+                "station_id": station.id, "action": "speech.say", "parameters": parameters,
+                "expected_state_sha256": state,
+            })
+            return _pcm_result(result, expected_frames=(len(audio) - 44) // 2,
+                               expected_rate=int.from_bytes(audio[24:28], "little"))
+        except Exception:
+            return {"outcome": "unknown", "error_code": "native_action_unverified",
+                    "do_not_retry": True, "physical_effects_verified": False}
+
+
 def _pcm_result(result: dict[str, Any], *, expected_frames: int | None = None,
                 expected_rate: int | None = None) -> dict[str, Any]:
     if result.get("outcome") == "blocked" and set(result) <= {"outcome", "error"}:
@@ -305,10 +354,15 @@ def _pcm_result(result: dict[str, Any], *, expected_frames: int | None = None,
     if (set(result) != {"outcome", "playback_started", "playback_completed", "cleanup_verified",
                         "frames_written", "sample_rate", "quasar_running", "do_not_retry",
                         "evidence_class", "physical_effects_verified", "tts_backend",
-                        "input_frames", "stage", "alsa_return_code"}
+                        "input_frames", "stage", "alsa_return_code",
+                        "hardware_parameters_verified", "playback_elapsed_ms"}
         or result["outcome"] not in {"applied", "blocked", "unknown"}
         or any(type(result[k]) is not bool for k in
-               ("playback_started", "playback_completed", "cleanup_verified", "quasar_running"))
+               ("playback_started", "playback_completed", "cleanup_verified", "quasar_running",
+                "hardware_parameters_verified"))
+        or not rt._integer(result["playback_elapsed_ms"], -1, 25000)
+        or not result["hardware_parameters_verified"] and (
+            result["frames_written"] != 0 or result["playback_elapsed_ms"] != -1)
         or not rt._integer(result["frames_written"], 0, 960000)
         or not rt._integer(result["input_frames"], 1, 960000)
         or not rt._integer(result["sample_rate"], 16000, 48000)
@@ -316,11 +370,12 @@ def _pcm_result(result: dict[str, Any], *, expected_frames: int | None = None,
         or expected_frames is not None and result["input_frames"] != expected_frames
         or expected_rate is not None and result["sample_rate"] != expected_rate
         or type(result["stage"]) is not str or result["stage"] not in {
-            "request", "library", "symbols", "configuration", "open", "parameters", "clock",
-            "write", "wait", "blocking", "drain", "cleanup", "complete", "unverified",
+            "request", "library", "symbols", "configuration", "open", "parameters", "hardware",
+            "clock", "write", "wait", "blocking", "drain", "cleanup", "complete", "unverified",
         }
         or (result["stage"] == "unverified" and (
-            result["outcome"] != "unknown" or result["alsa_return_code"] is not None)
+            result["outcome"] != "unknown" or result["alsa_return_code"] is not None
+            or result["hardware_parameters_verified"] or result["playback_elapsed_ms"] != -1)
             or result["stage"] != "unverified"
             and not rt._integer(result["alsa_return_code"], -4095, 2**31 - 1))
         or result["do_not_retry"] is not True or result["physical_effects_verified"] is not False
@@ -330,8 +385,9 @@ def _pcm_result(result: dict[str, Any], *, expected_frames: int | None = None,
         or result["outcome"] == "applied" and not all(result[k] for k in
                ("playback_started", "cleanup_verified", "quasar_running"))
         or result["outcome"] == "applied" and (
-            result["frames_written"] != result["input_frames"] or result["stage"] != "complete"
-            or result["alsa_return_code"] < 0)
+             result["frames_written"] != result["input_frames"] or result["stage"] != "complete"
+             or result["alsa_return_code"] < 0 or not result["hardware_parameters_verified"]
+             or result["playback_elapsed_ms"] < 0)
         or result["outcome"] == "blocked" and result["playback_started"]):
         raise SafetyError("Local playback result unverified; do not retry")
     return dict(result)
@@ -368,7 +424,7 @@ def _capture_result(result: dict[str, Any], *, allow_text: bool) -> dict[str, An
 
 
 def capture_status(controller: Controller, station: Station, capture_id: str) -> dict[str, Any]:
-    if ("speech.listen" not in station.controls.get("allowed_actions", [])
+    if (not rt.allows(station.controls, "speech.listen")
         or not rt._match(rt.HEX32, capture_id)):
         raise SafetyError("Capture permission revoked or identifier invalid")
     result = _capture_result(call(station, "get_capture_status", {

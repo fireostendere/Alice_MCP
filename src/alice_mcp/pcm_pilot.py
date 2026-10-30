@@ -16,11 +16,12 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+from alice_mcp import device_runtime as rt
 from alice_mcp import local_tts, native_transport, speech_capture
 from alice_mcp.core import MAX_OUTPUT, Controller, SafetyError, Station, ssh_argv
 from alice_mcp.vqe_experiment import _ssh
 
-PLAYER_SHA256 = "123d9d4221aa2054ff150202c0f4f5a36b008c93335d7c80cd76846d1bcd6087"
+PLAYER_SHA256 = "f0d3e86eb207eb32200ec61bb70ef5ea10aa3e2c7e7f56e4d1d96ab178637e18"
 LIBRARY = "/system/vendor/quasar/libs/libasound.so.2"
 PIDS = "pidof maind | tr ' ' '\\n' | sort -n | sha256sum | cut -d ' ' -f 1"
 MAX_TRANSFER = 20 * 1024 * 1024
@@ -132,7 +133,7 @@ exit 0
 def _permitted(controller: Controller, station: Station) -> None:
     if (not controller.writes or not station.preauthorize_all_actions
         or station.model != "station-mini"
-        or "speech.say" not in station.controls.get("allowed_actions", [])):
+        or not rt.allows(station.controls, "speech.say")):
         raise SafetyError("Local playback pilot is not authorized")
 
 
@@ -145,7 +146,11 @@ def _command(station: Station, item: Candidate, expected: str = "") -> _Transfer
                      item.player + item.audio if expected else b"")
 
 
-def _transfer(station: Station, request: _Transfer) -> str:
+def _transfer(station: Station, request: _Transfer, *, limit: int = 4096) -> str:
+    return _transfer_bytes(station, request, limit=limit).decode("utf-8", errors="strict")
+
+
+def _transfer_bytes(station: Station, request: _Transfer, *, limit: int) -> bytes:
     """Bounded binary stdin over existing pinned SSH; no bootstrap result-contract reuse."""
     if len(request.data) > MAX_TRANSFER or len(request.command.encode()) > 20000:
         raise SafetyError("Local PCM transfer exceeds reviewed bounds")
@@ -164,9 +169,9 @@ def _transfer(station: Station, request: _Transfer) -> str:
                 failed.append(True)
 
         def read() -> None:
-            body = source.read(4097)
+            body = source.read(limit + 1)
             output.append(body)
-            if len(body) > 4096:
+            if len(body) > limit:
                 process.kill()
 
         writer = threading.Thread(target=write, daemon=True)
@@ -183,9 +188,9 @@ def _transfer(station: Station, request: _Transfer) -> str:
             writer.join(timeout=2)
             reader.join(timeout=2)
         if (status or failed or writer.is_alive() or reader.is_alive() or not output
-            or len(output[0]) > 4096):
+            or len(output[0]) > limit):
             raise SafetyError("Local PCM transfer uncertain; do not retry")
-        return output[0].decode("utf-8", errors="strict")
+        return output[0]
 
 
 def preview(controller: Controller, station_id: str, item: Candidate) -> dict[str, Any]:
@@ -283,6 +288,7 @@ def _result(raw: str, audio: bytes, *, diagnostic: bool = False) -> dict[str, An
         if (type(result) is not dict or set(result) != {
             "outcome", "playback_started", "playback_completed", "cleanup_verified",
             "frames_written", "sample_rate", "input_frames", "stage", "alsa_return_code",
+            "hardware_parameters_verified", "playback_elapsed_ms",
         } or result["sample_rate"] != int.from_bytes(audio[24:28], "little")
             or result["input_frames"] != metadata["input_frames"]):
             raise ValueError

@@ -27,6 +27,7 @@ def device(tmp_path: Path, monkeypatch: Any) -> tuple[Controller, list[dict[str,
     path.write_text(json.dumps({"stations": [{
         "id": "desk", "model": "station-lite", "host": "station.invalid", "port": 2222,
         "user": "root", "identity_file": str(key), "known_hosts_file": str(hosts),
+        "preauthorize_all_actions": False,  # Exercises the explicit approval-form path.
         "controls": {
             "firmware_sha256": "a" * 64,
             "allowed_actions": ["led.effect", "config.select"],
@@ -123,7 +124,8 @@ def test_preauthorized_action_keeps_one_use_and_live_checks(device: Any, monkeyp
     assert again["outcome"] == "blocked"
 
 
-def test_default_policy_still_requires_native_approval(device: Any, monkeypatch: Any) -> None:
+def test_unpreauthorized_policy_still_requires_native_approval(device: Any,
+                                                              monkeypatch: Any) -> None:
     controller, calls = device
     monkeypatch.setattr(server, "controller", controller)
     assert controls.capabilities(controller, "desk")["preauthorized_actions"] == []

@@ -218,6 +218,15 @@ watch() {
     normal=1
     cleanup
 }
+old_captures() {
+    # Completed, cleaned results beyond the newest 7: removed before a new capture starts.
+    ls -t "$CAPTURES" | while read -r name; do
+        case "$name" in *[!0-9a-f]*) continue;; esac
+        [ "${#name}" = 32 ] && private "$CAPTURES/$name" || continue
+        [ "$(cat "$CAPTURES/$name/phase")" = complete ] &&
+            [ "$(cat "$CAPTURES/$name/cleanup")" = 1 ] && printf '%s\n' "$name"
+    done | sed 1,7d
+}
 replay_state() {
     private "$BASE" && private "$CAPTURES" && private "$OUT" || return 1
     [ "$(get firmware)" = "$firmware" ] && [ "$(get phase)" = complete ] &&
@@ -233,7 +242,7 @@ replay_state() {
         sha256sum | awk '{ print $1 }')
 }
 idle_state() {
-    i2cset --help 2>&1 | head -c 4096 | grep -Eq '^[[:space:]]*i[[:space:]]+I2C block data' ||
+    i2cset --help 2>&1 | head -c 4096 | grep -Eq '^[[:space:]]*b[[:space:]]+[Bb]yte data' ||
         return 1
     [ "${#boot}" = 64 ] && [ "$(get boot)" = "$boot" ] || return 1
     ended=$(get ended) && number "$ended" || return 1
@@ -280,7 +289,16 @@ animation_state() {
     STATE=$(printf '%s\n' "$STATE" "$frames" 'sn3236-animation-v1' |
         sha256sum | awk '{ print $1 }')
 }
-write_pwm() { i2cset -y 0 0x3c 0x01 "$@" i >/dev/null 2>&1; }
+write_pwm() {
+    [ "$#" = 18 ] || return 1
+    register=1
+    for value in "$@"; do
+        # BusyBox block mode on this firmware appends three unwanted bytes.
+        hex_register=$(printf '0x%02x' "$register") || return 1
+        i2cset -y 0 0x3c "$hex_register" "$value" b >/dev/null 2>&1 || return 1
+        register=$((register+1))
+    done
+}
 pulse_frame() {
     kind=$1
     set --
@@ -298,9 +316,30 @@ animation_frame() {
     set --
     while [ -n "$rest" ]; do
         tail=${rest#??}; byte=${rest%"$tail"}; rest=$tail
-        case "$byte" in 00|10) set -- "$@" "0x$byte";; *) return 1;; esac
+        case "$byte" in 0[0-9a-f]|10) set -- "$@" "0x$byte";; *) return 1;; esac
     done
     [ "$#" = 18 ] && write_pwm "$@"
+}
+show_state() {
+    # 1-75 frames of 18 PWM bytes <= 0x10, >=200 ms each and <=15 s in total.
+    case "$seconds" in ''|*[!0-9]*) return 1;; esac
+    [ "${#seconds}" -le 5 ] && [ "$seconds" -ge 200 ] || return 1
+    case "$frames" in ''|*[!0-9a-f\ ]*) return 1;; esac
+    set -- $frames
+    [ "$#" -ge 1 ] && [ "$#" -le 75 ] && [ $(($# * seconds)) -le 15000 ] || return 1
+    show_limit=$(($# * seconds / 1000 + 2))
+    for frame_hex do
+        [ "${#frame_hex}" = 36 ] || return 1
+        rest=$frame_hex
+        while [ -n "$rest" ]; do
+            tail=${rest#??}; byte=${rest%"$tail"}; rest=$tail
+            case "$byte" in 0[0-9a-f]|10) ;; *) return 1;; esac
+        done
+    done
+    interval=$((seconds / 1000)).$(printf %03d $((seconds % 1000)))
+    sleep 0.001 && idle_state || return 1
+    STATE=$(printf '%s\n' "$STATE" "$frames" 'sn3236-show-v1' |
+        sha256sum | awk '{ print $1 }')
 }
 led_finish() {
     trap - 0 HUP INT TERM
@@ -315,11 +354,13 @@ led_finish() {
 }
 profile || blocked
 case "$mode" in
-replay_inspect|replay_apply|pulse_inspect|pulse_apply|animation_inspect|animation_apply)
+replay_inspect|replay_apply|pulse_inspect|pulse_apply|animation_inspect|animation_apply|\
+show_inspect|show_apply)
     command -v i2cset >/dev/null 2>&1 || blocked
     replay_state || blocked
     case "$mode" in
         pulse_*) pulse_state || blocked;; animation_*) animation_state || blocked;;
+        show_*) show_state || blocked;;
     esac
     if [ "$mode" != "${mode%_inspect}" ]; then
         printf 'outcome=ready\nstate_sha256=%s\n' "$STATE"; exit 0
@@ -333,20 +374,25 @@ replay_inspect|replay_apply|pulse_inspect|pulse_apply|animation_inspect|animatio
     profile && replay_state || blocked
     case "$mode" in
         pulse_*) pulse_state || blocked;; animation_*) animation_state || blocked;;
+        show_*) show_state || blocked;;
     esac
     if [ "$expected" != "$STATE" ]; then
         printf 'outcome=conflict\nstate_sha256=%s\n' "$STATE"; exit 0
     fi
-    if [ "$mode" = pulse_apply ] || [ "$mode" = animation_apply ]; then
+    if [ "$mode" != replay_apply ]; then
         done_ok=0
         trap led_finish 0
         trap 'exit 0' HUP INT TERM
         if [ "$mode" = pulse_apply ]; then
             pulse_frame color && i2cset -y 0 0x3c 0x25 0xaa b >/dev/null 2>&1 && sleep 1 || exit 0
         else
+            started=$(now)
             for frame_hex in $frames; do
                 animation_frame "$frame_hex" &&
                     i2cset -y 0 0x3c 0x25 0xaa b >/dev/null 2>&1 && sleep "$interval" || exit 0
+                # Hard deadline for shows, independent of the host connection.
+                [ "$mode" != show_apply ] || [ $(($(now) - started)) -le "$show_limit" ] ||
+                    exit 0
             done
         fi
         done_ok=1
@@ -365,13 +411,16 @@ inspect|apply)
         if [ -e "$directory" ] || [ -L "$directory" ]; then private "$directory" || blocked; fi
     done
     set -- "$CAPTURES"/*
-    if [ -e "$1" ] || [ -L "$1" ]; then [ "$#" -lt 16 ] || blocked; fi
+    if [ -e "$1" ] || [ -L "$1" ]; then
+        [ $(($# - $(old_captures | wc -l))) -lt 16 ] || blocked  # Apply prunes the old ones.
+    fi
     if [ "$mode" = inspect ]; then printf 'outcome=ready\nstate_sha256=%s\n' "$STATE"; exit 0; fi
     if [ "$expected" != "$STATE" ]; then
         printf 'outcome=conflict\nstate_sha256=%s\n' "$STATE"; exit 0
     fi
     if [ ! -e "$DATA/opt" ]; then mkdir "$DATA/opt" || blocked; fi
     trusted "$DATA/opt" && make_private "$BASE" && make_private "$CAPTURES" || blocked
+    for name in $(old_captures); do rm -rf "$CAPTURES/$name" || blocked; done
     mkdir "$OUT" && private "$OUT" || blocked
     put firmware "$firmware"; put policy "$policy"; put cleanup 0; put truncated 0
     put boot "$boot"
@@ -441,14 +490,15 @@ def command(request: dict[str, Any], *, source: str = SCRIPT) -> SSHInput:
     try:
         action = request["action"]
         if (request["schema"] != rt.SCHEMA or request["model"] != "station-mini"
-            or action not in {"led.capture", "led.replay", "led.pulse", "led.animate"}
+            or action not in {"led.capture", "led.replay", "led.pulse", "led.animate", "led.show"}
             or not rt._match(rt.HEX32, request["nonce"])):
             raise ValueError
         policy = rt.validate_policy(request["policy"], request["model"])
-        if action not in policy.get("allowed_actions", []):
+        if not rt.allows(policy, action):
             raise ValueError
         mode = request["mode"]
         expected = request.get("expected_sha256", "")
+        show: list[list[int]] = []
         if mode == "capture_status":
             if (action != "led.capture" or request["params"] != {"capture_id": request["nonce"]}
                 or expected):
@@ -457,6 +507,9 @@ def command(request: dict[str, Any], *, source: str = SCRIPT) -> SSHInput:
         elif mode in {"inspect", "apply"}:
             params = rt.validate_parameters(action, request["params"], policy, request["model"])
             duration = params.get("duration_seconds", params.get("channel", params.get("mode", 0)))
+            if action == "led.show":
+                # Host-built mapped PWM frames; the helper re-checks count, level and timing.
+                duration, show = rt.show_frames(params, "station-mini", policy.get("led_map"))
             if (mode == "apply" and not rt._match(rt.HEX64, expected)
                 or mode == "inspect" and expected):
                 raise ValueError
@@ -468,7 +521,7 @@ def command(request: dict[str, Any], *, source: str = SCRIPT) -> SSHInput:
             raise ValueError
         policy_sha = hashlib.sha256(rt._encode(policy)).hexdigest()
         remote_mode = {"led.replay": "replay_", "led.pulse": "pulse_",
-                       "led.animate": "animation_"}.get(action, "") + mode
+                       "led.animate": "animation_", "led.show": "show_"}.get(action, "") + mode
         record_id = (request["params"]["capture_id"] if action != "led.capture"
                      else request["nonce"])
         args = [remote_mode, record_id, str(duration), policy["firmware_sha256"],
@@ -476,6 +529,8 @@ def command(request: dict[str, Any], *, source: str = SCRIPT) -> SSHInput:
         if action == "led.animate":
             _, frames = animation_frames(request["params"]["mode"])
             args.append(" ".join(frame.hex() for frame in frames))
+        if action == "led.show":
+            args.append(" ".join(bytes(frame).hex() for frame in show))
         body = ("ALICE_CAPTURE_CODE=" + shlex.quote(source)
                 + "; export ALICE_CAPTURE_CODE\n" + source)
         return SSHInput("sh -s -- " + " ".join(shlex.quote(a) for a in args), body.encode())

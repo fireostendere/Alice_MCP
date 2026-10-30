@@ -22,9 +22,14 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install development dependencies
-        run: python -m pip install -e '.[dev]'
+        run: python -m pip install -e '.[dev,realtime]' 'numpy>=2,<3'
       - name: Tests
         run: python -m pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: OpenCode integration tests
+        run: node --test integrations/opencode/alice-voice/lib.test.js
       - name: Lint
         run: python -m ruff check --no-cache src tests scripts
       - name: Types
@@ -37,3 +42,20 @@ jobs:
         run: python -m build
       - name: Publication archive check
         run: python scripts/check_public.py --archive dist/*.whl dist/*.tar.gz
+
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/alice_mcp/native/agent/go.mod
+      - name: Test, vet, format and ARM32 build
+        working-directory: src/alice_mcp/native/agent
+        run: |
+          go test -race ./...
+          go vet ./...
+          test -z "$(gofmt -l *.go)"
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -buildvcs=false -o /tmp/alice-agent-armhf .

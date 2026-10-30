@@ -358,7 +358,7 @@ def pulse_device(replay_device: Any) -> tuple[Any, dict[str, Any], Path]:
     source = source.replace('/proc/sys/kernel/random/boot_id', str(boot))
     utility = root / 'shims/i2cset'
     utility.write_text('#!/bin/sh\n'
-                       'if [ "$*" = "--help" ]; then echo " i I2C block data"; exit 0; fi\n'
+                       'if [ "$*" = "--help" ]; then echo " b Byte data"; exit 0; fi\n'
                        'printf "%s\\n" "$*" >> "$TEST_I2C_LOG"\n'
                        'count=$(wc -l < "$TEST_I2C_LOG")\n'
                        '[ "$count" != "${TEST_PULSE_FAIL_ON:-none}" ]\n')
@@ -374,10 +374,23 @@ def test_one_dim_pulse_restores_captured_idle_without_claiming_readback(pulse_de
     assert result['restoration_command_succeeded'] is True
     assert result['restoration_verified'] is False and result['effect_observed'] is False
     calls = log.read_text().splitlines()
-    assert calls == ['-y 0 0x3c 0x01 ' + ' '.join(['0x00', '0x10', '0x00'] * 6) + ' i',
-                     '-y 0 0x3c 0x25 0xaa b',
-                     '-y 0 0x3c 0x01 ' + ' '.join(['0x00'] * 18) + ' i',
-                     '-y 0 0x3c 0x25 0xaa b']
+    assert calls == (pwm_calls([0, 16, 0] * 6) + ['-y 0 0x3c 0x25 0xaa b']
+                     + pwm_calls([0] * 18) + ['-y 0 0x3c 0x25 0xaa b'])
+
+
+def pwm_calls(frame: Any) -> list[str]:
+    return [f'-y 0 0x3c 0x{i:02x} 0x{v:02x} b' for i, v in enumerate(frame, 1)]
+
+
+def test_busybox_pwm_uses_only_byte_writes_with_hex_registers(pulse_device: Any) -> None:
+    device, req, log = pulse_device
+    plan = run_device(device, req)
+    result = run_device(device, dict(req, mode='apply', expected_sha256=plan['state_sha256']))
+    assert result['outcome'] == 'applied'
+    calls = [line.split() for line in log.read_text().splitlines()]
+    assert len(calls) == 38
+    assert all(len(call) == 6 and call[-1] == 'b' and call[3].startswith('0x') for call in calls)
+    assert [call[3] for call in calls[:18]] == [f'0x{i:02x}' for i in range(1, 19)]
 
 
 def test_changed_pulse_evidence_conflicts_before_writing(pulse_device: Any) -> None:
@@ -389,7 +402,7 @@ def test_changed_pulse_evidence_conflicts_before_writing(pulse_device: Any) -> N
     assert result['outcome'] == 'conflict' and not log.exists()
 
 
-@pytest.mark.parametrize('failure', ['1', '3'])
+@pytest.mark.parametrize('failure', ['1', '20'])  # colour frame / idle frame
 def test_pulse_failure_is_unknown_and_effect_is_not_retried(pulse_device: Any,
                                                            failure: str) -> None:
     (root, env, source), req, log = pulse_device
@@ -397,7 +410,13 @@ def test_pulse_failure_is_unknown_and_effect_is_not_retried(pulse_device: Any,
     preview = run_device(device, req)
     result = run_device(device, dict(req, mode='apply', expected_sha256=preview['state_sha256']))
     assert result['outcome'] == 'unknown' and result['restoration_verified'] is False
-    assert sum('0x10' in line for line in log.read_text().splitlines()) == 1
+    calls = log.read_text().splitlines()
+    if failure == '1':
+        assert calls == (pwm_calls([0, 16, 0] * 6)[:1]
+                         + pwm_calls([0] * 18) + ['-y 0 0x3c 0x25 0xaa b'])
+    else:
+        assert calls == (pwm_calls([0, 16, 0] * 6) + ['-y 0 0x3c 0x25 0xaa b']
+                         + pwm_calls([0] * 18)[:1] + ['-y 0 0x3c 0x25 0xaa b'])
 
 
 @pytest.mark.parametrize('change', ['non_idle', 'wrong_boot', 'unrecorded_format',
@@ -487,22 +506,21 @@ def test_animation_preview_readonly_and_preset_restores_idle(pulse_device: Any, 
     calls = log.read_text().splitlines()
     expected = []
     for frame in (*frames, bytes(18)):
-        expected.extend(['-y 0 0x3c 0x01 ' + ' '.join(f'0x{v:02x}' for v in frame) + ' i',
-                         '-y 0 0x3c 0x25 0xaa b'])
+        expected.extend(pwm_calls(frame) + ['-y 0 0x3c 0x25 0xaa b'])
     assert calls == expected
 
 
 def test_failed_animation_stops_without_replaying_frames(pulse_device: Any) -> None:
     (root, env, source), req, log = pulse_device
-    device = root, {**env, 'TEST_PULSE_FAIL_ON': '3'}, source
+    device = root, {**env, 'TEST_PULSE_FAIL_ON': '20'}, source  # 2nd frame's 1st register
     req.update(action='led.animate', params={'capture_id': 'a' * 32, 'mode': 'rainbow_swirl'})
     req['policy']['allowed_actions'] = ['led.animate']
     preview = run_device(device, req)
     result = run_device(device, dict(req, mode='apply', expected_sha256=preview['state_sha256']))
     assert result['outcome'] == 'unknown' and result['restoration_command_succeeded'] is True
     assert result['restoration_verified'] is False
-    # First frame+update, failed second frame, one idle frame+update. No frame retry.
-    assert len(log.read_text().splitlines()) == 5
+    # First frame latched, next frame failed at byte one; only the idle frame follows.
+    assert len(log.read_text().splitlines()) == 20 + 19
 
 
 def test_changing_preset_after_preview_conflicts_before_any_write(pulse_device: Any) -> None:
@@ -568,17 +586,17 @@ def test_interrupted_animation_attempts_idle_once(pulse_device: Any) -> None:
     try:
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            if log.exists() and len(log.read_text().splitlines()) >= 2:
+            if log.exists() and len(log.read_text().splitlines()) >= 19:
                 break
             time.sleep(0.01)
-        assert log.exists() and len(log.read_text().splitlines()) == 2
+        assert log.exists() and len(log.read_text().splitlines()) == 19
         os.killpg(process.pid, signal.SIGTERM)
         stdout, _ = process.communicate(timeout=5)
         result = led_capture.decode(stdout.decode())
         assert result['outcome'] == 'unknown' and result['restoration_command_succeeded'] is True
         calls = log.read_text().splitlines()
-        assert len(calls) == 4
-        assert calls[-2] == '-y 0 0x3c 0x01 ' + ' '.join(['0x00'] * 18) + ' i'
+        assert len(calls) == 38
+        assert calls[-19:-1] == pwm_calls([0] * 18)
         assert calls[-1] == '-y 0 0x3c 0x25 0xaa b'
     finally:
         if process.poll() is None:

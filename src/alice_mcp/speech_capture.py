@@ -168,7 +168,7 @@ def command(request: dict[str, Any], binary: bytes = b"") -> SSHInput:
         raise SafetyError("Invalid speech action")
     params = rt.validate_parameters(action, request["params"], policy, request["model"])
     pin = TTS_CLIENT_SHA256 if action == "speech.say" else CLIENT_SHA256
-    if (request["schema"] != rt.SCHEMA or action not in policy["allowed_actions"]
+    if (request["schema"] != rt.SCHEMA or not rt.allows(policy, action)
         or not rt._match(rt.HEX32, request["nonce"])):
         raise SafetyError("Invalid speech request")
     expected = request.get("expected_sha256", "")
@@ -453,8 +453,6 @@ def _tts_result(raw: str) -> dict[str, Any]:
 
 def status(controller: Controller, station: Station, capture_id: str) -> dict[str, Any]:
     session: Session = controller.speech_sessions[capture_id]
-    if station != session.station or "speech.listen" not in station.controls.get(
-        "allowed_actions", [],
-    ):
+    if station != session.station or not rt.allows(station.controls, "speech.listen"):
         raise SafetyError("Speech station configuration changed or permission revoked")
     return session.report(consume=True)

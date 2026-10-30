@@ -147,6 +147,17 @@ Mini 3's shell adapter restores on normal exit and handled HUP/INT/TERM, then
 checks the exact 18-byte readback. Its in-memory snapshot cannot survive power
 loss, SIGKILL or a stuck kernel operation; there is no detached recovery watchdog.
 
+### Reference-style shows (`led.show`, Mini 1, Lite, Mini 3)
+
+Route «радуга по кругу/переливы» → `rainbow`, «дыхание» → `breathe`, «крути/вращение»
+→ `spin` or `spin_color`, «включи цвет» → `static`, «выключи подсветку» → `off`,
+«мигни» → `notify`, «полиция» → `police`. Parameters: `effect`, `duration_seconds`
+1–15, optional `speed` 1–5, colour 0–16 only for colour effects, `capture_id` on
+Mini 1. Every show ends and restores; there is no "until stopped" mode or strobe.
+`yielded=true` means the firmware took the ring back (e.g. mute): do not repeat.
+Channel/zone mapping comes from the private `led_map` written by the owner-run
+calibration runner. Details: `docs/LED_PARITY.md` in the source repository.
+
 ## Verification
 
 The owner checks region, colour order, brightness and duration, then normal listening,

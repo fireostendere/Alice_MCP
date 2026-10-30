@@ -18,18 +18,19 @@ import (
 )
 
 type config struct {
-	StationID              string     `json:"station_id"`
-	Model                  string     `json:"model"`
-	Listen                 string     `json:"listen"`
-	Certificate            string     `json:"certificate_file"`
-	PrivateKey             string     `json:"private_key_file"`
-	CredentialFile         string     `json:"token_file"`
-	FirmwareSHA256         string     `json:"firmware_sha256"`
-	TTSClient              string     `json:"tts_client"`
-	ASRClient              string     `json:"asr_client,omitempty"`
-	AllowedActions         actionList `json:"allowed_actions"`
-	PreauthorizeAllActions bool       `json:"preauthorize_all_actions"`
-	LocalPCM               *pcmConfig `json:"local_pcm,omitempty"`
+	StationID              string      `json:"station_id"`
+	Model                  string      `json:"model"`
+	Listen                 string      `json:"listen"`
+	Certificate            string      `json:"certificate_file"`
+	PrivateKey             string      `json:"private_key_file"`
+	CredentialFile         string      `json:"token_file"`
+	FirmwareSHA256         string      `json:"firmware_sha256"`
+	TTSClient              string      `json:"tts_client"`
+	ASRClient              string      `json:"asr_client,omitempty"`
+	AllowedActions         actionList  `json:"allowed_actions"`
+	PreauthorizeAllActions bool        `json:"preauthorize_all_actions"`
+	LocalPCM               *pcmConfig  `json:"local_pcm,omitempty"`
+	Wake                   *wakeConfig `json:"wake,omitempty"`
 	audioPolicy
 }
 
@@ -59,7 +60,8 @@ func (c config) implementedActions() actionList {
 		ready bool
 	}{{"speech.say", c.LocalPCM != nil || filepath.IsAbs(c.TTSClient)},
 		{"speech.listen", filepath.IsAbs(c.ASRClient)}, {"audio.volume", c.Volume != nil},
-		{"audio.play", c.Media != nil}, {"led.show", c.Model == "station-mini"}} {
+		{"audio.play", c.Media != nil}, {"led.show", c.Model == "station-mini"},
+		{"wake.listen", c.Wake != nil}} {
 		if item.ready {
 			actions = append(actions, item.name)
 		}
@@ -124,7 +126,7 @@ func readTrusted(path string, secret bool, limit int64) ([]byte, error) {
 func loadConfig(path string) (config, []byte, error) {
 	bad := errors.New("Invalid private configuration")
 	data, err := readTrusted(path, true, 65536)
-	var c config
+	c := config{PreauthorizeAllActions: true}
 	if err != nil || !decode(data, &c) || c.Model != "station-mini" && c.Model != "station-mini3" ||
 		len(c.StationID) < 1 || len(c.StationID) > 32 || !hex64(c.FirmwareSHA256) {
 		return config{}, nil, bad
@@ -155,16 +157,20 @@ func loadConfig(path string) (config, []byte, error) {
 	if c.Volume != nil && !c.Volume.valid() || c.Media != nil && (c.LocalPCM == nil || !validMedia(c.Media)) {
 		return config{}, nil, bad
 	}
+	if c.Wake != nil && (c.Model != "station-mini" || !c.Wake.valid()) {
+		return config{}, nil, bad
+	}
 	if c.AllowedActions == nil || len(c.AllowedActions) == 1 && c.AllowedActions[0] == allActions {
 		c.AllowedActions = c.implementedActions()
 	}
 	for _, action := range c.AllowedActions {
 		if seen[action] || action != "speech.say" && action != "speech.listen" &&
-			action != "audio.volume" && action != "audio.play" &&
+			action != "audio.volume" && action != "audio.play" && action != "wake.listen" &&
 			!(action == "led.show" && c.Model == "station-mini") ||
 			action == "speech.say" && c.LocalPCM == nil && !filepath.IsAbs(c.TTSClient) ||
 			action == "speech.listen" && !filepath.IsAbs(c.ASRClient) ||
-			action == "audio.volume" && c.Volume == nil || action == "audio.play" && c.Media == nil {
+			action == "audio.volume" && c.Volume == nil || action == "audio.play" && c.Media == nil ||
+			action == "wake.listen" && c.Wake == nil {
 			return config{}, nil, bad
 		}
 		seen[action] = true
@@ -191,7 +197,7 @@ func main() {
 	api := &server{stationID: c.StationID, model: c.Model, tokenFile: c.CredentialFile,
 		controls: device.controls, probe: device.probe, run: device.say,
 		listen: device.listen, status: device.captureStatus, pcm: device.playPCM,
-		volume: device.setVolume, media: device.playMedia, show: device.showLED}
+		volume: device.setVolume, media: device.playMedia, show: device.showLED, wake: device.listenWake}
 	httpServer := &http.Server{Addr: c.Listen, Handler: api, TLSConfig: tlsSettings(),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 40 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 4096,

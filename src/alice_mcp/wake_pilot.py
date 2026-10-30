@@ -347,6 +347,10 @@ def _detector(events: list[dict[str, Any]], gain_db: int, trace: bool = False) -
               and set(value) == {"event", "model", "t_ms", "q"} and value["model"] in models
               and iop._integer(value["t_ms"], last.get(value["model"], -1) + 1, 90000)
               and iop._integer(value["q"], 0, 255)):
+            expected_ms = (2 + (len(traces.get(value["model"], [])) + 1)
+                           * models[value["model"]]) * 10
+            if value["t_ms"] != expected_ms:
+                raise ValueError
             traces.setdefault(value["model"], []).append(value["q"])
             last[value["model"]] = value["t_ms"]
         elif (kind == "wake" and models is not None
@@ -474,6 +478,7 @@ def parse_result(raw: str, gain_db: int) -> dict[str, Any]:
 def _stats(q: list[int]) -> dict[str, Any]:
     sums = [sum(q[i:i + 5]) for i in range(len(q) - 4)]
     return {"max_q": max(q, default=None),
+            "trace_sha256": hashlib.sha256(bytes(q)).hexdigest(),
             "max_mean5": round(max(sums) / 5 / 256, 4) if sums else None,
             "q_ge_250": sum(v >= 250 for v in q), "inferences": len(q)}
 
@@ -508,6 +513,8 @@ def parse_replay(raw: str, gain_db: int, clip_bytes: int) -> dict[str, Any]:
     return dict(
         base, outcome="complete" if code == "none" else "unknown", error_code=code,
         evidence_class="analytical",
+        model_sha256={m["name"]: m["sha256"] for v in values if v.get("event") == "ready"
+                      for m in v["models"]},
         models={name: _stats(traces.get(name, [])) for name in models or {}},
         detector=_summary(end, error, final), **flags)
 
@@ -565,35 +572,48 @@ def operator_run(controller: Controller, station_id: str, item: Pilot, *,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Owner-run Mini 1 on-station wake pilot")
     parser.add_argument("--station", required=True, help="Private station alias, never an endpoint")
-    parser.add_argument("--client", required=True, type=Path,
+    parser.add_argument("--client", type=Path,
                         help="Already-built IO-channel client matching its pinned SHA-256")
     parser.add_argument("--detector", required=True, type=Path,
                         help="Already-built microWakeWord detector matching its pinned SHA-256")
+    parser.add_argument("--replay", type=Path, help="Replay a host WAV without room capture")
+    parser.add_argument("--live", action="store_true",
+                        help="Apply one replay; without this flag replay only previews")
     parser.add_argument("--seconds", type=int, choices=range(1, 61), default=45)
     parser.add_argument("--gain-db", type=int, choices=range(0, 31), default=0,
                         help="Calibration knob only (docs/MICRO_WAKE_WORD.md); default 0")
     args = parser.parse_args(argv)
-    if not sys.stdin.isatty():
+    if args.live and not args.replay:
+        parser.error("--live requires --replay; room-audio pilots use the WAKE prompt")
+    if not args.replay and not args.client:
+        parser.error("--client is required for a room-audio pilot")
+    if not args.replay and not sys.stdin.isatty():
         parser.error("Use a terminal beside Mini 1, or call preview()/apply() from Python")
     inventory = os.environ.get("ALICE_MCP_INVENTORY")
     if not inventory:
         parser.error("Set ALICE_MCP_INVENTORY privately; never paste its contents")
     try:
-        with args.client.open("rb") as source:
-            client = source.read(64 * 1024 + 1)
         with args.detector.open("rb") as source:
             detector = source.read(2 * 1024 * 1024 + 1)
         controller = Controller(Path(inventory),
                                 writes=os.environ.get("ALICE_MCP_ALLOW_WRITES") == "1")
-        result = operator_run(controller, args.station,
-                              Pilot(args.seconds, client, detector, args.gain_db))
+        if args.replay:
+            item = Replay(pcm_from_wav(args.replay), detector, args.gain_db)
+            plan = preview(controller, args.station, item)
+            result = (apply(controller, plan["plan_id"], plan["expected_sha256"], item)
+                      if args.live else {"outcome": "preview", **plan})
+        else:
+            with args.client.open("rb") as source:
+                client = source.read(64 * 1024 + 1)
+            result = operator_run(controller, args.station,
+                                  Pilot(args.seconds, client, detector, args.gain_db))
     except SafetyError as error:
         result = {"outcome": "blocked", "error": str(error), "audio_exported": False}
     except Exception:
         result = {"outcome": "blocked", "error_code": "operator_inputs_unavailable",
                   "audio_exported": False}
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
-    return 0 if result["outcome"] == "complete" else 1
+    return 0 if result["outcome"] in ("complete", "preview") else 1
 
 
 if __name__ == "__main__":

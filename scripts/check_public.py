@@ -144,6 +144,8 @@ def source_allowed(path: str) -> bool:
             return parts[4] in {
                 "go.mod", "main.go", "mcp.go", "runtime.go", "mcp_test.go", "runtime_test.go",
                 "speech.go", "pcm.go", "audio.go", "audio_test.go", "led.go", "led_test.go",
+                "wake.go", "wake_test.go",
+                "alsa_control.go", "alsa_control_test.go",
             }
         return suffix in {".py", ".json"} or (
             (parts[2] == "skills" or parts[2:4] == ["data", "skills"])

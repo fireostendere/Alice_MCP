@@ -31,17 +31,52 @@ def voice(tmp_path: Path, **extra: Any) -> dict[str, Any]:
 def test_policy_accepts_voice_with_defaults_and_refuses_anything_else(tmp_path: Path) -> None:
     result = rt.validate_policy({**FIRMWARE, "voice": voice(tmp_path)}, "station-mini")
     assert result["voice"] == {**voice(tmp_path), "mww_model": "ft", "mode": "either",
-                               "autostart": False}
+                               "autostart": False, "source": "PC"}
     for bad, model in [(voice(tmp_path, autostart="yes"), "station-mini"),
                        (voice(tmp_path, mode="any"), "station-mini"),
                        (voice(tmp_path, mww_model="new"), "station-mini"),
                        (voice(tmp_path, extra="x"), "station-mini"),
+                       (voice(tmp_path, source="cloud"), "station-mini"),
                        ({**voice(tmp_path), "client": "relative/client"}, "station-mini"),
                        ({**voice(tmp_path), "mww": str(tmp_path / ".." / "x")}, "station-mini"),
                        ({"client": "/a"}, "station-mini"),
                        (voice(tmp_path), "station-mini3")]:
         with pytest.raises(ValueError):
             rt.validate_policy({**FIRMWARE, "voice": bad}, model)
+
+
+def test_station_source_needs_no_host_models_and_never_uses_ssh(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    controls = rt.validate_policy({**FIRMWARE, "voice": {"source": "station"}}, "station-mini")
+    mini = station(tmp_path)
+    from dataclasses import replace
+    mini = replace(mini, controls=controls, native_mcp={"url": "synthetic"})
+    voice_service = service(tmp_path, monkeypatch, mini)
+    seen = threading.Event()
+
+    def once(*args: Any) -> dict[str, Any]:
+        voice_service.stop_event.set()
+        seen.set()
+        return {"outcome": "complete", "cleanup_verified": True, "quasar_unchanged": True,
+                "events": [{"model": "komp", "t_ms": 1000, "probability": 0.99,
+                            "trusted": False}]}
+
+    monkeypatch.setattr(vs.station_wake, "listen_once", once)
+    monkeypatch.setattr(ws, "preview", lambda *a: pytest.fail("station source used SSH"))
+    voice_service.start("mini1")
+    assert seen.wait(5)
+    wait(lambda: voice_service.status()["state"] == "stopped")
+    event = voice_service.get_events()["events"][0]
+    assert event["command"] == "" and event["trusted"] is False
+    assert event["sources"] == ["station_mww"]
+
+
+def test_switching_source_preserves_optional_pc_settings(tmp_path: Path) -> None:
+    pc = voice(tmp_path)
+    result = rt.validate_policy({**FIRMWARE, "voice": {**pc, "source": "station"}},
+                                 "station-mini")
+    assert all(result["voice"][key] == value for key, value in pc.items())
 
 
 def test_sink_is_private_append_only_and_rotates(tmp_path: Path) -> None:
@@ -202,6 +237,22 @@ def test_autostart_starts_the_declared_station(tmp_path: Path, monkeypatch: Any)
     monkeypatch.setattr(vs, "load_inventory", lambda path: {"mini1": mini})
     voice_service.autostart()
     assert voice_service.status()["running"]
+    voice_service.stop()
+
+
+def test_start_reserves_listener_before_starting_worker(tmp_path: Path, monkeypatch: Any) -> None:
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    real_state = voice_service._state
+
+    def concurrent_start(state: str) -> None:
+        if state == "starting":
+            with pytest.raises(SafetyError, match="already running"):
+                voice_service.start("mini1")
+        real_state(state)
+
+    monkeypatch.setattr(voice_service, "_state", concurrent_start)
+    fake_stream(monkeypatch, {"outcome": "complete"})
+    voice_service.start("mini1")
     voice_service.stop()
 
 

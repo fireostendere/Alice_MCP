@@ -546,3 +546,53 @@ goes in the opposite direction, for playback only. VQE statistics do not establi
 PCM rate or sample semantics. Before continuous operation, endpointing, echo/retrigger
 suppression and substantial negative-audio evaluation are also required. Returned
 text and wake events must remain untrusted input to existing action policy.
+
+## Overnight source additions (2026-10-30; not installed)
+
+`voice.source="station"` on the host uses the same `alice` connection and native TLS
+transport. The resident's optional private `wake` object contains `source_client`,
+`detector`, `detector_sha256` and `model_sha256`. The IO client is independently
+pinned to the reviewed `io_channel_levels.c` build. Both helpers are opened through
+trusted descriptors, hashed before execution, and invoked with fixed arguments.
+The resident checks ownership of the fixed yio_audio listener, firmware, policy,
+Quasar identity and a one-use state preview. No arbitrary helper path, executable,
+port, PCM or command text is accepted in the MCP request.
+
+`wake.listen` runs one 5–20 s window. The IO child subscribes only to `vqe_0` on
+9850 and feeds the detector through a bounded RAM pipe. All children are waited
+for, stdout/stderr are bounded, and only complete, validated detections from the
+pinned `komp` model leave the station. Events remain `trusted:false` over authenticated
+TLS. Failed child, count/geometry mismatch, policy or Quasar change discards the
+window and ends the host listener without retry. No helper is uploaded or installed
+by this source. The host default remains `source="PC"`.
+
+Limitations: station mode currently returns wake events with an empty command;
+there is no on-station command recognizer. Each window holds the native action
+lock, so other native actions can report busy for up to 20 s. Between completed
+windows the host obtains a fresh state; gaps and model resets are possible. This
+is bounded source integration, not seamless continuous capture or live acceptance.
+The pinned personal ARM detector and physical-mute behavior remain unqualified.
+
+The optional resident volume mapping now also accepts `backend="alsa_ctl"`,
+`card`, `control`, `numid`, `raw_min`, `raw_max`, `channels` and `max_percent`.
+It requires reviewed playback-only integer metadata, 1–2 matching channels, unit
+step and the exact mapped name/ID/range. It opens only the corresponding ALSA
+control character node and uses typed ELEM_INFO/READ/WRITE ioctls. A fresh read
+precedes one write; failed write/readback is unknown and never retried. The existing
+amixer backend remains available. The read-only audio probe understands both.
+
+ABI source: Linux [sound/asound.h](https://github.com/torvalds/linux/blob/v6.12/include/uapi/sound/asound.h).
+A local C fixture checks the host kernel UAPI layout; the resident cross-builds for
+ARM EABI. Neither test identifies Mini 1's actual control or proves sound/Quasar
+volume synchronization. `last_user_volume` is not edited. No platformd volume IPC
+shape has been established, and no real ALSA ioctl was issued overnight. External
+Quasar mixer activity is not serialized by our lock; skip live volume until its
+mapping and state synchronization have been qualified through read-only research.
+
+The resident defaults missing `preauthorize_all_actions` to true, matching the host
+and owner decision; explicit false remains effective. No private policy was edited.
+
+These Go additions change the binary digest. PR #4's pinned combined target is a
+previous reviewed build. After composing the final source with #4, reproduce the
+ARM build and review/update its target pin and guarded config migration together.
+Do not reuse the current #4 pin for a different binary or install an unpinned build.

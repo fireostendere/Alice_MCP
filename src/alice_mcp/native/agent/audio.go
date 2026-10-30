@@ -27,8 +27,13 @@ type audioPolicy struct {
 
 // Private, operator-reviewed mixer mapping. Absent mapping means no volume action.
 type volumeConfig struct {
-	Amixer       string `json:"amixer"`
-	AmixerSHA256 string `json:"amixer_sha256"`
+	Backend      string `json:"backend,omitempty"`
+	Amixer       string `json:"amixer,omitempty"`
+	AmixerSHA256 string `json:"amixer_sha256,omitempty"`
+	NumID        int    `json:"numid,omitempty"`
+	RawMin       int64  `json:"raw_min,omitempty"`
+	RawMax       int64  `json:"raw_max,omitempty"`
+	Channels     int    `json:"channels,omitempty"`
 	Card         int    `json:"card"`
 	Control      string `json:"control"`
 	MaxPercent   int    `json:"max_percent"`
@@ -79,7 +84,14 @@ func playbackControl(name string) bool {
 }
 
 func (v *volumeConfig) valid() bool {
+	if v != nil && v.Backend == "alsa_ctl" {
+		return v.Amixer == "" && v.AmixerSHA256 == "" && v.Card >= 0 && v.Card <= 7 &&
+			v.NumID > 0 && v.NumID <= 65535 && v.RawMin >= -1<<24 && v.RawMax > v.RawMin &&
+			v.RawMax-v.RawMin <= 1<<24 && (v.Channels == 1 || v.Channels == 2) &&
+			v.MaxPercent >= 0 && v.MaxPercent <= 100 && playbackControl(v.Control)
+	}
 	return v != nil && filepath.IsAbs(v.Amixer) && filepath.Clean(v.Amixer) == v.Amixer && hex64(v.AmixerSHA256) &&
+		(v.Backend == "" || v.Backend == "amixer") && v.NumID == 0 && v.RawMin == 0 && v.RawMax == 0 && v.Channels == 0 &&
 		v.Card >= 0 && v.Card <= 7 && v.MaxPercent >= 0 && v.MaxPercent <= 100 && playbackControl(v.Control)
 }
 
@@ -263,6 +275,23 @@ func (n *nativeRuntime) setVolume(r volumeRequest, expected ...string) map[strin
 	if os.Geteuid() != 0 || !quasarRunning() || hashPath(firmwarePath) != c.FirmwareSHA256 {
 		return blocked("Reviewed firmware or running Quasar unavailable")
 	}
+	if c.Volume != nil && c.Volume.Backend == "alsa_ctl" {
+		control, err := openALSAControl(c.Volume)
+		if err != nil {
+			return blocked("Reviewed ALSA control unavailable")
+		}
+		defer control.Close()
+		_, fresh, err := n.policy()
+		if err != nil || !bytes.Equal(stamp, fresh) || !n.stateMatches(state) {
+			return blocked("Private policy changed or preview expired")
+		}
+		result := changeALSAControl(c.Volume, r, alsaTransactions(control))
+		if result["outcome"] != "blocked" {
+			result["quasar_running"], result["do_not_retry"] = quasarRunning(), true
+			result["evidence_class"], result["physical_effects_verified"] = "analytical", false
+		}
+		return result
+	}
 	mixer, ok := n.pinnedMixer(c)
 	if !ok {
 		return blocked("Reviewed mixer utility unavailable or changed")
@@ -337,7 +366,14 @@ func (n *nativeRuntime) audioProbe() map[string]any {
 	c, _, policyErr := n.policy()
 	if policyErr == nil && c.Volume != nil {
 		data["volume_control"] = "unavailable"
-		if mixer, ok := n.pinnedMixer(c); ok {
+		if c.Volume.Backend == "alsa_ctl" {
+			if control, err := openALSAControl(c.Volume); err == nil {
+				if value, ok := readALSAControl(c.Volume, alsaTransactions(control)); ok {
+					data["volume_control"], data["volume_percent"] = "ready", value
+				}
+				control.Close()
+			}
+		} else if mixer, ok := n.pinnedMixer(c); ok {
 			if value, ok := readMixer(mixer, c.Volume); ok {
 				data["volume_control"], data["volume_percent"] = "ready", value
 			}

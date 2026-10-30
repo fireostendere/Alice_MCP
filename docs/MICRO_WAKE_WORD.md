@@ -1,18 +1,43 @@
 # On-station wake word with microWakeWord (W5)
 
-Status 2026-10-29: **trained and evaluated on the host only.** Everything below is
-`synthetic=true`, `hardware_verified=false`. No station, microphone, room or
-playback was used, nothing was deployed, and no live result is claimed. The
-ARM32 helper cross-builds; its device RSS/CPU is pending an owner-run device test.
+Status 2026-10-30: model training and evaluation are offline developer tools in
+`scripts/voice/`, excluded from the runtime wheel. Historical synthetic results
+below do not qualify room or ARM behavior. No new detector was deployed overnight;
+ARM RSS/CPU and exact ARM/x86 comparison are still pending.
+
+The available fine-tuned x86 helper (binary SHA-256
+`f8648a5c71c4382407f43a8a09b2edab0014d401ac02b2a01d9f0fe6205d059f`, embedded
+model `f5ea69530098109b717dc57d75808681da002d6cab95e5b7ee1d2f2e8f171bcf`)
+was evaluated offline on all 20 supplied positive owner clips, with a fresh process
+and 1 s lead/1.5 s tail silence per clip: **17/20 accepted**, threshold 0.98,
+window 5, gain 0. Peak helper RSS: **556 KiB**. A separate 110 s concatenated
+batch consumed 0.29 s CPU (0.26% of audio time). These are real recorded inputs,
+not synthetic speech, and include training examples. The manifest does not identify
+the five held-out positives, so this is **not held-out accuracy** or an ARM result.
+
+Review corrections: evaluation now filters every event/trace by model, checks the
+embedded model digest, and marks unequal trace lengths as unaligned. Replay verifies
+the full inference clock and returns per-model probability trace digests and model
+digests; equal maxima alone are insufficient. The replay pin still identifies the
+old three-model ARM build, whereas PC default `ft` is the personal fine-tune. Do not
+claim parity or substitute a new pin until the matching ARM build is reviewed.
+Historical multi-model evaluation totals must be recomputed with model selection
+before using them to choose or promote a model.
+
+The next training recipe promotes exact wake phrases found in contextual negatives
+(for example “моя Маруся”) to positives. Inflections and genuine near misses remain
+negative. Generate into a **new private data directory**; existing WAV/features
+are deliberately not deleted or reused as a corrected dataset. No new weights,
+augmentation performance gain or improved «окей дом»/«маруся» accuracy is claimed.
 
 ## Pieces
 
 | File | Role |
 |---|---|
 | `src/alice_mcp/native/mww/mww_detect.cc` | Device helper: stdin PCM → microfrontend → TFLite Micro → JSON lines |
-| `src/alice_mcp/mww_build.py` | Stdlib build script (zig cross build or host `c++`); embeds the model(s) |
-| `src/alice_mcp/mww_train.py` | microWakeWord recipe for Russian words; isolated scratch venv only |
-| `src/alice_mcp/mww_eval.py` | Native/reference parity, W4b corpus scoring, FA/hour, threshold sweep |
+| `scripts/voice/mww_build.py` | Stdlib build script (zig cross build or host `c++`); embeds the model(s) |
+| `scripts/voice/mww_train.py` | microWakeWord recipe for Russian words; isolated scratch venv only |
+| `scripts/voice/mww_eval.py` | Native/reference parity, W4b corpus scoring, FA/hour, threshold sweep |
 | `tests/test_mww_build.py`, `tests/test_mww_eval.py` | Unit tests; native/parity tests skip without owner-built artifacts |
 
 Model weights, datasets, generated audio, features and binaries are never in Git.

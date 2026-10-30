@@ -88,7 +88,7 @@ Shape (synthetic placeholders; edit only in your private file):
       "user": "root",
       "identity_file": "/PRIVATE/identity",
       "known_hosts_file": "/PRIVATE/hosts",
-      "allow_service_actions": false
+      "allow_service_actions": true
     }
   ]
 }
@@ -126,7 +126,7 @@ involved; reboot persistence and other firmware remain unqualified. Host tests
 and an ARM build alone do not prove sound. See [native local voice](docs/NATIVE_AGENT.md)
 and [speech clients](docs/SPEECH_CLIENT.md).
 
-The server exposes **19 tools**. See the generated [MCP contract](docs/TOOLS.md)
+The server exposes **23 tools**. See the generated [MCP contract](docs/TOOLS.md)
 and the [runtime control contract](docs/CONTROLS.md).
 
 | Tools | Behavior |
@@ -162,15 +162,17 @@ LED effects, volume within the private ceiling and short playback of registered
 assets without native elicitation. The setting persists until removed from the
 private inventory. Keep its media and volume choices suitable for unattended use.
 `get_station_controls` reports this list and each device preview reports
-`approval_required`. Default policy still requires native approval for every write.
+`approval_required`. The owner default is standing preauthorization of all
+implemented actions; explicit private restrictions remain effective.
 
 To delegate **all already-permitted actions**, set `"preauthorize_all_actions": true`
 on the private **station entry**, alongside `controls` (not inside it). Default is
-`false`. This skips native forms for service start/restart and all device actions,
+`true` by the owner's decision. This skips native forms for service start/restart and all device actions,
 including capture, arbitrary-text TTS and persistent edits, within authorized tasks.
 It persists until removed or set to `false`; choose it only for a trusted local agent.
-It does not enable writes, add allowed actions/assets/options, authorize unrelated
-tasks, or implement unsupported operations. Revocation invalidates outstanding previews.
+It does not enable the global write gate, add assets/options, authorize unrelated
+tasks, or implement unsupported operations. An absent action list or `"all"` allows
+all implemented actions; an explicit list still restricts them. Revocation invalidates outstanding previews.
 Every apply still consumes its state-bound preview once within 300 seconds,
 rechecks live policy/trust/state and never retries uncertain writes. The server
 does not edit private inventory or enable writes on the owner's behalf.
@@ -296,9 +298,10 @@ Mode aliases appear in `get_station_controls().led_modes`, not as permissions.
 Each show needs a fresh preview and native approval unless explicitly preauthorized;
 the ring must be idle/dark. Same-boot,
 same-firmware idle evidence must be no older than 30 minutes. It returns to that
-observed idle frame, without hardware readback. RGB order, physical zone order
-and swirl direction are not calibrated. These presets have synthetic coverage,
-not verified visual playback. No show daemon, autostart or firmware-voice command
+observed idle frame, without hardware readback. On the owner's Mini 1 / Quasar 3.21,
+build 1.305.4.16, the confirmed byte order is B,G,R and zone order 1,6,5,4,3,2.
+The legacy presets above still describe logical colors; their visual playback is
+unqualified. Use a reviewed private map for `led.show`. No show daemon, autostart or firmware-voice command
 is installed; operator chat requests are routed through the existing MCP action.
 
 Device actions reuse the service controller's one-use preview/approval registry,
@@ -326,8 +329,8 @@ after the final comparison can still be overwritten or deleted. If writers canno
 be kept idle, do not apply; never stop Quasar to obtain exclusivity.
 File/control post-checks
 do **not** establish visible LEDs, audible output, backend readiness or config
-reload. No station access or hardware test was performed; integration checks are
-offline and synthetic only.
+reload. Automated integration checks are offline and synthetic; the separate W0
+local-voice acceptance above is evidence only for that reviewed device/build.
 
 An SSH timeout can occur after execution; an `unknown` outcome is **not a failure
 safe to retry**. Inspect locally first. There is no automatic retry, Quasar stop,
@@ -351,6 +354,18 @@ bundles them, accessible through `read_skill`. Installation does not register
 them automatically in a client's global skill catalog.
 
 ## Development checks
+
+Model training, evaluation and cross-build tools live in `scripts/voice/`, outside
+the installed `alice_mcp` package. Run them from a source checkout with
+`python -m scripts.voice.mww_train`, `mww_eval` or `mww_build` (substitute the final
+module name). Their optional training dependencies and all datasets/weights stay
+outside MCP. The server only runs reviewed detectors and transports untrusted events.
+
+The experimental `voice.source` switch defaults to `"PC"`; `"station"` uses bounded
+native TLS wake windows without exporting PCM. It currently emits wake events with
+an empty command; command ASR remains on the PC. No station-source installation or
+Mini 1 ALSA-control volume mapping is qualified. See the
+[current roadmap](docs/ROADMAP.md) and [morning checklist](docs/LIVE_ACCEPTANCE.md).
 
 ```sh
 .venv/bin/python -m pytest -q

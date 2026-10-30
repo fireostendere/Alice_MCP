@@ -22,7 +22,7 @@ PROTOCOL = "2025-11-25"
 TOOLS = {"get_capabilities", "get_station_controls", "station_probe", "run_station_action",
          "get_capture_status"}
 # led.show: Mini 1 adapter only.
-NATIVE_ACTIONS = {"speech.say", "speech.listen", "led.show"} | native_typed.ACTIONS
+NATIVE_ACTIONS = {"speech.say", "speech.listen", "led.show", "wake.listen"} | native_typed.ACTIONS
 
 
 def validate_config(value: Any) -> dict[str, str]:

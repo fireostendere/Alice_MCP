@@ -1,10 +1,10 @@
 """Evaluate the microWakeWord helper: parity, W4b corpus, false accepts per hour.
 
-    python -m alice_mcp.mww_eval parity --helper BIN --model M.tflite --pcm AUDIO
-    python -m alice_mcp.mww_eval corpus --helper BIN --corpus PREFIX [--vosk PREFIX.vosk.json]
-    python -m alice_mcp.mww_eval faph   --helper BIN --data DATA
-    python -m alice_mcp.mww_eval sweep  --corpus-trace C.json --faph-trace F.json
-    python -m alice_mcp.mww_eval clips  --helper BIN --positive DIR --negative DIR [--snr DB]
+    python -m scripts.voice.mww_eval parity --helper BIN --model M.tflite --pcm AUDIO
+    python -m scripts.voice.mww_eval corpus --helper BIN --corpus PREFIX [--vosk PREFIX.vosk.json]
+    python -m scripts.voice.mww_eval faph   --helper BIN --data DATA
+    python -m scripts.voice.mww_eval sweep  --corpus-trace C.json --faph-trace F.json
+    python -m scripts.voice.mww_eval clips  --helper BIN --positive DIR --negative DIR [--snr DB]
 
 Host-only and synthetic/offline: the helper runs on this machine reading stdin.
 `parity` needs the isolated training venv (pymicro-features + ai-edge-litert);
@@ -15,6 +15,7 @@ hardware_verified=false; no station, microphone or network is involved.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 import os
@@ -106,6 +107,21 @@ def trace_of(lines: list[dict[str, Any]], model: str | None = None) -> list[tupl
             if e.get("event") == "p" and (model is None or e["model"] == model)]
 
 
+def events_of(lines: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
+    return [e for e in lines if e.get("event") == "wake" and e.get("model") == model]
+
+
+def benchmark_run(helper: Path, pcm: bytes, args: list[str], model: str) -> dict[str, Any]:
+    run = run_helper(helper, pcm, args)
+    lines = run["lines"]
+    if (run["exit"] != 0 or len(lines) < 2 or lines[0].get("event") != "ready"
+        or sum(m.get("name") == model for m in lines[0].get("models", [])) != 1
+        or lines[-1].get("event") != "end" or lines[-1].get("reason") != "eof"
+        or lines[-1].get("audio_ms") != len(pcm) // (2 * STEP) * 10):
+        raise ValueError("benchmark needs a complete input and the requested embedded model")
+    return run
+
+
 def read_wav16k(path: Path) -> bytes:
     with wave.open(str(path), "rb") as audio:
         if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, RATE):
@@ -117,7 +133,7 @@ def resample_to_16k(pcm: bytes, rate: int) -> bytes:
     """Same polyphase resampler as training (mww_train.to_16k), int16 out."""
     np = _optional("numpy")
 
-    from alice_mcp.mww_train import to_16k
+    from scripts.voice.mww_train import to_16k
 
     audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
     return bytes(np.clip(np.rint(to_16k(audio, rate)), -32768, 32767).astype("<i2").tobytes())
@@ -168,14 +184,25 @@ def reference_trace(model: Path, pcm: bytes, optimized: bool = False
 def parity(helper: Path, model: Path, pcm: bytes) -> dict[str, Any]:
     """Native q trace vs. TFLite reference kernels (and, for information, optimized)."""
     run = run_helper(helper, pcm, ["--trace", "--max-seconds", "86400"])
-    native = trace_of(run["lines"])
+    lines = run["lines"]
+    if (run["exit"] != 0 or not lines or lines[0].get("event") != "ready"
+        or lines[-1].get("event") != "end" or lines[-1].get("reason") != "eof"
+        or lines[-1].get("audio_ms") != len(pcm) // (2 * STEP) * 10):
+        raise ValueError("helper did not finish the complete input")
+    pin = hashlib.sha256(model.read_bytes()).hexdigest()
+    names = [m["name"] for m in lines[0]["models"] if m["sha256"] == pin]
+    if len(names) != 1:
+        raise ValueError("reference model must match exactly one embedded model")
+    native = trace_of(lines, names[0])
     result: dict[str, Any] = {"inferences": len(native)}
     for name, optimized in (("reference_kernels", False), ("optimized_kernels", True)):
         reference, _ = reference_trace(model, pcm, optimized)
         paired = list(zip(reference, native, strict=False))
         diffs = [abs(a[1] - b[1]) for a, b in paired]
         result[name] = {"inferences": len(reference),
-                        "time_aligned": all(a[0] == b[0] for a, b in paired),
+                        "same_length": len(reference) == len(native),
+                        "time_aligned": len(reference) == len(native) and all(
+                            a[0] == b[0] for a, b in paired),
                         "exact": sum(d == 0 for d in diffs), "over_1": sum(d > 1 for d in diffs),
                         "max_abs_q": max(diffs, default=0)}
     result["helper"] = {k: run[k] for k in ("exit", "wall_s", "cpu_s", "cpu_per_audio_s",
@@ -354,26 +381,31 @@ def main(argv: list[str] | None = None) -> int:
     elif args.step == "corpus" and args.corpus:
         meta = json.loads(args.corpus.with_suffix(".json").read_text(encoding="utf-8"))
         pcm = resample_to_16k(args.corpus.with_suffix(".pcm").read_bytes(), meta["rate"])
-        run = run_helper(args.helper, pcm, ["--trace", "--max-seconds", "86400", *decision])
-        events = [e for e in run["lines"] if e.get("event") == "wake"]
+        run = benchmark_run(args.helper, pcm, ["--trace", "--max-seconds", "86400", *decision],
+                            args.word)
+        events = events_of(run["lines"], args.word)
         result = base | score_corpus(meta, events, args.word) | {
             "decision": decision, "helper": {k: run[k] for k in (
                 "exit", "cpu_per_audio_s", "vm_hwm_kib")}}
         if args.out:
-            args.out.write_text(json.dumps({"trace": trace_of(run["lines"]), "meta": meta}))
+            args.out.write_text(json.dumps({"trace": trace_of(run["lines"], args.word),
+                                            "meta": meta}))
     elif args.step == "clips" and args.positive and args.negative:
         pcm, meta = clip_stream(args.positive, args.negative, args.word,
                                 args.data / "bg_eval" if args.data else None, args.snr)
-        run = run_helper(args.helper, pcm, ["--trace", "--max-seconds", "86400", *decision])
-        events = [e for e in run["lines"] if e.get("event") == "wake"]
+        run = benchmark_run(args.helper, pcm, ["--trace", "--max-seconds", "86400", *decision],
+                            args.word)
+        events = events_of(run["lines"], args.word)
         scored = score_corpus(meta, events, args.word)
         result = base | {"snr_db": args.snr, "decision": decision} | scored
         if args.out:
-            args.out.write_text(json.dumps({"trace": trace_of(run["lines"]), "meta": meta}))
+            args.out.write_text(json.dumps({"trace": trace_of(run["lines"], args.word),
+                                            "meta": meta}))
     elif args.step == "faph" and args.data:
         pcm, info = long_negative_stream(args.data)
-        run = run_helper(args.helper, pcm, ["--trace", "--max-seconds", "86400", *decision])
-        events = [e for e in run["lines"] if e.get("event") == "wake"]
+        run = benchmark_run(args.helper, pcm, ["--trace", "--max-seconds", "86400", *decision],
+                            args.word)
+        events = events_of(run["lines"], args.word)
         hours = len(pcm) / 2 / RATE / 3600
         result = base | info | {"hours": round(hours, 3), "false_accepts": len(events),
                                 "fa_per_hour": round(len(events) / hours, 3),
@@ -381,7 +413,8 @@ def main(argv: list[str] | None = None) -> int:
                                     "exit", "wall_s", "cpu_s", "cpu_per_audio_s",
                                     "vm_hwm_kib")}}
         if args.out:
-            args.out.write_text(json.dumps({"trace": trace_of(run["lines"]), "hours": hours}))
+            args.out.write_text(json.dumps({"trace": trace_of(run["lines"], args.word),
+                                            "hours": hours}))
     else:
         parser.error("missing argument for this step")
     print(json.dumps(result, ensure_ascii=False))

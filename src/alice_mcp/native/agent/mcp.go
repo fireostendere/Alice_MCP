@@ -30,10 +30,11 @@ type server struct {
 	volume    func(volumeRequest, ...string) map[string]any
 	media     func(mediaPayload, ...string) map[string]any
 	show      func(ledPayload, ...string) map[string]any
+	wake      func(int, ...string) map[string]any
 }
 
 var nativeProbes = []string{"health", "microphone", "storage", "services", "audio"}
-var nativeActions = []string{"speech.say", "speech.listen", "audio.volume", "audio.play"}
+var nativeActions = []string{"speech.say", "speech.listen", "audio.volume", "audio.play", "wake.listen"}
 
 func tlsSettings() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS13} }
 
@@ -220,7 +221,7 @@ func (s *server) tool(name string, arguments json.RawMessage) (map[string]any, b
 		return map[string]any{"station_id": s.stationID, "model": s.model,
 			"version": "0.1.0", "transport": "streamable_http_tls", "authentication": "bearer",
 			"device_actions": actions, "probes": nativeProbes,
-			"arbitrary_shell": false, "raw_audio_export": false, "independent_wake_word": false}, true
+			"arbitrary_shell": false, "raw_audio_export": false, "independent_wake_word": s.wake != nil}, true
 	case "get_station_controls":
 		var args struct {
 			Station string `json:"station_id"`
@@ -291,6 +292,15 @@ func (s *server) tool(name string, arguments json.RawMessage) (map[string]any, b
 				return nil, false
 			}
 			return s.listen(params.Seconds, args.Expected), true
+		}
+		if args.Action == "wake.listen" && s.wake != nil {
+			var params struct {
+				Seconds int `json:"duration_seconds"`
+			}
+			if !decode(args.Parameters, &params) || params.Seconds < 5 || params.Seconds > 20 {
+				return nil, false
+			}
+			return s.wake(params.Seconds, args.Expected), true
 		}
 		if args.Action == "audio.volume" && s.volume != nil {
 			var params volumeRequest

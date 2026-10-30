@@ -198,16 +198,19 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
             result["led_map"] = validate_led_map(model, policy["led_map"])
         if "voice" in policy:
             # Host-side artifact paths for voice_service; their pins live in code.
-            voice = {"mww_model": "ft", "mode": "either", "autostart": False,
-                     **policy["voice"]}
-            _require(model == "station-mini"
-                     and _keys(voice, {"client", "mww", "libvosk", "vosk_zip", "mww_model",
-                                       "mode", "autostart"})
-                     and all(_safe_path(voice[k]) for k in ("client", "mww", "libvosk",
-                                                            "vosk_zip"))
-                     and voice["mww_model"] in ("ft", "old")
-                     and voice["mode"] in ("vosk", "mww", "either", "both")
-                     and type(voice["autostart"]) is bool)
+            _require(type(policy["voice"]) is dict)
+            source = policy["voice"].get("source", "PC")
+            voice = {"source": source, "autostart": False, **policy["voice"]}
+            if source == "PC":
+                voice = {"mww_model": "ft", "mode": "either", **voice}
+            pc_fields = {"client", "mww", "libvosk", "vosk_zip", "mww_model", "mode"}
+            fields = {"source", "autostart"} | (pc_fields if source == "PC" else set())
+            _require(model == "station-mini" and source in ("PC", "station")
+                     and _keys(voice, fields, pc_fields) and type(voice["autostart"]) is bool)
+            _require(all(_safe_path(voice[k]) for k in ("client", "mww", "libvosk", "vosk_zip")
+                         if k in voice)
+                     and voice.get("mww_model", "ft") in ("ft", "old")
+                     and voice.get("mode", "either") in ("vosk", "mww", "either", "both"))
             result["voice"] = voice
         if "local_tts" in policy:
             local = policy["local_tts"]

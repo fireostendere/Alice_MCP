@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from alice_mcp import io_channel_pilot as iop
+from alice_mcp import station_wake
 from alice_mcp import wake_listen as wl
 from alice_mcp import wake_stream as ws
 from alice_mcp.core import Controller, SafetyError, load_inventory
@@ -83,10 +84,11 @@ class VoiceService:
                  engines: Callable[..., Any] = wl.engines) -> None:
         self.controller, self.engines = controller, engines
         self.sink = sink or Sink(events_path())
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.thread: threading.Thread | None = None
         self.stop_event = threading.Event()
         self.station: str | None = None
+        self.source = "PC"
         self.state = "stopped"
         self.live: dict[str, Any] = {}
         self.last_error: str | None = None
@@ -119,19 +121,26 @@ class VoiceService:
         if not voice:
             raise SafetyError("Voice listener is not configured for this station")
         iop._permitted(self.controller, station)
+        if voice.get("source") == "station" and not station.native_mcp:
+            raise SafetyError("Station wake source requires the resident TLS transport")
         with self.lock:
-            if self.thread is not None and self.thread.is_alive():
+            if self.state != "stopped" or self.thread is not None and self.thread.is_alive():
                 raise SafetyError("Voice listener already running; stop it first")
             self.stop_event = threading.Event()
             self.station, self.live, self.last_error, self.result = station.id, {}, None, None
+            self.source = voice.get("source", "PC")
             self.thread = threading.Thread(target=self._run, name="alice-voice", daemon=True,
                                            args=(station.id, dict(voice), self.stop_event))
-        self._state("starting")
-        self.thread.start()
+            self.state = "starting"
+            self._state("starting")
+            self.thread.start()
         return {"outcome": "started", **self.status()}
 
     def _run(self, station_id: str, voice: dict[str, Any], stop: threading.Event) -> None:
         try:
+            if voice.get("source") == "station":
+                self._run_station(station_id, stop)
+                return
             client = read_pinned(Path(voice["client"]), iop.HELPER_SHA256, 64 * 1024)
             with self.engines(Path(voice["libvosk"]), Path(voice["vosk_zip"]),
                               Path(voice["mww"]), voice["mww_model"]) as (vosk, mww):
@@ -162,6 +171,18 @@ class VoiceService:
         finally:
             self._state("stopped")
 
+    def _run_station(self, station_id: str, stop: threading.Event) -> None:
+        self._state("listening")
+        while not stop.is_set():
+            summary = station_wake.listen_once(self.controller, station_id)
+            self.result = {k: summary[k] for k in RESULT_KEYS if k in summary}
+            if summary["outcome"] != "complete":
+                self.last_error = "Station wake window unverified; do not retry"
+                return
+            for _ in summary["events"]:
+                self._wake(station_id)({"word": WORD, "command": "",
+                                        "sources": ["station_mww"]})
+
     def _wake(self, station_id: str) -> Callable[[dict[str, Any]], None]:
         def emit(event: dict[str, Any]) -> None:
             self._record({"kind": "wake", "station": station_id, "word": event["word"],
@@ -176,11 +197,12 @@ class VoiceService:
             self.last_error = "mww detector disabled after repeated exits; Vosk only"
 
     def stop(self, timeout: float = STOP_S) -> dict[str, Any]:
-        thread = self.thread
-        if thread is None or not thread.is_alive():
-            return {"outcome": "not_running", **self.status()}
-        self.state = "stopping"
-        self.stop_event.set()
+        with self.lock:
+            thread = self.thread
+            if thread is None or not thread.is_alive():
+                return {"outcome": "not_running", **self.status()}
+            self.state = "stopping"
+            self.stop_event.set()
         thread.join(timeout)
         return {"outcome": "stopping" if thread.is_alive() else "stopped", **self.status()}
 
@@ -206,6 +228,7 @@ class VoiceService:
             configured = []
         return {"state": self.state, "running": self.thread is not None
                 and self.thread.is_alive(), "station": self.station, "word": WORD,
+                "source": self.source,
                 "configured_stations": configured,
                 **{k: live.get(k, 0) for k in ("chunks", "handovers", "gaps", "failures")},
                 "audio_s": round(live.get("audio_bytes", 0) / 32000, 1),

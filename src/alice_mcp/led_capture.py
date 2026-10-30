@@ -233,7 +233,7 @@ replay_state() {
         sha256sum | awk '{ print $1 }')
 }
 idle_state() {
-    i2cset --help 2>&1 | head -c 4096 | grep -Eq '^[[:space:]]*i[[:space:]]+I2C block data' ||
+    i2cset --help 2>&1 | head -c 4096 | grep -Eq '^[[:space:]]*b[[:space:]]+[Bb]yte data' ||
         return 1
     [ "${#boot}" = 64 ] && [ "$(get boot)" = "$boot" ] || return 1
     ended=$(get ended) && number "$ended" || return 1
@@ -280,7 +280,16 @@ animation_state() {
     STATE=$(printf '%s\n' "$STATE" "$frames" 'sn3236-animation-v1' |
         sha256sum | awk '{ print $1 }')
 }
-write_pwm() { i2cset -y 0 0x3c 0x01 "$@" i >/dev/null 2>&1; }
+write_pwm() {
+    [ "$#" = 18 ] || return 1
+    register=1
+    for value in "$@"; do
+        # BusyBox block mode on this firmware appends three unwanted bytes.
+        hex_register=$(printf '0x%02x' "$register") || return 1
+        i2cset -y 0 0x3c "$hex_register" "$value" b >/dev/null 2>&1 || return 1
+        register=$((register+1))
+    done
+}
 pulse_frame() {
     kind=$1
     set --

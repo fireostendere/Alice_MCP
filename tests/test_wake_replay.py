@@ -83,8 +83,10 @@ def test_replay_traces_one_clip_and_returns_per_model_numbers_only(
     result = pilot.apply(controller, preview["plan_id"], preview["expected_sha256"], item)
     assert result["outcome"] == "complete", result
     assert result["models"] == {
-        "komp": {"max_q": 255, "max_mean5": 0.993, "q_ge_250": 6, "inferences": 9},
-        "okey_dom": {"max_q": 1, "max_mean5": 0.0039, "q_ge_250": 0, "inferences": 9},
+        "komp": {"max_q": 255, "max_mean5": 0.993, "q_ge_250": 6, "inferences": 9,
+                 "trace_sha256": hashlib.sha256(bytes(KOMP)).hexdigest()},
+        "okey_dom": {"max_q": 1, "max_mean5": 0.0039, "q_ge_250": 0, "inferences": 9,
+                     "trace_sha256": hashlib.sha256(bytes(OKEY)).hexdigest()},
     }
     detector_result = result["detector"]
     assert detector_result["audio_ms"] == 300 and detector_result["exit"] == 0
@@ -155,6 +157,17 @@ def test_replay_parser_flags_and_short_outputs() -> None:
         "helper_output_invalid"
 
 
+def test_replay_rejects_shifted_inference_clock_and_fingerprints_probabilities() -> None:
+    lines = trace_lines()
+    result = pilot.parse_replay(replay_raw(TWO, *lines, END), 0, len(CLIP))
+    digest = hashlib.sha256(bytes(KOMP)).hexdigest()
+    assert result["models"]["komp"]["trace_sha256"] == digest
+    assert result["model_sha256"] == {m["name"]: m["sha256"] for m in TWO["models"]}
+    shifted = [dict(v, t_ms=v["t_ms"] + 10) for v in lines]
+    assert pilot.parse_replay(replay_raw(TWO, *shifted, END), 0, len(CLIP))[
+        "outcome"] == "unknown"
+
+
 def wav(rate: int = 16000, channels: int = 1, width: int = 2, frames: int = 1600) -> bytes:
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as out:
@@ -196,3 +209,23 @@ def test_replay_never_sends_the_client_and_bounds_the_clip(
     assert request.data == item.pcm + b"d" and request.command.endswith(" replay")
     assert " 10 0 " in request.command and " 320000 " in request.command  # seconds, gain, size
     assert item.digest != pilot.Replay(b"\1" * 320000, b"d", nonce=item.nonce).digest
+
+
+def test_replay_cli_previews_by_default_and_applies_only_with_live(
+    monkeypatch: Any, tmp_path: Path, capsys: Any,
+) -> None:
+    clip, detector = tmp_path / "clip.wav", tmp_path / "detector"
+    clip.write_bytes(wav())
+    detector.write_bytes(b"d")
+    monkeypatch.setattr(pilot, "DETECTOR_SHA256", hashlib.sha256(b"d").hexdigest())
+    monkeypatch.setenv("ALICE_MCP_INVENTORY", "/PRIVATE/inventory.json")
+    monkeypatch.setattr(pilot, "Controller", lambda *a, **kw: object())
+    monkeypatch.setattr(pilot, "preview", lambda *a: {
+        "plan_id": "p", "expected_sha256": "a" * 64, "audio_exported": False})
+    calls: list[Any] = []
+    monkeypatch.setattr(pilot, "apply", lambda *a: calls.append(a) or {"outcome": "complete"})
+    args = ["--station", "desk", "--detector", str(detector), "--replay", str(clip)]
+    assert pilot.main(args) == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "preview" and not calls
+    assert pilot.main([*args, "--live"]) == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "complete" and len(calls) == 1

@@ -4,14 +4,14 @@ Runs only inside an isolated scratch venv holding the pinned training stack
 (see docs/MICRO_WAKE_WORD.md). It never touches a station, microphone or the
 MCP server. Datasets, generated audio, features and weights stay outside Git.
 
-    python -m alice_mcp.mww_train prepare  --dl DL --data DATA
-    python -m alice_mcp.mww_train subsample --data DATA
-    python -m alice_mcp.mww_train generate --word komp --voices DIR --data DATA
-    python -m alice_mcp.mww_train generate --word komp --voices DIR --data DATA \
+    python -m scripts.voice.mww_train prepare  --dl DL --data DATA
+    python -m scripts.voice.mww_train subsample --data DATA
+    python -m scripts.voice.mww_train generate --word komp --voices DIR --data DATA
+    python -m scripts.voice.mww_train generate --word komp --voices DIR --data DATA \
         --multispeaker LIBRITTS_DIR --multispeaker-count 2500
       (then keep only clips Vosk transcribes as the wake phrase: wav/positive_lt)
-    python -m alice_mcp.mww_train features --word komp --data DATA
-    python -m alice_mcp.mww_train train    --word komp --data DATA --mww MWW_SRC
+    python -m scripts.voice.mww_train features --word komp --data DATA
+    python -m scripts.voice.mww_train train    --word komp --data DATA --mww MWW_SRC
 
 Follows kahrendt/microWakeWord's basic_training_notebook at MWW_COMMIT, with
 Russian Piper positives, Russian near-miss negatives and FLEURS ru speech added.
@@ -27,6 +27,7 @@ import io
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import tarfile
@@ -148,6 +149,21 @@ def _rng(*parts: object) -> random.Random:
     return random.Random(hashlib.sha256(repr(parts).encode()).digest())
 
 
+def training_phrases(word: str) -> dict[str, list[str]]:
+    """A detector hears the wake phrase inside a sentence too; keep its label positive."""
+    phrase = {"komp": "компьютер", "okey_dom": "окей дом", "marusya": "маруся"}[word]
+    spec = {key: list(values) for key, values in WORDS[word].items()}
+    negatives = []
+    for text in spec["near_miss"]:
+        tokens = " " + " ".join(re.findall(r"\w+", text.casefold())) + " "
+        if " " + phrase + " " in tokens:
+            spec["positive"].append(text)
+        else:
+            negatives.append(text)
+    spec["near_miss"] = negatives
+    return spec
+
+
 def _split(name: str) -> str:
     """Deterministic 90/10 split; the 10% part is held out for evaluation only."""
     return "eval" if hashlib.sha256(name.encode()).digest()[0] < 26 else "train"
@@ -259,7 +275,7 @@ def generate(word: str, voices: Path, data: Path, count: int, workers: int,
     """
     from concurrent.futures import ProcessPoolExecutor
 
-    spec = WORDS[word]
+    spec = training_phrases(word)
     jobs: list[tuple[str, str, str, int]] = []
     if multispeaker is None:
         for voice in VOICES:

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from test_capture_busybox import pwm_calls
 
 from alice_mcp import controls
 from alice_mcp import device_runtime as rt
@@ -392,7 +393,7 @@ def mini1(tmp_path: Path) -> tuple[tuple[Path, dict[str, str], str], Path]:
     shims.mkdir()
     log = tmp_path / "i2c-calls"
     (shims / "i2cset").write_text(
-        '#!/bin/sh\nif [ "$*" = "--help" ]; then echo " i I2C block data"; exit 0; fi\n'
+        '#!/bin/sh\nif [ "$*" = "--help" ]; then echo " b Byte data"; exit 0; fi\n'
         'printf "%s\\n" "$*" >> "$TEST_I2C_LOG"\n')
     (shims / "i2cset").chmod(0o700)
     env = {**os.environ, "PATH": str(shims) + ":" + os.environ["PATH"], "TEST_I2C_LOG": str(log)}
@@ -434,8 +435,7 @@ def test_mini1_show_writes_mapped_frames_then_idle_without_readback_claim(mini1:
     _, frames = rt.show_frames(mini1_request()["params"], "station-mini")
     expected = []
     for frame in (*frames, [0] * 18):
-        expected += ["-y 0 0x3c 0x01 " + " ".join(f"0x{v:02x}" for v in frame) + " i",
-                     "-y 0 0x3c 0x25 0xaa b"]
+        expected += pwm_calls(frame) + ["-y 0 0x3c 0x25 0xaa b"]
     assert log.read_text().splitlines() == expected
 
 

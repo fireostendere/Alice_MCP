@@ -4,21 +4,28 @@ Native checks run only when ALICE_MCP_MWW_HELPER names an owner-built host binar
 (see docs/MICRO_WAKE_WORD.md); otherwise they skip. No station or audio device is used.
 """
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 from check_public import path_rule  # noqa: E402
 
-from alice_mcp.mww_build import model_header  # noqa: E402
+from scripts.voice.mww_build import model_header  # noqa: E402
 
 HELPER = os.environ.get("ALICE_MCP_MWW_HELPER")
 needs_helper = pytest.mark.skipif(not HELPER, reason="set ALICE_MCP_MWW_HELPER to a host build")
+
+
+def test_training_tools_are_not_installed_runtime_modules() -> None:
+    for module in ("mww_train", "mww_eval", "mww_build"):
+        assert importlib.util.find_spec("alice_mcp." + module) is None
 
 
 def test_reviewed_source_is_publishable_but_builds_are_not() -> None:
@@ -35,6 +42,13 @@ def test_model_header_embeds_digest_and_rejects_unsafe_names() -> None:
                        ("x" * 40, b"\x00"), ("komp", b"\x00" * (1024 * 1024 + 1))):
         with pytest.raises(ValueError):
             model_header([(name, data)])
+
+
+@pytest.mark.parametrize("models", [[], [("komp", b"x"), ("komp", b"y")],
+                                   [(f"model_{i}", b"x") for i in range(9)]])
+def test_model_header_rejects_empty_duplicate_and_excess_models(models: Any) -> None:
+    with pytest.raises(ValueError):
+        model_header(models)
 
 
 def run(args: list[str], pcm: bytes = b"") -> tuple[int, list[dict[str, object]]]:

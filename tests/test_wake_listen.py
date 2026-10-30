@@ -94,6 +94,39 @@ NAME = [(1.0, 2.6, "компьютер включи свет")]
 HIGH = {t: 255 for t in range(1500, 1800, 30)}
 
 
+def test_early_wake_fires_on_detector_hit_before_utterance_endpoint() -> None:
+    early: list[Any] = []
+    final: list[Any] = []
+    listener = wl.Listener("компьютер", "either", Vosk(NAME),
+                           lambda: Mww(wakes=(1650,)), emit=final.append,
+                           on_wake=lambda: early.append(listener.samples))
+    for _ in range(20):
+        listener.feed(b"\0\1" * 1600)
+    assert len(early) == 1 and not final
+    for _ in range(15):
+        listener.feed(b"\0\1" * 1600)
+    listener.finish()
+    assert len(early) == 1
+
+
+def test_partial_prefix_wakes_without_mww_but_embedded_word_does_not() -> None:
+    class Partial(Vosk):
+        text = "мой компьютер"
+
+        def partial(self) -> str:
+            return self.text
+
+    recognizer, early = Partial([]), []
+    listener = wl.Listener("компьютер", "vosk", recognizer, None,
+                           emit=lambda _: None, on_wake=lambda: early.append(True))
+    listener.feed(b"\0\1" * 1600)
+    assert not early
+    recognizer.text = "компьютер который"
+    listener.feed(b"\0\1" * 1600)
+    listener.feed(b"\0\1" * 1600)
+    assert early == [True]
+
+
 def test_both_sources_fire_once_with_the_transcript() -> None:
     emitted, logged, inbox = listen(NAME, q=HIGH, wakes=(1650,))
     assert emitted == [{"event": "wake", "word": "компьютер", "sources": ["mww", "vosk"],

@@ -218,6 +218,15 @@ watch() {
     normal=1
     cleanup
 }
+old_captures() {
+    # Completed, cleaned results beyond the newest 7: removed before a new capture starts.
+    ls -t "$CAPTURES" | while read -r name; do
+        case "$name" in *[!0-9a-f]*) continue;; esac
+        [ "${#name}" = 32 ] && private "$CAPTURES/$name" || continue
+        [ "$(cat "$CAPTURES/$name/phase")" = complete ] &&
+            [ "$(cat "$CAPTURES/$name/cleanup")" = 1 ] && printf '%s\n' "$name"
+    done | sed 1,7d
+}
 replay_state() {
     private "$BASE" && private "$CAPTURES" && private "$OUT" || return 1
     [ "$(get firmware)" = "$firmware" ] && [ "$(get phase)" = complete ] &&
@@ -280,7 +289,16 @@ animation_state() {
     STATE=$(printf '%s\n' "$STATE" "$frames" 'sn3236-animation-v1' |
         sha256sum | awk '{ print $1 }')
 }
-write_pwm() { i2cset -y 0 0x3c 0x01 "$@" i >/dev/null 2>&1; }
+write_pwm() {
+    # One register per write: BusyBox 1.26.2 block mode `i` on Mini 1 prepends three stray
+    # bytes (live bus trace, 2026-10-30), lighting OUT1-3 and shifting the frame by one LED.
+    reg=1
+    for value do
+        hex=$(printf 0x%02x "$reg")
+        i2cset -y 0 0x3c "$hex" "$value" >/dev/null 2>&1 || return 1
+        reg=$((reg+1))
+    done
+}
 pulse_frame() {
     kind=$1
     set --
@@ -393,13 +411,16 @@ inspect|apply)
         if [ -e "$directory" ] || [ -L "$directory" ]; then private "$directory" || blocked; fi
     done
     set -- "$CAPTURES"/*
-    if [ -e "$1" ] || [ -L "$1" ]; then [ "$#" -lt 16 ] || blocked; fi
+    if [ -e "$1" ] || [ -L "$1" ]; then
+        [ $(($# - $(old_captures | wc -l))) -lt 16 ] || blocked  # Apply prunes the old ones.
+    fi
     if [ "$mode" = inspect ]; then printf 'outcome=ready\nstate_sha256=%s\n' "$STATE"; exit 0; fi
     if [ "$expected" != "$STATE" ]; then
         printf 'outcome=conflict\nstate_sha256=%s\n' "$STATE"; exit 0
     fi
     if [ ! -e "$DATA/opt" ]; then mkdir "$DATA/opt" || blocked; fi
     trusted "$DATA/opt" && make_private "$BASE" && make_private "$CAPTURES" || blocked
+    for name in $(old_captures); do rm -rf "$CAPTURES/$name" || blocked; done
     mkdir "$OUT" && private "$OUT" || blocked
     put firmware "$firmware"; put policy "$policy"; put cleanup 0; put truncated 0
     put boot "$boot"

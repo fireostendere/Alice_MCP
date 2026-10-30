@@ -227,3 +227,109 @@ def test_tools_wrap_the_service_and_main_stops_it_on_exit(monkeypatch: Any) -> N
     with pytest.raises(KeyboardInterrupt):
         server.main()
     assert calls == [("start", "mini1"), "stop", "autostart", "stop"]
+
+
+def test_heard_commands_drive_the_ring_indicator(tmp_path: Path, monkeypatch: Any) -> None:
+    fake_stream(monkeypatch, {"outcome": "complete", "reason": "stopped",
+                              "cleanup_verified": True})
+    made: list[Any] = []
+
+    class Indicator:
+        def __init__(self, controller: Any, station_id: str) -> None:
+            self.station_id, self.woken, self.closed = station_id, [], False
+            made.append(self)
+
+        def wake(self, event_id: int) -> None:
+            self.woken.append(event_id)
+
+        def status(self) -> dict[str, Any]:
+            return {"backend": "ssh_led", "state": "red", "reason": None}
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(vs.vi, "Indicator", Indicator)
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    assert voice_service.status()["indicator"]["state"] == "off"
+    voice_service.start("mini1")
+    wait(lambda: voice_service.get_events()["events"])
+    event = voice_service.get_events()["events"][0]
+    voice_service._wake("mini1")({"word": "компьютер", "command": "", "sources": ["vosk"]})
+    assert made[0].station_id == "mini1" and made[0].woken == [event["id"]]
+    assert voice_service.status()["indicator"]["state"] == "red"
+    voice_service.stop()
+    assert made[0].closed
+
+
+def test_realtime_uses_early_wake_and_never_emits_a_second_agent_command(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    fake_stream(monkeypatch, {"outcome": "complete", "cleanup_verified": True})
+    turns: list[Any] = []
+    monkeypatch.setattr(vs.rv, "api_key", lambda: "synthetic")
+
+    class Turn:
+        active = False
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.closed, self.frames, self.wakes = False, 0, []
+            turns.append(self)
+
+        def wake(self, event_id: int) -> bool:
+            self.wakes.append(event_id)
+            self.active = True
+            return True
+
+        def feed(self, pcm: bytes) -> None:
+            if self.active:
+                self.frames += len(pcm)
+
+        def endpoint(self) -> None:
+            pass
+
+        def status(self) -> dict[str, Any]:
+            return {"model": "gpt-realtime-2.1"}
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Early(Recognizer):
+        def partial(self) -> str:
+            return "компьютер" if self.samples >= 1600 else ""
+
+    @contextmanager
+    def early_engines(*args: Any) -> Iterator[Any]:
+        yield Early, None
+
+    monkeypatch.setattr(vs.rv, "RealtimeTurn", Turn)
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    voice_service.engines = early_engines
+    voice_service.start("mini1")
+    wait(lambda: turns and turns[0].frames > 0)
+    voice_service.stop()
+    assert len(turns[0].wakes) == 1 and turns[0].closed
+    assert voice_service.get_events()["events"] == []  # No OpenCode/Piper duplicate.
+    assert voice_service.status()["realtime"]["model"] == "gpt-realtime-2.1"
+
+
+def test_voice_model_cannot_switch_station_or_bypass_live_authorization(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    configured = station(tmp_path)
+    mini = Station(**{**configured.__dict__, "preauthorize_all_actions": False})
+    voice_service = service(tmp_path, monkeypatch, mini)
+    voice_service.station = "mini1"
+    sent: list[Any] = []
+    monkeypatch.setattr(vs.native_transport, "run_action",
+                        lambda *args: sent.append(args) or {"outcome": "applied"})
+    assert voice_service._action({"action": "audio.volume", "parameters": {"percent": 10},
+                                  "station_id": "other"})["outcome"] == "blocked"
+    assert voice_service._action({"action": "audio.volume", "parameters": {"percent": 10}
+                                  })["outcome"] == "blocked"
+    assert not sent
+
+
+def test_dictation_events_are_ram_only(tmp_path: Path, monkeypatch: Any) -> None:
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    voice_service._record({"kind": "dictation", "station": "mini1", "text": "synthetic",
+                            "trusted": False}, persist=False)
+    assert voice_service.get_events()["events"][0]["text"] == "synthetic"
+    assert not voice_service.sink.path.exists()

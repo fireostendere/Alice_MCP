@@ -434,8 +434,8 @@ def test_mini1_show_writes_mapped_frames_then_idle_without_readback_claim(mini1:
     _, frames = rt.show_frames(mini1_request()["params"], "station-mini")
     expected = []
     for frame in (*frames, [0] * 18):
-        expected += ["-y 0 0x3c 0x01 " + " ".join(f"0x{v:02x}" for v in frame) + " i",
-                     "-y 0 0x3c 0x25 0xaa b"]
+        expected += [f"-y 0 0x3c 0x{r:02x} 0x{v:02x}" for r, v in enumerate(frame, 1)]
+        expected += ["-y 0 0x3c 0x25 0xaa b"]
     assert log.read_text().splitlines() == expected
 
 

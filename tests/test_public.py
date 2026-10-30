@@ -147,6 +147,14 @@ def test_explicit_source_allowlist(path: str) -> None:
     assert path_rule(path) is None
 
 
+def test_only_root_env_template_is_public_and_its_values_are_still_scanned() -> None:
+    assert path_rule(".env_example") is None
+    for path in (".env", ".env.local", ".env.backup", "docs/.env_example"):
+        assert path_rule(path) is not None
+    assert scan_text(".env_example", 'REAL_TIME_API_KEY=""\n') == []
+    assert scan_text(".env_example", "REAL_TIME_API_" + 'KEY="PRIVATE_SENTINEL"\n')
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -340,6 +348,18 @@ def test_sdist_metadata_and_source_are_allowed(repo: Path) -> None:
             info.size = len(b"safe\n")
             output.addfile(info, io.BytesIO(b"safe\n"))
     assert scan_archive(archive) == []
+
+
+def test_sdist_allows_only_its_root_env_template(repo: Path) -> None:
+    for name, accepted in [(".env_example", True), (".env", False),
+                            ("docs/.env_example", False)]:
+        archive = repo / "synthetic.tar.gz"
+        with tarfile.open(archive, "w:gz") as output:
+            info = tarfile.TarInfo("alice_mcp-0.1.0/" + name)
+            payload = b'REAL_TIME_API_KEY=""\n'
+            info.size = len(payload)
+            output.addfile(info, io.BytesIO(payload))
+        assert (scan_archive(archive) == []) is accepted
 
 
 @pytest.mark.parametrize("kind", [tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE])

@@ -322,8 +322,9 @@ active captures, a bound kernel driver or changed boot fail closed. The records,
 channel, boot and completion metadata bind the preview; apply rechecks under the
 shared lock. An older truncated sample alone is not a complete protocol description.
 
-The helper requires stock `i2cset` advertising I2C block mode. It writes only
-`0x01` plus 18 bytes on bus 0/address `0x3c`, then update `0x25=0xaa`. Exactly six
+The helper requires stock `i2cset`. It writes only the PWM registers `0x01`–`0x12` on
+bus 0/address `0x3c`, one `i2cset` per register, then update `0x25=0xaa`. (Mini 1's
+BusyBox 1.26.2 block mode prepends three stray bytes; live bus trace, 2026-10-30.) Exactly six
 positions at the selected triplet offset get `0x10`; all other observed PWM
 positions get zero. After one second it sends the captured all-zero frame/update.
 It does not write initialization, current, calibration or shutdown registers,

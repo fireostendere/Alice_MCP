@@ -227,7 +227,9 @@ class Listener:
     def __init__(self, word: str, mode: str, recognizer: Recognizer,
                  mww: Callable[[], Any] | None, *, emit: Callable[[dict[str, Any]], Any],
                  log: Callable[[dict[str, Any]], Any] = lambda _: None,
-                 inbox: McpInbox | None = None) -> None:
+                 inbox: McpInbox | None = None,
+                 on_wake: Callable[[], None] | None = None,
+                 on_endpoint: Callable[[], None] | None = None) -> None:
         if word not in WORDS or mode not in MODES:
             raise SafetyError("Unknown wake word or mode")
         self.word, self.mode, self.model = word, mode, WORDS[word]
@@ -248,6 +250,24 @@ class Listener:
         self.fired: deque[tuple[float, float, bool]] = deque(maxlen=16)
         self.consumed = -1.0
         self.held: dict[str, Any] | None = None
+        self.on_wake = on_wake
+        self.on_endpoint = on_endpoint
+        self.early_at = -float("inf")
+        self.partial_at = self.hit_at = -float("inf")
+        self.partial_active = False
+
+    def _early(self, source: str, at: float) -> None:
+        if self.on_wake is None:
+            return
+        if source == "vosk":
+            self.partial_at = at
+        else:
+            self.hit_at = at
+        allowed = {"vosk": source == "vosk", "mww": source == "mww", "either": True,
+                   "both": abs(self.partial_at - self.hit_at) <= MATCH_S}[self.mode]
+        if allowed and at - self.early_at >= COOLDOWN_S:
+            self.early_at = at
+            self.on_wake()
 
     def _mww_events(self, events: list[tuple[Any, ...]]) -> None:
         for event in events:
@@ -257,6 +277,7 @@ class Listener:
                 self.progress_ms = max(self.progress_ms, t)
             elif event[0] == "wake" and event[1] == self.model:
                 self.hits.append(self.offset_ms + event[2])
+                self._early("mww", (self.offset_ms + event[2]) / 1000)
 
     def _mww_feed(self, pcm: bytes) -> None:
         if self.mww is not None and (not self.mww.alive() or self.mww.audio_ms >= ROTATE_MS):
@@ -283,7 +304,16 @@ class Listener:
             raise SafetyError("Invalid PCM chunk")
         self._mww_feed(pcm)
         for i in range(0, len(pcm), 3200):
+            previous = self.heard.endpoint
             self.pending += self.pipeline.feed(pcm[i:i + 3200])
+            partial = getattr(self.heard.recognizer, "partial", None)
+            if self.on_wake is not None and partial is not None:
+                active = partial().casefold().split()[:len(self.tokens)] == self.tokens
+                if active and not self.partial_active:
+                    self._early("vosk", self.heard.samples / RATE)
+                self.partial_active = active
+            if self.on_endpoint is not None and self.heard.endpoint != previous:
+                self.on_endpoint()
         self.samples += len(pcm) // 2
         if self.mww is not None:
             self._mww_events(self.mww.poll())

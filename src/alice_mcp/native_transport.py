@@ -320,6 +320,33 @@ def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
                  "do_not_retry": True, "physical_effects_verified": False}
 
 
+def play_pcm(controller: Controller, station: Station, audio: bytes) -> dict[str, Any]:
+    """A host-pinned canonical WAV through the resident's local-PCM speech path, without
+    synthesis (e.g. Alice's stock error phrase). Bound to the resident state; once."""
+    from alice_mcp.local_tts import wav_parameters
+
+    _permission(controller, station, "speech.say")
+    if "local_tts" not in station.controls:
+        raise SafetyError("Resident local PCM playback is not configured")
+    parameters = wav_parameters(audio)
+    with controller._execution_lock:  # Never over the agent's own speech.
+        state = _state(controller, station, "speech.say")
+        fresh = controller.station(station.id)
+        _permission(controller, fresh, "speech.say")
+        if fresh != station:
+            raise SafetyError("Native station configuration or trust changed")
+        try:
+            result = call(station, "run_station_action", {
+                "station_id": station.id, "action": "speech.say", "parameters": parameters,
+                "expected_state_sha256": state,
+            })
+            return _pcm_result(result, expected_frames=(len(audio) - 44) // 2,
+                               expected_rate=int.from_bytes(audio[24:28], "little"))
+        except Exception:
+            return {"outcome": "unknown", "error_code": "native_action_unverified",
+                    "do_not_retry": True, "physical_effects_verified": False}
+
+
 def _pcm_result(result: dict[str, Any], *, expected_frames: int | None = None,
                 expected_rate: int | None = None) -> dict[str, Any]:
     if result.get("outcome") == "blocked" and set(result) <= {"outcome", "error"}:

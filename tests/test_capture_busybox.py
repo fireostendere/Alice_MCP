@@ -17,6 +17,12 @@ from alice_mcp import controls, device_runtime
 from alice_mcp.core import Controller, SafetyError, SSHInput
 
 
+def pwm(frame: Any) -> list[str]:
+    """One i2cset per PWM register: Mini 1's BusyBox 1.26.2 block mode `i` prepends
+    three stray bytes (live bus trace, 2026-10-30), so frames must not use it."""
+    return [f'-y 0 0x3c 0x{r:02x} 0x{v:02x}' for r, v in enumerate(frame, 1)]
+
+
 def request() -> dict[str, Any]:
     return {"schema": device_runtime.SCHEMA, "mode": "inspect", "model": "station-mini",
             "policy": {"firmware_sha256": hashlib.sha256(b"synthetic").hexdigest(),
@@ -374,10 +380,8 @@ def test_one_dim_pulse_restores_captured_idle_without_claiming_readback(pulse_de
     assert result['restoration_command_succeeded'] is True
     assert result['restoration_verified'] is False and result['effect_observed'] is False
     calls = log.read_text().splitlines()
-    assert calls == ['-y 0 0x3c 0x01 ' + ' '.join(['0x00', '0x10', '0x00'] * 6) + ' i',
-                     '-y 0 0x3c 0x25 0xaa b',
-                     '-y 0 0x3c 0x01 ' + ' '.join(['0x00'] * 18) + ' i',
-                     '-y 0 0x3c 0x25 0xaa b']
+    assert calls == (pwm([0, 16, 0] * 6) + ['-y 0 0x3c 0x25 0xaa b']
+                     + pwm([0] * 18) + ['-y 0 0x3c 0x25 0xaa b'])
 
 
 def test_changed_pulse_evidence_conflicts_before_writing(pulse_device: Any) -> None:
@@ -389,7 +393,7 @@ def test_changed_pulse_evidence_conflicts_before_writing(pulse_device: Any) -> N
     assert result['outcome'] == 'conflict' and not log.exists()
 
 
-@pytest.mark.parametrize('failure', ['1', '3'])
+@pytest.mark.parametrize('failure', ['1', '20'])  # colour frame / idle frame
 def test_pulse_failure_is_unknown_and_effect_is_not_retried(pulse_device: Any,
                                                            failure: str) -> None:
     (root, env, source), req, log = pulse_device
@@ -397,7 +401,9 @@ def test_pulse_failure_is_unknown_and_effect_is_not_retried(pulse_device: Any,
     preview = run_device(device, req)
     result = run_device(device, dict(req, mode='apply', expected_sha256=preview['state_sha256']))
     assert result['outcome'] == 'unknown' and result['restoration_verified'] is False
-    assert sum('0x10' in line for line in log.read_text().splitlines()) == 1
+    lines = log.read_text().splitlines()  # One i2cset per register.
+    assert sum(line.endswith(' 0x10') for line in lines) <= 6  # One colour frame at most.
+    assert sum(line.startswith('-y 0 0x3c 0x01 ') for line in lines) <= 2  # Never retried.
 
 
 @pytest.mark.parametrize('change', ['non_idle', 'wrong_boot', 'unrecorded_format',
@@ -487,22 +493,21 @@ def test_animation_preview_readonly_and_preset_restores_idle(pulse_device: Any, 
     calls = log.read_text().splitlines()
     expected = []
     for frame in (*frames, bytes(18)):
-        expected.extend(['-y 0 0x3c 0x01 ' + ' '.join(f'0x{v:02x}' for v in frame) + ' i',
-                         '-y 0 0x3c 0x25 0xaa b'])
+        expected.extend(pwm(frame) + ['-y 0 0x3c 0x25 0xaa b'])
     assert calls == expected
 
 
 def test_failed_animation_stops_without_replaying_frames(pulse_device: Any) -> None:
     (root, env, source), req, log = pulse_device
-    device = root, {**env, 'TEST_PULSE_FAIL_ON': '3'}, source
+    device = root, {**env, 'TEST_PULSE_FAIL_ON': '20'}, source  # 2nd frame's 1st register
     req.update(action='led.animate', params={'capture_id': 'a' * 32, 'mode': 'rainbow_swirl'})
     req['policy']['allowed_actions'] = ['led.animate']
     preview = run_device(device, req)
     result = run_device(device, dict(req, mode='apply', expected_sha256=preview['state_sha256']))
     assert result['outcome'] == 'unknown' and result['restoration_command_succeeded'] is True
     assert result['restoration_verified'] is False
-    # First frame+update, failed second frame, one idle frame+update. No frame retry.
-    assert len(log.read_text().splitlines()) == 5
+    # First frame+update (19), failed first register of frame 2, idle frame+update (19).
+    assert len(log.read_text().splitlines()) == 39
 
 
 def test_changing_preset_after_preview_conflicts_before_any_write(pulse_device: Any) -> None:
@@ -568,17 +573,17 @@ def test_interrupted_animation_attempts_idle_once(pulse_device: Any) -> None:
     try:
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            if log.exists() and len(log.read_text().splitlines()) >= 2:
+            if log.exists() and len(log.read_text().splitlines()) >= 19:
                 break
             time.sleep(0.01)
-        assert log.exists() and len(log.read_text().splitlines()) == 2
+        assert log.exists() and len(log.read_text().splitlines()) == 19
         os.killpg(process.pid, signal.SIGTERM)
         stdout, _ = process.communicate(timeout=5)
         result = led_capture.decode(stdout.decode())
         assert result['outcome'] == 'unknown' and result['restoration_command_succeeded'] is True
         calls = log.read_text().splitlines()
-        assert len(calls) == 4
-        assert calls[-2] == '-y 0 0x3c 0x01 ' + ' '.join(['0x00'] * 18) + ' i'
+        assert len(calls) == 2 * 19
+        assert calls[-19:-1] == pwm([0] * 18)
         assert calls[-1] == '-y 0 0x3c 0x25 0xaa b'
     finally:
         if process.poll() is None:

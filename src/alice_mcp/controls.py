@@ -34,6 +34,8 @@ RESULT_KEYS = {
     "restoration_command_succeeded", "yielded",
 }
 OUTCOMES = {"ready", "applied", "blocked", "conflict", "unknown", "capturing", "complete"}
+# The installed Mini 1 resident has no LED adapter: these use explicit pinned SSH on request.
+SSH_LED_ACTIONS = frozenset({"led.capture", "led.animate", "led.pulse", "led.show"})
 
 
 def parse_response(text: str) -> dict[str, Any]:
@@ -182,6 +184,20 @@ def capabilities(controller: Controller, station_id: str) -> dict[str, Any]:
     }
 
 
+def _station(controller: Controller, station_id: str, action: str, ssh: bool) -> Station:
+    """With `ssh`, a native Mini 1 is reached over its pinned SSH entry: never a fallback."""
+    station = controller.station(station_id)
+    if not ssh:
+        return station
+    if station.model != "station-mini" or action not in SSH_LED_ACTIONS:
+        raise SafetyError("Explicit SSH is only for Mini 1 LED capture, pulses, shows and presets")
+    if not station.native_mcp:
+        return station
+    from alice_mcp.vqe_experiment import _ssh
+
+    return _ssh(station)
+
+
 def _check_permission(controller: Controller, station: Station, action: str) -> None:
     if not controller.writes or os.name == "nt":
         raise SafetyError("Device writes disabled or POSIX trust checks unavailable")
@@ -297,8 +313,8 @@ def _digest(station: Station, request: dict[str, Any], state: str) -> str:
 
 
 def preview(controller: Controller, station_id: str, action: str,
-            parameters: dict[str, Any]) -> dict[str, Any]:
-    station = controller.station(station_id)
+            parameters: dict[str, Any], *, ssh: bool = False) -> dict[str, Any]:
+    station = _station(controller, station_id, action, ssh)
     if station.native_mcp:
         raise SafetyError("Use run_station_action for native MCP atomic preview/application")
     _check_permission(controller, station, action)
@@ -330,6 +346,8 @@ def preview(controller: Controller, station_id: str, action: str,
 
 def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
     station = controller.station(plan.station.id)
+    if station.native_mcp and not plan.station.native_mcp:  # Previewed with explicit SSH.
+        station = _station(controller, plan.station.id, plan.action, True)
     _check_permission(controller, station, plan.action)
     if station != plan.station:
         raise SafetyError("Private station configuration or trust changed; create a new preview")
@@ -364,11 +382,12 @@ def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
              "physical_effects_verified": False}
 
 
-def capture_status(controller: Controller, station_id: str, capture_id: str) -> dict[str, Any]:
+def capture_status(controller: Controller, station_id: str, capture_id: str, *,
+                   ssh: bool = False) -> dict[str, Any]:
     """Read status even after global writes are disabled; never start or stop a capture."""
     if not device_runtime._match(device_runtime.HEX32, capture_id):
         raise SafetyError("Invalid capture id")
-    station = controller.station(station_id)
+    station = _station(controller, station_id, "led.capture", ssh)
     if station.native_mcp:
         from alice_mcp import native_transport
 

@@ -124,7 +124,13 @@ func TestLEDShowNeedsTheSameFreshIdleEvidenceAsTheShellPath(t *testing.T) {
 		case "wrong_boot":
 			_ = os.WriteFile(filepath.Join(out, "boot"), []byte(strings.Repeat("0", 64)), 0600)
 		case "stale":
-			_ = os.WriteFile(filepath.Join(out, "ended"), []byte("0"), 0600)
+			// Hosted runners may be younger than 30 minutes; zero is then fresh.
+			ended, err := os.ReadFile(filepath.Join(out, "ended"))
+			at, parseErr := strconv.ParseInt(strings.TrimSpace(string(ended)), 10, 64)
+			if err != nil || parseErr != nil {
+				t.Fatal("cannot read fixture clock")
+			}
+			_ = os.WriteFile(filepath.Join(out, "ended"), []byte(strconv.FormatInt(at-1801, 10)), 0600)
 		case "claim":
 			_ = os.Mkdir(filepath.Join(root, "data/opt/alice-mcp/led-capture-active"), 0700)
 		case "driver":

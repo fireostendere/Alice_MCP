@@ -203,7 +203,8 @@ def _vosk(path: Path) -> tuple[ctypes.CDLL, int]:
     lib.vosk_recognizer_set_words.argtypes = [p, i]
     lib.vosk_recognizer_accept_waveform.argtypes = [p, ctypes.c_char_p, i]
     lib.vosk_recognizer_accept_waveform.restype = i
-    for name in ("vosk_recognizer_result", "vosk_recognizer_final_result"):
+    for name in ("vosk_recognizer_result", "vosk_recognizer_final_result",
+                 "vosk_recognizer_partial_result"):
         getattr(lib, name).argtypes, getattr(lib, name).restype = [p], ctypes.c_char_p
     lib.vosk_recognizer_free.argtypes = [p]
     lib.vosk_set_log_level(-1)
@@ -241,6 +242,11 @@ class VoskRecognizer:
 
     def flush(self) -> dict[str, Any] | None:
         return self._parse(self.lib.vosk_recognizer_final_result(self.handle))
+
+    def partial(self) -> str:
+        """Wake prefix before the utterance ends; never exported as a command."""
+        data = json.loads(self.lib.vosk_recognizer_partial_result(self.handle))
+        return str(data.get("partial", ""))
 
 
 def _recognize(libvosk: str, model_dir: str, corpus: dict[str, Any],

@@ -147,6 +147,12 @@ and the [runtime control contract](docs/CONTROLS.md).
 | `start_job`, `list_jobs`, `cancel_job` | Owned host timers, declarative presets and a bounded generated-tone siren; cancel by owned ID; lost when this process exits ([jobs](docs/JOBS.md)) |
 | `voice_listen_start`, `voice_listen_stop`, `voice_status`, `get_voice_events` | Mini 1 wake word «компьютер» heard on this PC; each spoken command becomes an untrusted event for the opencode `alice` agent; audio stays in RAM ([voice commands](docs/IO_CHANNEL.md#step-6-voice-commands-in-the-mcp-and-opencode)) |
 
+With a private root `.env` containing `REAL_TIME_API_KEY`, voice commands instead
+use cloud STT → Responses → mini TTS. «Компьютер, давай поговорим» opens a
+`gpt-realtime-2.1` conversation; «компьютер, начни диктовку» uses
+`gpt-live-transcribe`. Wake detection stays local and lights the ring before the
+command ends. See [voice routes, setup and limits](docs/VOICE_ARCHITECTURE.md).
+
 ### Fewer approval prompts and bounded diagnostics
 
 Within an owner-authorized task, the agent can inspect capabilities, run read-only

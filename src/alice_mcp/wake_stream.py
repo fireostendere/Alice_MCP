@@ -71,7 +71,9 @@ for c in awk cat chmod cut grep id kill ls mkdir od pidof readlink rm rmdir sha2
     command -v "$c" >/dev/null 2>&1 || blocked runtime_tools_missing
 done
 identity() {
-    for p in $(pidof maind); do awk '{ print $1 ":" $22 }' "/proc/$p/stat"; done |
+    # BusyBox pidof also lists led_util players (a maind symlink): not Quasar itself.
+    for p in $(pidof maind); do awk '$2 != "(led_util)" { print $1 ":" $22 }' "/proc/$p/stat"
+    done |
         sort | sha256sum | cut -d ' ' -f 1
 }
 TMPFS=

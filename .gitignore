@@ -9,9 +9,9 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-.env
-.env.*
+.env*
 !.env.example
+!.env_example
 private/
 local/
 stations.json
@@ -27,3 +27,7 @@ known_hosts*
 *.pcap*
 *-workspace/
 .claude/
+.worktrees/
+Telegram_Control_Bot/
+Telegram_Control_Bot.zip
+/rgb_effects.sh

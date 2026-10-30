@@ -31,7 +31,7 @@ type config struct {
 	PreauthorizeAllActions bool        `json:"preauthorize_all_actions"`
 	LocalPCM               *pcmConfig  `json:"local_pcm,omitempty"`
 	Wake                   *wakeConfig `json:"wake,omitempty"`
-	LEDMap                 *ledMap `json:"led_map,omitempty"`
+	LEDMap                 *ledMap     `json:"led_map,omitempty"`
 	audioPolicy
 }
 

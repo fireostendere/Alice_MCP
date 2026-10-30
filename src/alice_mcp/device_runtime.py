@@ -206,11 +206,30 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
             pc_fields = {"client", "mww", "libvosk", "vosk_zip", "mww_model", "mode"}
             fields = {"source", "autostart"} | (pc_fields if source == "PC" else set())
             _require(model == "station-mini" and source in ("PC", "station")
-                     and _keys(voice, fields, pc_fields) and type(voice["autostart"]) is bool)
+                     and _keys(voice, fields, pc_fields | {"indicator"})
+                     and type(voice["autostart"]) is bool)
             _require(all(_safe_path(voice[k]) for k in ("client", "mww", "libvosk", "vosk_zip")
                          if k in voice)
                      and voice.get("mww_model", "ft") in ("ft", "old")
                      and voice.get("mode", "either") in ("vosk", "mww", "either", "both"))
+            if "indicator" in voice:
+                # Ring pattern while the agent works (voice_indicator.py); off by default.
+                # palette_index/capture_id are earlier fields, still accepted but unused.
+                indicator = {"backend": "off", "max_seconds": 90, "color": "red",
+                             **voice["indicator"]}
+                sound = indicator.get("error_sound", {"path": "/x", "sha256": "0" * 64})
+                _require(_keys(indicator, {"backend", "max_seconds", "color"},
+                               {"error_sound", "palette_index", "capture_id"})
+                         and indicator["backend"] in ("off", "ssh_led", "native_led")
+                         and _integer(indicator["max_seconds"], 1, 90)
+                         and isinstance(indicator["color"], str) and (
+                             indicator["color"] in ("red", "purple")
+                             or re.fullmatch("#[0-9A-Fa-f]{6}", indicator["color"]))
+                         and _keys(sound, {"path", "sha256"}) and _safe_path(sound["path"])
+                         and _match(HEX64, sound["sha256"])
+                         and _integer(indicator.get("palette_index", 1), 1, 6)
+                         and _match(HEX32, indicator.get("capture_id", "0" * 32)))
+                voice["indicator"] = indicator
             result["voice"] = voice
         if "local_tts" in policy:
             local = policy["local_tts"]

@@ -614,6 +614,107 @@ on the same station.
 - The events file is not a queue: a command written while no opencode server runs is
   never sent.
 
+## Step 7: ring indicator while the agent works
+
+Goal: after a heard command, Mini 1 shows Alice's own "I heard you" pulse, recoloured red,
+until the `alice` agent has answered. If the agent fails or runs out of time, the ring goes
+dark and the station says Alice's stock error phrase. Synthetic tests only
+(`tests/test_voice_indicator.py`, fake `led_util`, fake SSH, fake resident); not yet
+live-accepted.
+
+**Pattern.** Owner decision (2026-10-30). The station's stock
+`/system/vendor/quasar/ledpatterns/alice_listening.led` is read once per listener. The
+host makes a recoloured copy: same header words, frame count, timing and intensity curve.
+Each zone becomes the target colour scaled by max(R,G,B)/255 of the original. The colour
+comes from `voice.indicator.color`:
+- `red` (the default);
+- `#RRGGBB`;
+- `purple`, which plays the stock file unchanged.
+
+Only `gammacorrection`, `loop`, blank lines and frames of 6 hex zones plus milliseconds
+are accepted. Anything else stays off with `pattern_format_unknown`. The player brings its
+own brightness, so the 16/255 cap of the raw PWM actions does not apply.
+
+**Backend.** The stock player `/system/vendor/quasar/led_util <file>` runs over the
+explicit pinned SSH entry. The installed resident has no LED action, so this is a
+dedicated voice backend, never a fallback for other native actions. It needs `led.show`
+permission plus standing preauthorization.
+
+One SSH session per lit period:
+- It first stops any leftover player of ours. It refuses with `player_busy` if anyone
+  else's `led_util` runs.
+- It writes the pattern to a 0700 tmpfs directory and starts one player.
+- It holds while the host keeps the session's stdin open. Closing stdin, a dropped session
+  or the on-device deadline (`max_seconds`) ends the hold.
+- Stop: SIGINT (SIGTERM after 1 s if the background player ignores it). Then a one-frame
+  `000000` ×6 `led_util` run, because the player keeps its last frame lit, also stopped.
+  Then the temporary files are removed.
+- The helper reports `left_running`. An uncertain stop latches the indicator off until
+  the listener restarts; nothing is retried.
+
+When the listener stops (also on MCP exit), one `cleanup` session verifies that no player
+of ours remains (`voice_status().indicator.clean`).
+
+`led_util` is a symlink to `maind`, so BusyBox `pidof maind` lists a running player too.
+The Quasar identity checks of the stream and pilots now skip processes named `led_util`;
+otherwise every lit period would stop the wake stream as `quasar_changed`.
+
+**Busy signal.** The opencode plugin (`index.js`) watches its «Голос» session's execution
+events:
+- `started` → `busy`;
+- `succeeded` / `interrupted` → `idle`;
+- `failed` → `error`.
+
+After a command is queued, the server that sent it writes
+`$XDG_STATE_HOME/alice-mcp/voice-agent-state.json` (0600, atomic) as `{session_status,
+ts (epoch ms), last_event_id}`. It rewrites this on every change and every 5 s. A server
+never overwrites a newer `last_event_id` written by another server.
+
+**Rules.** One worker thread; `wake()` only records the newest command, so detection is
+never blocked. Empty commands do not light the ring. The ring plays while:
+- the file is fresh (≤15 s) and busy with `last_event_id` ≥ the newest command; or
+- nobody has picked the command up yet, for at most 10 s.
+
+A stale file counts as idle. A new command while lit extends the period: one player,
+never a second. `max_seconds` (≤90) counts from the newest command.
+
+**Error phrase.** It plays on `error`, or when the agent is still busy at `max_seconds`.
+The ring is stopped and darkened first. Then `voice.indicator.error_sound` (a private host
+WAV, `{"path", "sha256"}`) plays once through the installed resident's local-PCM speech
+path: `native_transport.play_pcm`, with no synthesis and no resident change. The file is
+pinned by its sha256 and re-encoded as canonical mono 16-bit PCM. Its peak is scaled to
+the resident's 8191 bound. A missing file or a hash mismatch is skipped with a logged
+reason (`error_sound: skipped_sound_unavailable`). An `unknown` playback is not repeated.
+The audio never belongs in Git.
+
+**Configuration** (inside the private `voice` block; default off):
+
+```json
+"indicator": {"backend": "ssh_led", "color": "red", "max_seconds": 90,
+              "error_sound": {"path": "/PRIVATE/vins_error.wav", "sha256": "<64 hex>"}}
+```
+
+`backend` is `off`, `ssh_led` or `native_led`. `native_led` reports
+`native_led_unsupported` until a resident LED action can hold a pattern. Earlier
+`palette_index` and `capture_id` fields are still accepted but unused;
+`configure(..., palette_index=None, capture_id=None)` removes them. Unlike the raw PWM
+actions, the indicator needs no `led.capture`.
+
+**LED capture store.** A new `led.capture` first removes completed, cleaned results
+beyond the newest 7, so the 16-result limit no longer blocks. Results that are unfinished
+or in an unknown state stay for inspection; 16 of those still block.
+
+**Gaps.**
+- `led_util` reinitialises the LED chip and competes with `platformd`. If Alice animates
+  while the indicator plays (the owner says «Алиса»), the two fight until one stops, and
+  the dark frame can cut her animation short. Detecting her own pattern would need
+  Quasar's state over IPC, which is not cheap; the indicator does not try.
+- The ring lights 1–2 s after the command ends (one SSH read the first time, then one
+  session).
+- Extending past a period's on-device deadline restarts the player with a brief gap.
+- Each period leaves one harmless `sleep` on the station until its deadline.
+- No live acceptance.
+
 ## Later: resident and wake pipeline (planned, not implemented)
 
 **Resident (Go).**

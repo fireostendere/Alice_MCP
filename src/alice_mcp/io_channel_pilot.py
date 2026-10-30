@@ -71,7 +71,9 @@ shift 18
 pidof maind >/dev/null || blocked quasar_not_running
 # Quasar identity: every maind PID with its kernel start time.
 identity() {
-    for p in $(pidof maind); do awk '{ print $1 ":" $22 }' "/proc/$p/stat"; done |
+    # BusyBox pidof also lists led_util players (a maind symlink): not Quasar itself.
+    for p in $(pidof maind); do awk '$2 != "(led_util)" { print $1 ":" $22 }' "/proc/$p/stat"
+    done |
         sort | sha256sum | cut -d ' ' -f 1
 }
 hex=$(printf '%04X' "$port")

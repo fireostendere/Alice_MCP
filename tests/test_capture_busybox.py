@@ -402,7 +402,7 @@ def test_changed_pulse_evidence_conflicts_before_writing(pulse_device: Any) -> N
     assert result['outcome'] == 'conflict' and not log.exists()
 
 
-@pytest.mark.parametrize('failure', ['1', '3'])
+@pytest.mark.parametrize('failure', ['1', '20'])  # colour frame / idle frame
 def test_pulse_failure_is_unknown_and_effect_is_not_retried(pulse_device: Any,
                                                            failure: str) -> None:
     (root, env, source), req, log = pulse_device
@@ -411,8 +411,12 @@ def test_pulse_failure_is_unknown_and_effect_is_not_retried(pulse_device: Any,
     result = run_device(device, dict(req, mode='apply', expected_sha256=preview['state_sha256']))
     assert result['outcome'] == 'unknown' and result['restoration_verified'] is False
     calls = log.read_text().splitlines()
-    assert calls == (pwm_calls([0, 16, 0] * 6)[:int(failure)]
-                     + pwm_calls([0] * 18) + ['-y 0 0x3c 0x25 0xaa b'])
+    if failure == '1':
+        assert calls == (pwm_calls([0, 16, 0] * 6)[:1]
+                         + pwm_calls([0] * 18) + ['-y 0 0x3c 0x25 0xaa b'])
+    else:
+        assert calls == (pwm_calls([0, 16, 0] * 6) + ['-y 0 0x3c 0x25 0xaa b']
+                         + pwm_calls([0] * 18)[:1] + ['-y 0 0x3c 0x25 0xaa b'])
 
 
 @pytest.mark.parametrize('change', ['non_idle', 'wrong_boot', 'unrecorded_format',
@@ -508,15 +512,15 @@ def test_animation_preview_readonly_and_preset_restores_idle(pulse_device: Any, 
 
 def test_failed_animation_stops_without_replaying_frames(pulse_device: Any) -> None:
     (root, env, source), req, log = pulse_device
-    device = root, {**env, 'TEST_PULSE_FAIL_ON': '3'}, source
+    device = root, {**env, 'TEST_PULSE_FAIL_ON': '20'}, source  # 2nd frame's 1st register
     req.update(action='led.animate', params={'capture_id': 'a' * 32, 'mode': 'rainbow_swirl'})
     req['policy']['allowed_actions'] = ['led.animate']
     preview = run_device(device, req)
     result = run_device(device, dict(req, mode='apply', expected_sha256=preview['state_sha256']))
     assert result['outcome'] == 'unknown' and result['restoration_command_succeeded'] is True
     assert result['restoration_verified'] is False
-    # Two bytes succeeded, the third failed; only the idle frame follows.
-    assert len(log.read_text().splitlines()) == 3 + 19
+    # First frame latched, next frame failed at byte one; only the idle frame follows.
+    assert len(log.read_text().splitlines()) == 20 + 19
 
 
 def test_changing_preset_after_preview_conflicts_before_any_write(pulse_device: Any) -> None:

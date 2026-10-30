@@ -4,7 +4,8 @@ A background thread runs wake_stream (Mini 1 vqe_0 to this PC, RAM only) into wa
 (Vosk + mww). Each command becomes an event {id, ts, station, word, command, sources,
 trusted:false}, kept in memory for get_voice_events and appended to a private JSON-lines
 file the opencode plugin tails. State changes go to the same file. Audio is never written.
-Events are spoken, untrusted text: never a permission, never a tool choice.
+Events are spoken, untrusted text: never a permission, never a tool choice. While the agent
+works on a command, voice_indicator plays the ring (private voice.indicator, default off).
 """
 
 from __future__ import annotations
@@ -20,8 +21,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from alice_mcp import controls, native_transport, station_wake
 from alice_mcp import io_channel_pilot as iop
-from alice_mcp import station_wake
+from alice_mcp import realtime_voice as rv
+from alice_mcp import voice_indicator as vi
 from alice_mcp import wake_listen as wl
 from alice_mcp import wake_stream as ws
 from alice_mcp.core import Controller, SafetyError, load_inventory
@@ -96,14 +99,18 @@ class VoiceService:
         self.events: deque[dict[str, Any]] = deque(maxlen=100)
         self.last_id = 0
         self.utterances = 0
+        self.indicator: Any = None
+        self.realtime: rv.RealtimeTurn | None = None
 
-    def _record(self, record: dict[str, Any]) -> dict[str, Any]:
+    def _record(self, record: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
         with self.lock:
             self.last_id = max(self.last_id + 1, int(time.time() * 1000))
             record = {"id": self.last_id,
                       "ts": datetime.now(UTC).isoformat(timespec="seconds"), **record}
-            if record["kind"] == "wake":
+            if record["kind"] in {"wake", "dictation"}:
                 self.events.append(record)
+        if not persist:
+            return record
         try:
             self.sink.write(record)
         except OSError:
@@ -123,12 +130,22 @@ class VoiceService:
         iop._permitted(self.controller, station)
         if voice.get("source") == "station" and not station.native_mcp:
             raise SafetyError("Station wake source requires the resident TLS transport")
+        key = rv.api_key() if voice.get("source", "PC") == "PC" else None
         with self.lock:
             if self.state != "stopped" or self.thread is not None and self.thread.is_alive():
                 raise SafetyError("Voice listener already running; stop it first")
             self.stop_event = threading.Event()
             self.station, self.live, self.last_error, self.result = station.id, {}, None, None
             self.source = voice.get("source", "PC")
+            self.indicator = vi.Indicator(self.controller, station.id)
+            self.realtime = rv.RealtimeTurn(
+                key, self.indicator,
+                lambda audio: native_transport.play_pcm(
+                    self.controller, self.controller.station(station.id), audio),
+                action=self._action,
+                emit=lambda event: self._record({**event, "kind": "dictation",
+                                                  "station": station.id, "trusted": False},
+                                                 persist=False)) if key else None
             self.thread = threading.Thread(target=self._run, name="alice-voice", daemon=True,
                                            args=(station.id, dict(voice), self.stop_event))
             self.state = "starting"
@@ -147,14 +164,24 @@ class VoiceService:
                 if stop.is_set():
                     return
                 listener = wl.Listener(WORD, voice["mode"], vosk(), mww,
-                                       emit=self._wake(station_id), log=self._log)
+                                       emit=self._wake(station_id), log=self._log,
+                                       on_wake=self._detected,
+                                       on_endpoint=(self.realtime.endpoint
+                                                    if self.realtime else None))
                 item = ws.Stream(client)
                 plan = ws.preview(self.controller, station_id, item)
 
                 def feed(pcm: bytes) -> None:
                     if self.state == "starting":
                         self._state("listening")
-                    listener.feed(pcm)
+                    for offset in range(0, len(pcm), 3200):
+                        block = pcm[offset:offset + 3200]
+                        active = self.realtime is not None and self.realtime.active
+                        if self.realtime is not None and active:
+                            self.realtime.feed(block)
+                        listener.feed(block)
+                        if self.realtime is not None and not active:
+                            self.realtime.feed(block)
 
                 summary = ws.apply(self.controller, plan["plan_id"], plan["expected_sha256"],
                                    item, feed, stop=stop, live=self.live)
@@ -169,6 +196,9 @@ class VoiceService:
             # Never hand private paths or transport errors to MCP output.
             self.last_error = "Voice listener failed; inspect locally"
         finally:
+            if self.realtime is not None:
+                self.realtime.close()
+            self.indicator.close()  # Darkens the ring and verifies no player is left.
             self._state("stopped")
 
     def _run_station(self, station_id: str, stop: threading.Event) -> None:
@@ -183,11 +213,43 @@ class VoiceService:
                 self._wake(station_id)({"word": WORD, "command": "",
                                         "sources": ["station_mww"]})
 
+    def _detected(self) -> None:
+        if self.stop_event.is_set():
+            return
+        event_id = int(time.time() * 1000)
+        if self.realtime is not None:
+            self.realtime.wake(event_id)
+        else:
+            self.indicator.wake(event_id)
+
+    def _action(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Model arguments are data; bind execution to this station's unchanged live gates."""
+        if (type(arguments) is not dict or set(arguments) != {"action", "parameters"}
+                or not isinstance(arguments["action"], str)
+                or type(arguments["parameters"]) is not dict or self.station is None):
+            return {"outcome": "blocked", "error": "Invalid station action"}
+        try:
+            station = self.controller.station(self.station)
+            if not station.preauthorize_all_actions:
+                raise SafetyError("Standing station authorization required")
+            action, params = arguments["action"], arguments["parameters"]
+            if station.native_mcp:
+                return native_transport.run_action(self.controller, station, action, params)
+            plan = controls.preview(self.controller, station.id, action, params)
+            return self.controller.execute_plan(self.controller.take_plan(
+                plan["plan_id"], plan["expected_sha256"]))
+        except (SafetyError, ValueError, TypeError):
+            return {"outcome": "blocked", "error": "Station policy or runtime blocked action"}
+
     def _wake(self, station_id: str) -> Callable[[dict[str, Any]], None]:
         def emit(event: dict[str, Any]) -> None:
-            self._record({"kind": "wake", "station": station_id, "word": event["word"],
-                          "command": event["command"], "sources": event["sources"],
-                          "trusted": False})
+            if self.realtime is not None:
+                return  # Realtime receives audio; do not dispatch a duplicate text command.
+            record = self._record({"kind": "wake", "station": station_id, "word": event["word"],
+                                   "command": event["command"], "sources": event["sources"],
+                                   "trusted": False})
+            if record["command"].strip():  # Only commands the plugin hands to the agent.
+                self.indicator.wake(record["id"])
         return emit
 
     def _log(self, entry: dict[str, Any]) -> None:
@@ -235,6 +297,9 @@ class VoiceService:
                 "utterances": self.utterances, "recent_events": len(self.events),
                 "last_event_id": self.events[-1]["id"] if self.events else 0,
                 "last_error": self.last_error, "last_session": self.result,
+                "realtime": self.realtime.status() if self.realtime else None,
+                "indicator": self.indicator.status() if self.indicator else {
+                    "backend": "off", "state": "off", "reason": "listener_not_started"},
                 "audio_saved": False, "events_trusted": False}
 
     def get_events(self, after_id: int = 0) -> dict[str, Any]:

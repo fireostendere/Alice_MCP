@@ -31,6 +31,7 @@ ROOT_FILES = {
     "README.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md", "CHANGELOG.md",
     "LICENSE", "LICENSE.md", "LICENSE.txt", "NOTICE", "NOTICE.md",
     ".gitignore", ".gitattributes", ".editorconfig", "pyproject.toml", "MANIFEST.in",
+    ".env_example",
 }
 TREE_EXCLUDES = {
     ".git", ".venv", "venv", ".tox", ".nox", "dist", "build", "__pycache__",
@@ -112,6 +113,8 @@ def valid_path(path: str) -> bool:
 
 
 def private_path(path: str) -> bool:
+    if path == ".env_example":
+        return False  # Only this root template; content still passes the secret scanner.
     parts = path.lower().split("/")
     return any(
         part in PRIVATE_DIRS
@@ -335,9 +338,9 @@ def scan_git(root: Path) -> list[Finding]:
 def archive_path_rule(path: str, wheel: bool) -> str | None:
     if not valid_path(path):
         return "path-invalid"
-    if private_path(path):
-        return "path-private"
     parts = path.split("/")
+    if private_path(path) and (wheel or len(parts) != 2 or parts[1] != ".env_example"):
+        return "path-private"
     if wheel:
         if re.fullmatch(
             r"alice_(?:station_)?mcp-[0-9][a-zA-Z0-9_.+!-]*\.dist-info", parts[0]

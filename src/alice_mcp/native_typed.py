@@ -108,6 +108,7 @@ def result(station: Station, action: str, raw: dict[str, Any],
                            expected_rate=int.from_bytes(audio[24:28], "little"))
     before, after = raw.get("previous_percent"), raw.get("percent")
     ceiling = station.controls.get("max_volume", 30)
+    # ALSA floors to a representable level; the resident verifies its exact raw readback.
     if (set(raw) != {"outcome", "previous_percent", "percent", "quasar_running", "do_not_retry",
                      "evidence_class", "physical_effects_verified"}
         or raw["outcome"] not in {"applied", "unknown"} or not rt._integer(before, 0, 100)
@@ -115,7 +116,7 @@ def result(station: Station, action: str, raw: dict[str, Any],
         or type(raw["quasar_running"]) is not bool or raw["do_not_retry"] is not True
         or raw["evidence_class"] != "analytical" or raw["physical_effects_verified"] is not False
         or raw["outcome"] == "applied" and (after is None or (
-            after != sent["percent"] if "percent" in sent
+            after > sent["percent"] if "percent" in sent
             else not before < after <= ceiling if sent["step"] == "louder"
             else not after < before or after > ceiling))):
         raise SafetyError("Native volume result unverified; do not retry")

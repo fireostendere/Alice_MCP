@@ -258,6 +258,54 @@ def raw(*values: Any) -> str:
 GOOD = (READY, WAKE, report(), END, TRAILER)
 
 
+def test_personalized_arm_pin_is_accepted_without_removing_the_old_build(
+    monkeypatch: Any, tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(iop, "HELPER_SHA256", hashlib.sha256(b"client").hexdigest())
+    monkeypatch.setattr(pilot, "FT_DETECTOR_SHA256", hashlib.sha256(b"new").hexdigest(),
+                        raising=False)
+    monkeypatch.setattr(pilot, "DETECTOR_SHA256", hashlib.sha256(b"old").hexdigest())
+    for detector in (b"new", b"old"):
+        item = pilot.Pilot(45, b"client", detector)
+        item.validate()
+        command = pilot._command(station(tmp_path), item, "apply", "e" * 64)
+        assert hashlib.sha256(detector).hexdigest() in command.command
+    with pytest.raises(SafetyError):
+        pilot.Pilot(45, b"client", b"unreviewed").validate()
+
+
+@pytest.mark.parametrize("bad", [False, True])
+def test_live_wake_callback_is_validated_and_does_not_wait_for_cleanup(
+    monkeypatch: Any, tmp_path: Path, bad: bool,
+) -> None:
+    c = Controller(None, writes=True, runner=lambda *_: raw({
+        "outcome": "ready", "state_sha256": "e" * 64}))
+    monkeypatch.setattr(c, "station", lambda _: station(tmp_path))
+    monkeypatch.setattr(pilot, "_ssh", lambda value: value)
+    monkeypatch.setattr(iop, "HELPER_SHA256", hashlib.sha256(b"client").hexdigest())
+    monkeypatch.setattr(pilot, "DETECTOR_SHA256", hashlib.sha256(b"detector").hexdigest())
+    item = pilot.Pilot(45, b"client", b"detector")
+    seen = []
+
+    def transfer(_: Any, request: Any, *, limit: int, on_line: Any) -> str:
+        assert limit == pilot.OUTPUT_LIMIT
+        on_line(raw(READY).encode())
+        assert seen == [READY]
+        on_line(raw(dict(WAKE, trusted=True) if bad else WAKE).encode())
+        assert seen == [READY, WAKE]
+        for value in GOOD[2:]:
+            on_line(raw(value).encode())
+        return raw(*GOOD)
+
+    monkeypatch.setattr(pilot, "_transfer", transfer)
+    plan = pilot.preview(c, "desk", item)
+    result = pilot.apply(c, plan["plan_id"], plan["expected_sha256"], item,
+                         on_event=seen.append)
+    assert result["outcome"] == ("unknown" if bad else "complete")
+    assert seen == ([READY] if bad else [READY, WAKE, END])
+    assert result["do_not_retry"] is True
+
+
 @pytest.mark.parametrize(("lines", "outcome", "code"), [
     (GOOD, "complete", "none"),
     ((READY, report(), WAKE, END, TRAILER), "complete", "none"),  # Interleaving is fine.

@@ -200,7 +200,7 @@ func main() {
 	device := &nativeRuntime{configPath: *configPath, stationID: c.StationID, model: c.Model}
 	api := &server{stationID: c.StationID, model: c.Model, tokenFile: c.CredentialFile,
 		controls: device.controls, probe: device.probe, run: device.say,
-		listen: device.listen, status: device.captureStatus, pcm: device.playPCM,
+		listen: device.listen, status: device.captureStatus, pcm: device.playPCMContext,
 		volume: device.setVolume, media: device.playMedia, show: device.showLED, wake: device.listenWake}
 	httpServer := &http.Server{Addr: c.Listen, Handler: api, TLSConfig: tlsSettings(),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,

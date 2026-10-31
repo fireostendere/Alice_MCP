@@ -146,6 +146,7 @@ def source_allowed(path: str) -> bool:
         if path in {"src/alice_mcp/native/asr_once.c", "src/alice_mcp/native/vqe_audit.c",
                     "src/alice_mcp/native/pcm_player.c",
                     "src/alice_mcp/native/io_channel_levels.c",
+                    "src/alice_mcp/native/station_asr.c",
                     "src/alice_mcp/native/mww/mww_detect.cc"}:
             return True  # Reviewed source only; native executables remain excluded.
         if parts[:4] == ["src", "alice_mcp", "native", "agent"] and len(parts) == 5:
@@ -154,6 +155,7 @@ def source_allowed(path: str) -> bool:
                 "speech.go", "pcm.go", "audio.go", "audio_test.go", "led.go", "led_test.go",
                 "wake.go", "wake_test.go",
                 "alsa_control.go", "alsa_control_test.go",
+                "firmware_hash.go", "firmware_hash_test.go",
             }
         return suffix in {".py", ".json"} or (
             (parts[2] == "skills" or parts[2:4] == ["data", "skills"])

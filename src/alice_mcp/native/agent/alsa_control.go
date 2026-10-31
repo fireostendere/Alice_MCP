@@ -68,7 +68,7 @@ func alsaID(v *volumeConfig, size int) []byte {
 	return b
 }
 
-func readALSAControl(v *volumeConfig, tx alsaTransaction) (int, bool) {
+func readALSAControl(v *volumeConfig, tx alsaTransaction) (int64, bool) {
 	if !v.valid() || v.Backend != "alsa_ctl" {
 		return 0, false
 	}
@@ -77,7 +77,8 @@ func readALSAControl(v *volumeConfig, tx alsaTransaction) (int, bool) {
 		binary.LittleEndian.Uint32(info[4:]) != 2 || string(bytes.TrimRight(info[16:60], "\x00")) != v.Control ||
 		binary.LittleEndian.Uint32(info[64:]) != 2 || binary.LittleEndian.Uint32(info[68:])&3 != 3 ||
 		binary.LittleEndian.Uint32(info[68:])&0x700 != 0 || binary.LittleEndian.Uint32(info[72:]) != uint32(v.Channels) ||
-		alsaLong(info[80:]) != v.RawMin || alsaLong(info[80+alsaWord:]) != v.RawMax || alsaLong(info[80+2*alsaWord:]) != 1 {
+		alsaLong(info[80:]) != v.RawMin || alsaLong(info[80+alsaWord:]) != v.RawMax ||
+		alsaLong(info[80+2*alsaWord:]) < 0 || alsaLong(info[80+2*alsaWord:]) > 1 {
 		return 0, false
 	}
 	values := alsaID(v, alsaValueSize)
@@ -93,8 +94,12 @@ func readALSAControl(v *volumeConfig, tx alsaTransaction) (int, bool) {
 			return 0, false
 		}
 	}
+	return value, true
+}
+
+func alsaPercent(v *volumeConfig, raw int64) int {
 	span := v.RawMax - v.RawMin
-	return int(((value-v.RawMin)*100 + span/2) / span), true
+	return int(((raw-v.RawMin)*100 + span/2) / span)
 }
 
 func changeALSAControl(v *volumeConfig, r volumeRequest, tx alsaTransaction) map[string]any {
@@ -106,7 +111,7 @@ func changeALSAControl(v *volumeConfig, r volumeRequest, tx alsaTransaction) map
 	if r.MaxPercent != nil {
 		ceiling = min(ceiling, *r.MaxPercent)
 	}
-	target, ok := volumeTarget(r, before, ceiling)
+	target, ok := volumeTarget(r, alsaPercent(v, before), ceiling)
 	if !ok {
 		return blocked("No volume change within the reviewed ceiling")
 	}
@@ -121,11 +126,11 @@ func changeALSAControl(v *volumeConfig, r volumeRequest, tx alsaTransaction) map
 	}
 	err := tx(alsaRequest(0x13, len(values)), values)
 	after, verified := readALSAControl(v, tx)
-	result := map[string]any{"outcome": "unknown", "previous_percent": before, "percent": nil}
+	result := map[string]any{"outcome": "unknown", "previous_percent": alsaPercent(v, before), "percent": nil}
 	if verified {
-		result["percent"] = after
+		result["percent"] = alsaPercent(v, after)
 	}
-	if err == nil && verified && after == target {
+	if err == nil && verified && after == raw {
 		result["outcome"] = "applied"
 	}
 	return result

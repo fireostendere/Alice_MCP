@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import wave
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,42 @@ import pytest
 
 from alice_mcp import pcm_pilot
 from alice_mcp.core import Controller, SafetyError
+
+
+def test_transfer_delivers_lines_before_the_remote_process_finishes(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    marker = tmp_path / "received"
+    # The peer cannot finish until its first line has reached the callback.
+    code = ("import pathlib,sys,time; sys.stdin.buffer.read(); "
+            "print('ready',flush=True); p=pathlib.Path(sys.argv[1]); "
+            "deadline=time.monotonic()+3\n"
+            "while not p.exists() and time.monotonic()<deadline: time.sleep(.01)\n"
+            "assert p.exists(); print('done',flush=True)")
+    monkeypatch.setattr(pcm_pilot, "ssh_argv", lambda *_: [sys.executable, "-c", code,
+                                                          str(marker)])
+    seen = []
+
+    def receive(line: bytes) -> None:
+        seen.append(line)
+        marker.touch()
+
+    result = pcm_pilot._transfer(None, pcm_pilot._Transfer("synthetic", b"payload"),
+                                 limit=32, on_line=receive)  # type: ignore[arg-type]
+    assert seen == [b"ready\n", b"done\n"] and result == "ready\ndone\n"
+
+
+@pytest.mark.parametrize("body", [b"x" * 33, b"unterminated"])
+def test_stream_transfer_never_delivers_oversized_or_unterminated_lines(
+    monkeypatch: Any, body: bytes,
+) -> None:
+    code = "import sys; sys.stdin.buffer.read(); sys.stdout.buffer.write(" + repr(body) + ")"
+    monkeypatch.setattr(pcm_pilot, "ssh_argv", lambda *_: [sys.executable, "-c", code])
+    seen = []
+    with pytest.raises(SafetyError, match="uncertain"):
+        pcm_pilot._transfer(None, pcm_pilot._Transfer("synthetic", b""),
+                            limit=32, on_line=seen.append)  # type: ignore[arg-type]
+    assert seen == []
 
 
 @pytest.mark.parametrize("change", ["none", "expire", "revoke", "artifact", "uncertain",

@@ -18,11 +18,34 @@ the five held-out positives, so this is **not held-out accuracy** or an ARM resu
 Review corrections: evaluation now filters every event/trace by model, checks the
 embedded model digest, and marks unequal trace lengths as unaligned. Replay verifies
 the full inference clock and returns per-model probability trace digests and model
-digests; equal maxima alone are insufficient. The replay pin still identifies the
-old three-model ARM build, whereas PC default `ft` is the personal fine-tune. Do not
-claim parity or substitute a new pin until the matching ARM build is reviewed.
+digests; equal maxima alone are insufficient. The original replay pin identifies the
+old three-model ARM build, whereas PC default `ft` is the personal fine-tune.
 Historical multi-model evaluation totals must be recomputed with model selection
 before using them to choose or promote a model.
+
+The matching personalized ARM candidate was built on 2026-10-30 with the pinned
+sources below and Zig 0.15.1: **476,376 bytes**, SHA-256
+`bbafcf720f097f08a5effb1e162c535bed1e9fc4c23f5e82f2c1e8267421631f`.
+It embeds the same `f5ea6953…1bcf` model. ELF inspection confirms ARM32 EABI5,
+hard-float, static linkage without an interpreter and a non-executable stack.
+`wake_pilot` accepts this pin alongside the original build; its optional live
+callback validates detector events as they arrive, before the final cleanup report.
+These observations remain untrusted and do not authorize device actions. Final
+cleanup and unchanged Quasar checks remain mandatory; uncertain runs are not retried.
+Host protocol/synthetic checks do **not** establish ARM inference parity, room recall
+or a subsecond word-to-light response. The production `station_asr` source still
+uses Vosk for wake detection until the manual candidate check qualifies a replacement.
+
+An owner-run 60 s Mini 1 pilot completed with verified cleanup and unchanged Quasar:
+336 KiB peak detector RSS, 1,320 ms cumulative CPU, nine wake events and six red
+pulses. The other events arrived during a pulse or indicator cleanup/preparation;
+this is not a measured miss or false-accept rate. Detection-to-player acknowledgement
+was 382–455 ms. No acoustic word-end or camera timestamp was recorded, so the result
+does not establish a precisely measured acoustic latency. The owner separately
+reported that the visible ring activated within one second in this pilot.
+The subsequent indicator cache fix
+removes repeated pattern reads for unchanged verified state; its live effect remains
+to be checked manually.
 
 The next training recipe promotes exact wake phrases found in contextual negatives
 (for example “моя Маруся”) to positives. Inflections and genuine near misses remain

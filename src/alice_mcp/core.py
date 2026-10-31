@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from alice_mcp import capture_probe, network_probe
+from alice_mcp import asr_resources, capture_probe, network_probe
 
 MODELS = frozenset({
     "station-lite", "station-lite2", "station-mini", "station-mini2", "station-mini3",
@@ -78,6 +78,7 @@ I2C_TRACE_CHECKS = {
     }.items()
 }
 PROBES = {
+    "asr_resources": asr_resources.COMMAND,
     "network": network_probe.COMMAND,
     # Capture-coexistence metadata only: never opens PCM nodes or captures audio.
     "capture": capture_probe.COMMAND,
@@ -399,6 +400,18 @@ def parse_probe(probe: str, text: str) -> dict[str, Any]:
         except ValueError:
             raise SafetyError("Capture probe unavailable or incompatible") from None
     fields = _fields(text)
+    if probe == "asr_resources":
+        resources: dict[str, Any] = {k: _number(fields, k) for k in asr_resources.COUNTERS}
+        if (resources["mem_available"] > resources["mem_total"]
+            or resources["swap_free"] > resources["swap_total"]
+            or resources["overcommit"] > 2 or not 1 <= resources["cpu_count"] <= 256):
+            raise SafetyError("ASR resource metrics incompatible")
+        for key in asr_resources.FLAGS:
+            flag = _number(fields, key)
+            if flag not in {0, 1}:
+                raise SafetyError("ASR resource metrics incompatible")
+            resources[key] = bool(flag)
+        return resources
     if probe == "network":
         data = {key: _number(fields, key) for key in network_probe.COUNTERS}
         if (data["wifi_interfaces"] > 64
@@ -497,6 +510,11 @@ class Controller:
             raise SafetyError("Unknown probe")
         with self._probe_slots:
             station = self.station(station_id)
+            if probe == "asr_resources":
+                from alice_mcp.vqe_experiment import _ssh
+
+                # Explicit maintenance probe over pinned SSH, never a TLS failure fallback.
+                station = _ssh(station)
             if station.native_mcp:
                 from alice_mcp import native_transport
 
@@ -504,7 +522,8 @@ class Controller:
             if probe == "microphone":
                 raise SafetyError("Microphone metadata requires the native MCP agent")
             source = PROBES[probe]
-            command = (SSHInput("sh -s", source.encode()) if probe in {"network", "capture"}
+            command = (SSHInput("sh -s", source.encode())
+                       if probe in {"network", "capture", "asr_resources"}
                        else source)
             return {"evidence_class": "analytical", "data": parse_probe(
                 probe, self.runner(station, command),

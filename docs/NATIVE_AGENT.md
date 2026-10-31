@@ -78,11 +78,16 @@ Preserve other entries and SSH recovery settings. A native-only inventory may
 omit SSH fields. All existing trust/permission checks still apply to the selected
 transport. TLS errors, unsupported tools and invalid results fail closed.
 
-### Guarded W0 → combined upgrade (source-tested, not live-accepted)
+### Guarded upgrade from pinned resident baselines
 
-`agent_upgrade.py` is separate from bootstrap. The baseline is the **installed W0**
+`agent_upgrade.py` is separate from bootstrap. One baseline is the **installed W0**
 resident, SHA-256 `ec43eb7ada625616dc04c5c6f58ab619ac1ce758bcec5d5f7a92780c17303806`,
-not the pre-W0 install. The W0 ASR/TTS and existing PCM player must match their
+not the pre-W0 install. The first combined build
+`32f709fd80a9769f02bf44473719e403a8ce665234924be44270999e15f46f5e`
+is also accepted with its unchanged base config and `allowed_actions: "all"`.
+The calibrated build `19d233ad5dc29b3468d5be985d299e6c99428e13cf5eec9aac66365ab6d68ee3`
+additionally preserves a validated optional volume mapping.
+The W0 ASR/TTS and existing PCM player must match their
 source pins. The canonical four-file package contains the pinned combined agent,
 the **same** PCM player, migrated `config.json` and the reviewed startup template.
 No arbitrary baseline or artifact hash is accepted. The old startup may predate
@@ -95,8 +100,9 @@ or new-schema fields; the new policy is never used for the first startup.
 The active config changes to `allowed_actions: "all"` and
 `preauthorize_all_actions: true`. Optional `config_updates` contains only reviewed
 `volume`, registered `media` aliases/digests, and `led_map`. No mixer, calibration
-or media is invented: omit unavailable fields, especially Mini 1's unqualified
-mixer mapping. Media digests must already match host `controls.local_media`.
+or media is invented: omit fields without device evidence. Volume accepts a pinned
+amixer mapping or the reviewed typed ALSA mapping described below.
+Media digests must already match host `controls.local_media`.
 Volume remains bounded by host `max_volume`. LED calibration uses the shared host
 validator; the resident accepts it as state-bound metadata, not a second mapping
 of already-mapped PWM frames. Host `controls.led_map` stays unchanged.
@@ -188,7 +194,7 @@ plan = agent_upgrade.preview(controller, station_id, package)
 result = agent_upgrade.apply(controller, plan["plan_id"], plan["expected_sha256"], package)
 ```
 
-`old_config_bytes` must be the exact private W0 file, not reserialized JSON.
+`old_config_bytes` must be the exact private supported-baseline file, not reserialized JSON.
 `old_hashes` follows `BASE_NAMES`: `agent`, `tts-once`, `asr-once`, `config.json`,
 `certificate.pem`, `private-key.pem`, `credential`, `start`, `pcm-player`. These
 digests are rechecked on the station; they do not replace the pinned binary hashes.
@@ -219,19 +225,32 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 GOTOOLCHAIN=local \
   go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o "$AGENT" .
 ```
 
-Two clean builds in different source directories with independent empty Go caches
-produced identical 7,340,156-byte ARM32 ELF executables, SHA-256
-`32f709fd80a9769f02bf44473719e403a8ce665234924be44270999e15f46f5e`.
-`agent_provision.AGENT_SHA256` is the shared target pin; `agent_upgrade.BASE_AGENT_SHA256`
-is the distinct W0 baseline. Binaries remain outside the source/distribution tree.
+The current build is a 7,340,156-byte ARM32 ELF executable,
+SHA-256 `b5a1ac552d10664fdee1acc5086383d28c71431f950c2cd5c05e64239653b747`.
+`agent_provision.AGENT_SHA256` is the shared target pin; the upgrade module keeps
+separate pins for W0, the first combined and calibrated baselines. Binaries remain outside
+the source/distribution tree. The earlier combined build had two independent
+matching clean builds; that evidence does not attest to the new binary.
+
+The resident caches only the large firmware digest. Every use reopens its trusted
+path and checks inode/device, size, ownership, permissions, links, mtime and ctime;
+any change requires hashing again. Atime is excluded because reading updates it.
+An edit during hashing is rejected. Policy, credentials, boot, Quasar identity,
+preview expiry and one-use generation remain freshly checked. This assumes trusted
+kernel metadata and does not defend against a malicious root manipulating the filesystem.
 
 Host contract tests and disposable local-daemon shell tests cover guarded update,
 rollback, changed files/claims, active children, failed new startup, PID-file-move
 failure, post-STOP identity mismatch, Quasar metadata failure, TLS refusal and
 config-rename failure. The actual duplex wire tests assert that the old config
 is still active when the new executable reaches the host TLS barrier. These are
-synthetic tests, not real firmware qualification. **No combined upgrade has been
-installed or live-tested.**
+synthetic tests, not real firmware qualification.
+
+On 2026-10-30, owner-authorized maintenance installed the first combined build,
+then the calibrated and firmware-cache builds on one Mini 1. All returned `installed`, verified
+the native TLS route, preserved Quasar and the init hook, and cleaned staging.
+Reboot persistence was not exercised. Physical voice-route evidence is recorded
+in [VOICE_ARCHITECTURE.md](VOICE_ARCHITECTURE.md).
 
 Historical W0 evidence: a previous owner-operated update installed the W0 agent/player,
 preserved the existing init hook, TLS credentials/helpers and Quasar identity, and bound only host
@@ -662,18 +681,22 @@ The pinned personal ARM detector and physical-mute behavior remain unqualified.
 The optional resident volume mapping now also accepts `backend="alsa_ctl"`,
 `card`, `control`, `numid`, `raw_min`, `raw_max`, `channels` and `max_percent`.
 It requires reviewed playback-only integer metadata, 1–2 matching channels, unit
-step and the exact mapped name/ID/range. It opens only the corresponding ALSA
+step (including ALSA's unspecified zero) and the exact mapped name/ID/range. It opens only the corresponding ALSA
 control character node and uses typed ELEM_INFO/READ/WRITE ioctls. A fresh read
-precedes one write; failed write/readback is unknown and never retried. The existing
+precedes one write; verification compares exact raw values, so coarse integer
+levels need not equal the requested percentage. Conversion floors to an available
+level; the host accepts the reported percentage only within the request/ceiling.
+Failed write/readback is unknown and never retried. The existing
 amixer backend remains available. The read-only audio probe understands both.
 
 ABI source: Linux [sound/asound.h](https://github.com/torvalds/linux/blob/v6.12/include/uapi/sound/asound.h).
 A local C fixture checks the host kernel UAPI layout; the resident cross-builds for
-ARM EABI. Neither test identifies Mini 1's actual control or proves sound/Quasar
-volume synchronization. `last_user_volume` is not edited. No platformd volume IPC
-shape has been established, and no real ALSA ioctl was issued overnight. External
-Quasar mixer activity is not serialized by our lock; skip live volume until its
-mapping and state synchronization have been qualified through read-only research.
+ARM EABI. A separate read-only enumeration on the tested Mini 1 found `Master`,
+integer range 0–32, two equal channels, and step 0. Owner-authorized changes from
+raw 10 to 6 and 9 were read back as 19% and 28% for requests of 20% and 30%.
+This qualifies that mapping on the tested device, not other firmware or Quasar's
+saved-volume synchronization. `last_user_volume` is not edited. External Quasar
+mixer activity is not serialized by our lock.
 
 The resident defaults missing `preauthorize_all_actions` to true, matching the host
 and owner decision; explicit false remains effective. No private policy was edited.

@@ -205,7 +205,11 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
                 voice = {"mww_model": "ft", "mode": "either", **voice}
             pc_fields = {"client", "mww", "libvosk", "vosk_zip", "mww_model", "mode"}
             fields = {"source", "autostart"} | (pc_fields if source == "PC" else set())
-            _require(model == "station-mini" and source in ("PC", "station")
+            if source == "station_asr":
+                fields.add("asr_directory")
+                _require(_match(re.compile(r"/bkupgrade/data/opt/alice-local-asr-[a-f0-9]{12}"),
+                                voice.get("asr_directory")))
+            _require(model == "station-mini" and source in ("PC", "station", "station_asr")
                      and _keys(voice, fields, pc_fields | {"indicator"})
                      and type(voice["autostart"]) is bool)
             _require(all(_safe_path(voice[k]) for k in ("client", "mww", "libvosk", "vosk_zip")

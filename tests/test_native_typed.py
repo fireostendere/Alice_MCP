@@ -170,6 +170,14 @@ def test_native_volume_unknown_keeps_prior_value_for_owner_inspection(station: A
     assert result["outcome"] == "blocked" and "SENSITIVE_SENTINEL" not in str(result)
 
 
+def test_native_volume_accepts_resident_verified_rounding_down(station: Any) -> None:
+    controller, calls, replies, _, _ = station
+    replies["audio.volume"] = volume(31, 19)
+    result = run(controller, "audio.volume", {"percent": 20})
+    assert result["outcome"] == "applied" and result["percent"] == 19
+    assert len(dispatched(calls)) == 1
+
+
 def pcm(frames: int, rate: int = 16000) -> dict[str, Any]:
     return {"outcome": "applied", "playback_started": True, "playback_completed": True,
             "cleanup_verified": True, "frames_written": frames, "input_frames": frames,

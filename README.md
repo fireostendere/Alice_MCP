@@ -5,6 +5,8 @@ Yandex Stations. Development preview; not affiliated with Yandex or HackAlice.
 
 See [the source catalog](docs/SOURCES.md), [experimental controls](docs/CONTROLS.md),
 [security](SECURITY.md), and [contributing](CONTRIBUTING.md).
+For continuation in Claude or another development session, read the
+[implementation status, remaining work and handoff](docs/HANDOFF.md).
 Third-party wiki claims are not device tests.
 No private station data belongs in this repository.
 
@@ -135,7 +137,7 @@ and the [runtime control contract](docs/CONTROLS.md).
 | `search_knowledge`, `get_knowledge` | Original summaries, compatibility/risk metadata, source links |
 | `list_skills`, `read_skill` | Bundled skills and references; not arbitrary local file access |
 | `station_status` | Every station at once: online flag, read-only `health` metrics, writes and private-policy summary |
-| `station_probe` | Fixed `health`, `storage`, `services`, `audio`, `reboot`, `logs`, `led`, `i2c_trace`, `network` probes |
+| `station_probe` | Fixed `health`, `storage`, `services`, `audio`, `reboot`, `logs`, `led`, `i2c_trace`, `network` probes; [`asr_resources`](docs/ON_STATION_ASR.md) explicitly uses pinned SSH for passive memory/storage checks |
 | `preview_service_action` | Read state and create a five-minute one-use preview |
 | `apply_service_action` | Native human approval, fresh-state validation, Quasar `start`/`restart`, post-check |
 | `get_model_interfaces(model)` | Local source-linked LED/audio/GPIO facts and explicit unknowns; no station access |
@@ -145,10 +147,16 @@ and the [runtime control contract](docs/CONTROLS.md).
 | `run_station_action(station_id, action, parameters)` | Preview and apply in one call: fresh one-use preview, then private preauthorization or one native approval form |
 | `get_capture_status(station_id, capture_id)` | Read fresh capture readiness, bounded LED records or one approved ASR text; never starts capture |
 | `start_job`, `list_jobs`, `cancel_job` | Owned host timers, declarative presets and a bounded generated-tone siren; cancel by owned ID; lost when this process exits ([jobs](docs/JOBS.md)) |
-| `voice_listen_start`, `voice_listen_stop`, `voice_status`, `get_voice_events` | Mini 1 wake word «компьютер» heard on this PC; each spoken command becomes an untrusted event for the opencode `alice` agent; audio stays in RAM ([voice commands](docs/IO_CHANNEL.md#step-6-voice-commands-in-the-mcp-and-opencode)) |
+| `voice_listen_start`, `voice_listen_stop`, `voice_status`, `get_voice_events` | Mini 1 wake word «компьютер», optional [recognition on the station](docs/ON_STATION_ASR.md), untrusted voice commands for OpenCode Alice or Realtime; audio stays in RAM |
 
 With a private root `.env` containing `REAL_TIME_API_KEY`, voice commands instead
-use cloud STT → Responses → mini TTS. «Компьютер, давай поговорим» opens a
+use STT → an answer agent → mini TTS. With `voice.source="station_asr"`, Russian
+STT runs on the Mini 1 and only text leaves the speaker; the PC source uses cloud STT.
+Setting `ALICE_MCP_OPENCODE` to the
+absolute custom OpenCode V2 executable selects its `alice` agent with Luna fast,
+including web search and semantic conversation routing in the same answer request.
+Without it, the existing Responses route remains. «Компьютер, давай поговорим» or
+«Компьютер, давай попиздим» opens a
 `gpt-realtime-2.1` conversation; «компьютер, начни диктовку» uses
 `gpt-live-transcribe`. Wake detection stays local and lights the ring before the
 command ends. See [voice routes, setup and limits](docs/VOICE_ARCHITECTURE.md).

@@ -618,9 +618,10 @@ on the same station.
 
 Goal: after a heard command, Mini 1 shows Alice's own "I heard you" pulse, recoloured red,
 until the `alice` agent has answered. If the agent fails or runs out of time, the ring goes
-dark and the station says Alice's stock error phrase. Synthetic tests only
-(`tests/test_voice_indicator.py`, fake `led_util`, fake SSH, fake resident); not yet
-live-accepted.
+dark and the station says Alice's stock error phrase. Synthetic regressions use
+`tests/test_voice_indicator.py` with fake players, SSH and resident state. The
+[on-station ASR pilot](ON_STATION_ASR.md) records the subsequent Mini 1 camera and
+acoustic checks, including their generated-voice limits.
 
 **Pattern.** Owner decision (2026-10-30). The station's stock
 `/system/vendor/quasar/ledpatterns/alice_listening.led` is read once per listener. The
@@ -643,10 +644,16 @@ permission plus standing preauthorization.
 One SSH session per lit period:
 - It first stops any leftover player of ours. It refuses with `player_busy` if anyone
   else's `led_util` runs.
-- It writes the pattern to a 0700 tmpfs directory and starts one player.
+- It writes the pattern to a 0700 tmpfs directory. With a verified resident preview,
+  idle preparation starts one stock player blocked on a private FIFO; fresh activation
+  checks precede feeding its animation. An unactivated player expires after 240 seconds
+  or on disconnect, without an off-frame playback. Cold starts retain the full check.
 - It holds while the host keeps the session's stdin open. Closing stdin, a dropped session
   or the on-device deadline (`max_seconds`) ends the hold.
-- Stop: SIGINT (SIGTERM after 1 s if the background player ignores it). Then a one-frame
+- During an active prepared pulse a second stock player waits on the off-frame FIFO,
+  so completion does not depend on another cold `maind` launch.
+- Stop: SIGTERM, then KILL after 100 ms for a remaining owned player (background
+  children inherit ignored SIGINT). Then a one-frame
   `000000` ×6 `led_util` run, because the player keeps its last frame lit, also stopped.
   Then the temporary files are removed.
 - The helper reports `left_running`. An uncertain stop latches the indicator off until

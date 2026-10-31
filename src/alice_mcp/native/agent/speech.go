@@ -173,7 +173,7 @@ func (n *nativeRuntime) listen(seconds int, expected ...string) map[string]any {
 		return blocked("Fresh state-bound preview required")
 	}
 	c, stamp, err := n.policy()
-	if err != nil || !c.permits("speech.listen") || os.Geteuid() != 0 || !quasarRunning() || hashPath(firmwarePath) != c.FirmwareSHA256 {
+	if err != nil || !c.permits("speech.listen") || os.Geteuid() != 0 || !quasarRunning() || n.firmware.read(firmwarePath) != c.FirmwareSHA256 {
 		return blocked("ASR policy, firmware or running Quasar unavailable")
 	}
 	f, err := trustedFile(c.ASRClient, false)

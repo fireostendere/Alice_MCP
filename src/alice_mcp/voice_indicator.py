@@ -7,10 +7,10 @@ curve; red by default) with the stock `led_util` player, until the «Голос�
 time, the ring goes dark first and the station then says Alice's stock error phrase from
 a hash-pinned host WAV through the resident's local-PCM path (no synthesis).
 
-The installed resident has no LED action, so the player runs over the explicit pinned SSH
-entry: a dedicated voice backend, never a fallback for other native actions. Exactly one
+The resident LED show cannot hold this stock animation, so the player uses explicit pinned
+SSH. Its idle preparation is bound to the resident's live state. Exactly one
 player at a time; the SSH session's open stdin is the hold. Its close, a dropped session
-or the on-device deadline stops it: SIGINT (SIGTERM if ignored), then one dark frame,
+or the on-device deadline stops it: SIGTERM (KILL after 100 ms), then one dark frame,
 because led_util keeps its last frame lit. Setup: docs/IO_CHANNEL.md step 7.
 """
 
@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import secrets
+import select
 import shlex
 import stat
 import subprocess
@@ -62,16 +63,22 @@ exec 2>/dev/null
 mode=$1; seconds=$2; firmware=$3
 blocked() { printf 'outcome=blocked\nerror_code=%s\n' "$1"; exit 0; }
 [ "$(id -u)" = "$OWNER_UID" ] || blocked not_owner
-case "$mode" in read|play|cleanup) ;; *) blocked invalid_request;; esac
+case "$mode" in
+read|read_verified|play|play_verified|prepare_verified|cleanup) ;; *) blocked invalid_request;; esac
 case "$seconds" in [1-9]|[1-8][0-9]|90) ;; *) blocked invalid_request;; esac
 case "$firmware" in *[!0-9a-f]*) blocked invalid_request;; esac
 [ "${#firmware}" = 64 ] || blocked invalid_request
-for c in awk cat cut grep head id kill ls mkdir pidof rm rmdir sha256sum sleep tr; do
+for c in awk cat cut grep head id kill ls mkdir mkfifo pidof rm rmdir sha256sum sleep tr; do
     command -v "$c" >/dev/null 2>&1 || blocked runtime_tools_missing
 done
 Q=/system/vendor/quasar
-[ -f "$Q/maind" ] && [ "$(sha256sum "$Q/maind" | cut -d ' ' -f 1)" = "$firmware" ] ||
-    blocked firmware_mismatch
+# play_verified is internal: a consumed host preview just rechecked the resident's
+# firmware/boot/Quasar/policy stamp, whose hash cache checks nanosecond file metadata.
+if [ "$mode" != play_verified ] && [ "$mode" != prepare_verified ] &&
+        [ "$mode" != read_verified ]; then
+    [ -f "$Q/maind" ] && [ "$(sha256sum "$Q/maind" | cut -d ' ' -f 1)" = "$firmware" ] ||
+        blocked firmware_mismatch
+fi
 PLAYER=$Q/led_util
 [ -x "$PLAYER" ] || blocked led_util_missing
 TMPFS=
@@ -81,8 +88,10 @@ for t in /tmp /run /dev/shm /var/run; do
 done
 [ -n "$TMPFS" ] && [ -d "$TMPFS" ] && [ ! -L "$TMPFS" ] || blocked tmpfs_unavailable
 DIR=$TMPFS/alice-mcp-indicator
+darken=1
 ours() {
     for p in $(pidof led_util); do
+        [ "$p" != "${preserve:-}" ] || continue
         tr '\000' ' ' < "/proc/$p/cmdline" | grep -qF "$DIR/" && echo "$p"
     done
 }
@@ -92,41 +101,63 @@ private_dir() {
     [ "$1" = drwx------ ] && [ "$3" = "$(id -u)" ]
 }
 quit() {
-    # SIGINT first; a player that ignores it (started in the background) gets SIGTERM.
+    # Background children inherit ignored SIGINT; TERM stops the stock player promptly.
     pids=$(ours)
     [ -n "$pids" ] || return 0
-    kill -INT $pids
+    kill -TERM $pids
     i=0
     while [ -n "$(ours)" ] && [ "$i" -lt 30 ]; do
-        [ "$i" != 10 ] || kill -TERM $(ours)
         sleep 0.1; i=$((i + 1))
+        if [ "$i" = 1 ]; then
+            pids=$(ours)
+            [ -z "$pids" ] || kill -KILL $pids
+        fi
     done
     [ -z "$(ours)" ]
 }
 stop() {
     # Stop our players, then one dark frame (led_util keeps its last frame lit).
     if [ -n "$(ours)" ]; then
+        preserve=${dark_player:-}
         quit || return 1
+        preserve=
         private_dir || return 1
-        printf '%s\n' '000000 000000 000000 000000 000000 000000 100' > "$DIR/off.led" ||
-            return 1
-        "$PLAYER" "$DIR/off.led" </dev/null >/dev/null 2>&1 &
-        sleep 1
-        quit || return 1
+        if [ "$darken" = 1 ]; then
+            if [ -n "${dark_player:-}" ]; then
+                kill -0 "$dark_player" 2>/dev/null || return 1
+                (
+                    printf '%s\n' '000000 000000 000000 000000 000000 000000 100'
+                ) > "$DIR/off.led" &
+                feeder=$!
+                (sleep 2; kill -TERM "$feeder" 2>/dev/null) &
+                writer_guard=$!
+                wait "$feeder" || { kill "$writer_guard"; return 1; }
+                feeder=
+                kill "$writer_guard"
+            else
+                printf '%s\n' '000000 000000 000000 000000 000000 000000 100' > "$DIR/off.led" ||
+                    return 1
+                "$PLAYER" "$DIR/off.led" </dev/null >/dev/null 2>&1 &
+            fi
+            sleep 1
+            quit || return 1
+        fi
     fi
     if [ -e "$DIR" ] || [ -L "$DIR" ]; then
-        private_dir && rm -f "$DIR/indicator.led" "$DIR/off.led" && rmdir "$DIR" || return 1
+        private_dir && rm -f "$DIR/indicator.led" "$DIR/off.led" "$DIR/wait.led" &&
+            rmdir "$DIR" || return 1
     fi
     [ -z "$(ours)" ]
 }
 finish() {
     trap - 0 HUP INT TERM
     [ -z "${watchdog:-}" ] || kill "$watchdog"
+    [ -z "${feeder:-}" ] || kill "$feeder" 2>/dev/null
     if stop; then printf 'outcome=applied\nleft_running=0\n'
     else printf 'outcome=unknown\nleft_running=1\n'; fi
 }
 case "$mode" in
-read)
+read|read_verified)
     P=$Q/ledpatterns/alice_listening.led
     [ -f "$P" ] && [ ! -L "$P" ] || blocked pattern_missing
     printf 'outcome=ready\n'
@@ -136,7 +167,7 @@ cleanup)
     if stop; then left=0; else left=1; fi
     printf 'outcome=cleanup\nleft_running=%s\n' "$left"
     ;;
-play)
+play|play_verified|prepare_verified)
     stop || blocked stale_player_left
     [ -z "$(pidof led_util)" ] || blocked player_busy
     mkdir "$DIR" && private_dir || blocked temporary_path_busy
@@ -145,7 +176,42 @@ __PATTERN__
 ALICE_LED_PATTERN
     trap finish 0
     trap 'exit 0' HUP INT TERM
-    "$PLAYER" "$DIR/indicator.led" </dev/null >/dev/null 2>&1 &
+    if [ "$mode" = prepare_verified ]; then
+        darken=0
+        mkfifo "$DIR/wait.led" || blocked temporary_path_busy
+        "$PLAYER" "$DIR/wait.led" </dev/null >/dev/null 2>&1 &
+        player=$!
+        main=$$
+        (sleep 240; kill -TERM "$main") >/dev/null 2>&1 &
+        watchdog=$!
+        printf 'outcome=prepared\n'
+        while read -r activation; do
+            [ "$activation" = renew ] || break
+            kill "$watchdog"
+            (sleep 240; kill -TERM "$main") >/dev/null 2>&1 &
+            watchdog=$!
+            printf 'outcome=prepared\n'
+        done
+        [ "${activation:-}" = play ] || exit 0
+        kill -0 "$player" 2>/dev/null || exit 0
+        kill "$watchdog"
+        (sleep 10; kill -TERM "$main") >/dev/null 2>&1 &
+        watchdog=$!
+        darken=1
+        cat "$DIR/indicator.led" > "$DIR/wait.led" &
+        feeder=$!
+        wait "$feeder" || exit 0
+        feeder=
+        kill "$watchdog"
+    else
+        "$PLAYER" "$DIR/indicator.led" </dev/null >/dev/null 2>&1 &
+    fi
+    printf 'outcome=started\n'
+    if [ "$mode" = prepare_verified ]; then
+        mkfifo "$DIR/off.led" || exit 0
+        "$PLAYER" "$DIR/off.led" </dev/null >/dev/null 2>&1 &
+        dark_player=$!
+    fi
     # Held while the host keeps stdin open: its close, a dropped session or the
     # on-device deadline ends the hold. Children never keep the output open.
     exec 7<&0
@@ -219,9 +285,9 @@ def _result(text: str) -> dict[str, Any]:
 Runner = Callable[[Station, "str | SSHInput"], str]
 
 
-def read_pattern(runner: Runner, station: Station) -> str:
+def read_pattern(runner: Runner, station: Station, *, verified: bool = False) -> str:
     """The stock listening pattern, format-checked."""
-    raw = runner(station, _command(station, "read"))
+    raw = runner(station, _command(station, "read_verified" if verified else "read"))
     head, _, text = raw.partition("\n")
     if head != "outcome=ready":
         raise SafetyError(_result(raw).get("error_code", "pattern_unavailable"))
@@ -269,6 +335,7 @@ class Hold:
 
     def __init__(self, process: subprocess.Popen[bytes], data: bytes = b"") -> None:
         self.process = process
+        self.prefix = b""
         assert process.stdin is not None
         if data:
             process.stdin.write(data)  # The helper source; far below the pipe buffer.
@@ -277,11 +344,44 @@ class Hold:
     def alive(self) -> bool:
         return self.process.poll() is None
 
+    def wait_started(self, timeout: float = 10, *, prepared: bool = False) -> bool:
+        """Wait for the remote player's launch, not just the local SSH process."""
+        assert self.process.stdout is not None
+        fd = self.process.stdout.fileno()
+        deadline = time.monotonic() + timeout
+        while len(self.prefix) < 256:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+                return False
+            byte = os.read(fd, 1)
+            if not byte:
+                return False
+            self.prefix += byte
+            if byte == b"\n":
+                started = self.prefix == (b"outcome=prepared\n" if prepared
+                                          else b"outcome=started\n")
+                if started:
+                    self.prefix = b""
+                return started
+        return False
+
+    def start(self) -> bool:
+        assert self.process.stdin is not None
+        self.process.stdin.write(b"play\n")
+        self.process.stdin.flush()
+        return self.wait_started()
+
+    def renew(self) -> bool:
+        assert self.process.stdin is not None
+        self.process.stdin.write(b"renew\n")
+        self.process.stdin.flush()
+        return self.wait_started(prepared=True)
+
     def release(self, timeout: float = 20) -> dict[str, Any]:
         """Close stdin; the helper stops the player and darkens the ring."""
         try:
             out, _ = self.process.communicate(timeout=timeout)
-            return _result(out.decode("utf-8", "replace"))
+            return _result((self.prefix + out).decode("utf-8", "replace"))
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait(timeout=5)
@@ -396,6 +496,7 @@ class Indicator:
     def __init__(self, controller: Controller, station_id: str, *,
                  spawn: Callable[[Station, SSHInput], Any] = _spawn,
                  state_path: Path | None = None,
+                 defer_preparation: bool = False,
                  play: Callable[[Controller, Station, bytes], dict[str, Any]] = (
                      native_transport.play_pcm)) -> None:
         self.controller, self.station_id, self.spawn, self.play = (
@@ -407,7 +508,14 @@ class Indicator:
         self.managed = False
         self.completion: str | None = None
         self.latched = self.used = False
+        self.prepare_enabled = not defer_preparation
         self.pattern: str | None = None
+        self.pattern_cache: tuple[Station, str, str, str] | None = None
+        self.warm: Hold | None = None
+        self.warm_binding: tuple[Station, str, str] | None = None
+        self.prepared: tuple[str, str] | None = None
+        self.started_at: float | None = None
+        self.startup_ms: int | None = None
         self.sound: str | None = None
         self.clean: bool | None = None
         self.state: str = "idle"
@@ -438,12 +546,17 @@ class Indicator:
 
     def status(self) -> dict[str, Any]:
         return {"backend": self.backend, "state": self.state, "reason": self.reason,
-                "error_sound": self.sound, "clean": self.clean}
+                "error_sound": self.sound, "clean": self.clean,
+                "prepared": self.prepared is not None, "startup_ms": self.startup_ms}
 
     def wake(self, event_id: int, *, managed: bool = False) -> None:
         self._configure()
         with self.lock:
             self.wake_id, self.wake_at = event_id, time.time()
+            self.started_at = (time.monotonic() if self.state == "lit"
+                               or self.backend != "ssh_led" else None)
+            self.startup_ms = None
+            self.sound = None
             self.managed, self.completion = managed, None
         self.kick.set()
 
@@ -452,6 +565,10 @@ class Indicator:
         with self.lock:
             if self.managed and event_id == self.wake_id:
                 self.completion = "error" if error else "idle"
+        self.kick.set()
+
+    def listen_ready(self) -> None:
+        self.prepare_enabled = True
         self.kick.set()
 
     def close(self, timeout: float = 30) -> None:
@@ -489,18 +606,115 @@ class Indicator:
             return "busy" if status == "busy" else "idle"
         return "busy" if now - wake_at < self.pickup_s else "idle"
 
-    def _start(self) -> Hold | None:
+    def _prepare(self) -> None:
+        """Prepare a FIFO-blocked stock player; activation still needs a fresh preview."""
+        self.prepared = None
+        if (not self.prepare_enabled or self.latched or self.stopping.is_set()
+                or self._configure()["backend"] != "ssh_led"):
+            return
+        try:
+            station = self.controller.station(self.station_id)
+            if not station.native_mcp:
+                return
+            native_transport._permission(self.controller, station, "led.show")
+            ssh = controls._station(self.controller, self.station_id, "led.show", True)
+            controls._check_permission(self.controller, ssh, "led.show")
+            state = native_transport._state(self.controller, station, "led.show")
+            binding = (station, ssh.trust_sha256, state)
+            cached = self.pattern_cache
+            pattern = (cached[3] if cached is not None and cached[:3] == binding
+                       else read_pattern(self.controller.runner, ssh, verified=True))
+            if (native_transport._state(self.controller, station, "led.show") != state
+                    or self.controller.station(self.station_id) != station
+                    or controls._station(
+                        self.controller, self.station_id, "led.show", True) != ssh):
+                return
+            self.pattern_cache = (*binding, pattern)
+            digest = hashlib.sha256(
+                repr((station, ssh, state, pattern, SCRIPT)).encode()).hexdigest()
+            # Fresh previews rebind live state; unchanged assets need no cold process restart.
+            warm_binding = (station, ssh.trust_sha256, pattern)
+            if self.warm is not None and (not self.warm.alive()
+                                          or self.warm_binding != warm_binding):
+                old, self.warm = self.warm, None
+                if not self._finish(old):
+                    return
+            identifier = self.controller.store_plan(station, "voice.indicator.prepare", digest,
+                                                    remote_sha256=state)
+            plan = self.controller.take_plan(identifier, digest)
+            native_transport._permission(self.controller, station, "led.show")
+            if (self.controller.clock() >= plan.expires
+                    or self.controller.station(self.station_id) != station
+                    or controls._station(
+                        self.controller, self.station_id, "led.show", True) != ssh):
+                return
+            hold = self.warm
+            try:
+                if hold is None:
+                    command = _command(ssh, "prepare_verified", self.max_s,
+                                       recolor(pattern, self._config().get("color", "red")))
+                    hold = Hold(self.spawn(ssh, command), command.data)
+                    self.used = True
+                    ready = hold.wait_started(prepared=True)
+                else:
+                    ready = hold.renew()
+                if not ready:
+                    self.warm = None
+                    self._finish(hold)
+                    return
+            except OSError:
+                self.warm = None
+                if hold is not None:
+                    self._finish(hold)
+                self.latched = True
+                self._set("unavailable", "unknown_inspect_locally_do_not_retry")
+                return
+            self.warm, self.warm_binding = hold, warm_binding
+            identifier = self.controller.store_plan(
+                station, "voice.indicator", digest,
+                request={"pattern": pattern, "ssh_trust": ssh.trust_sha256},
+                remote_sha256=state)
+            self.prepared = identifier, digest
+        except (SafetyError, ValueError):
+            pass  # Cold starts retain the full SSH firmware check.
+
+    def _start(self, *, refresh: bool = True) -> Hold | None:
         try:
             station = self.controller.station(self.station_id)
             if not (self.controller.writes and station.preauthorize_all_actions):
                 raise SafetyError("Indicator needs writes and standing preauthorization")
             ssh = controls._station(self.controller, self.station_id, "led.show", True)
             controls._check_permission(self.controller, ssh, "led.show")
+            prepared, self.prepared = self.prepared, None
+            verified = False
+            if prepared is not None:
+                try:
+                    plan = self.controller.take_plan(*prepared)
+                    verified = (station == plan.station
+                        and ssh.trust_sha256 == plan.request["ssh_trust"]
+                        and native_transport._state(
+                        self.controller, station, "led.show") == plan.remote_sha256
+                        and self.controller.clock() < plan.expires
+                        and self.controller.station(self.station_id) == station)
+                    if verified:
+                        self.pattern = plan.request["pattern"]
+                except SafetyError:
+                    pass
+            if not verified and station.native_mcp and refresh:
+                # Resident preview expiry can change its stamp while the host plan is fresh.
+                self._prepare()
+                if self.latched:
+                    return None
+                if self.prepared is not None:
+                    return self._start(refresh=False)
             if self.pattern is None:
                 self.pattern = read_pattern(self.controller.runner, ssh)
             config = self._config()
             command = play_command(ssh, recolor(self.pattern, config.get("color", "red")),
                                    self.max_s)
+            if verified:
+                command = _command(ssh, "play_verified", self.max_s,
+                                   recolor(self.pattern, config.get("color", "red")))
         except SafetyError as error:
             self._set("unavailable", str(error) if str(error) in ERRORS | {
                 "pattern_unavailable"} else "blocked_by_policy_or_station")
@@ -510,13 +724,29 @@ class Indicator:
             return None
         if self._verdict() != "busy":  # The agent finished while the station was checked.
             return None
+        hold, self.warm = self.warm, None
         try:
-            hold = Hold(self.spawn(ssh, command), command.data)
+            if hold is not None and not verified:
+                if not self._finish(hold):
+                    return None
+                hold = None
+            warmed = hold is not None
+            if hold is None:
+                hold = Hold(self.spawn(ssh, command), command.data)
         except OSError:
             self.latched = True
             self._set("unavailable", "unknown_inspect_locally_do_not_retry")
             return None
         self.used = True
+        try:
+            started = hold.start() if warmed else hold.wait_started()
+        except OSError:
+            started = False
+        if not started:
+            self._finish(hold)
+            return None
+        self.started_at = time.monotonic()
+        self.startup_ms = round((time.time() - self.wake_at) * 1000)
         self._set("lit")
         return hold
 
@@ -555,7 +785,9 @@ class Indicator:
 
     def _loop(self) -> None:
         while not self.stopping.is_set():
-            self.kick.wait()
+            self._prepare()
+            if not self.kick.wait(220):  # Renew before the prepared player's 240 s deadline.
+                continue
             self.kick.clear()
             if self.stopping.is_set() or self._configure()["backend"] != "ssh_led":
                 continue
@@ -565,7 +797,8 @@ class Indicator:
                 if hold is not None and not hold.alive():
                     # On-device deadline while a newer command still runs: play again.
                     hold = self._start() if self._finish(hold) and not self.latched else None
-                self.stopping.wait(POLL_S)
+                self.kick.wait(POLL_S)
+                self.kick.clear()
                 verdict = self._verdict()
             with self.lock:
                 self.done_id = self.wake_id
@@ -573,3 +806,6 @@ class Indicator:
                 self._finish(hold)
             if verdict == "error" and not self.stopping.is_set():
                 self._error_sound()
+        if self.warm is not None:
+            hold, self.warm = self.warm, None
+            self._finish(hold)

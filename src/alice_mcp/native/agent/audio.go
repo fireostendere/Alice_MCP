@@ -272,7 +272,7 @@ func (n *nativeRuntime) setVolume(r volumeRequest, expected ...string) map[strin
 	if err != nil || !c.permits("audio.volume") || !validVolume(r) {
 		return blocked("Volume is not preauthorized by the resident policy")
 	}
-	if os.Geteuid() != 0 || !quasarRunning() || hashPath(firmwarePath) != c.FirmwareSHA256 {
+	if os.Geteuid() != 0 || !quasarRunning() || n.firmware.read(firmwarePath) != c.FirmwareSHA256 {
 		return blocked("Reviewed firmware or running Quasar unavailable")
 	}
 	if c.Volume != nil && c.Volume.Backend == "alsa_ctl" {
@@ -369,7 +369,7 @@ func (n *nativeRuntime) audioProbe() map[string]any {
 		if c.Volume.Backend == "alsa_ctl" {
 			if control, err := openALSAControl(c.Volume); err == nil {
 				if value, ok := readALSAControl(c.Volume, alsaTransactions(control)); ok {
-					data["volume_control"], data["volume_percent"] = "ready", value
+					data["volume_control"], data["volume_percent"] = "ready", alsaPercent(c.Volume, value)
 				}
 				control.Close()
 			}

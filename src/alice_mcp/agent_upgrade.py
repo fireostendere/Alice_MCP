@@ -38,6 +38,8 @@ from alice_mcp.speech_capture import TTS_CLIENT_SHA256
 from alice_mcp.vqe_experiment import _ssh
 
 BASE_AGENT_SHA256 = "ec43eb7ada625616dc04c5c6f58ab619ac1ce758bcec5d5f7a92780c17303806"
+COMBINED_BASE_SHA256 = "32f709fd80a9769f02bf44473719e403a8ce665234924be44270999e15f46f5e"
+CALIBRATED_BASE_SHA256 = "19d233ad5dc29b3468d5be985d299e6c99428e13cf5eec9aac66365ab6d68ee3"
 UPGRADE_NAMES = ("agent", "pcm-player", "config.json", "start")
 BASE_NAMES = (*agent_provision.NAMES, "pcm-player")
 CONFIG_FIELDS = frozenset({"volume", "media", "led_map"})
@@ -67,7 +69,8 @@ def _configuration(station: Station, old: bytes, hashes: tuple[str, ...],
     if (station.model != "station-mini" or type(old) is not bytes or len(old) > 65536
         or type(hashes) is not tuple or len(hashes) != len(BASE_NAMES)
         or not all(_hex(h) for h in hashes)
-        or hashes[:3] != (BASE_AGENT_SHA256, TTS_CLIENT_SHA256, ASR_CLIENT_SHA256)
+        or hashes[0] not in {BASE_AGENT_SHA256, COMBINED_BASE_SHA256, CALIBRATED_BASE_SHA256}
+        or hashes[1:3] != (TTS_CLIENT_SHA256, ASR_CLIENT_SHA256)
         or hashes[3] != _sha(old) or hashes[-1] != pcm_pilot.PLAYER_SHA256):
         raise ValueError
     # The reviewed existing startup may predate this source template. Its live
@@ -79,16 +82,21 @@ def _configuration(station: Station, old: bytes, hashes: tuple[str, ...],
                 "firmware_sha256": station.controls["firmware_sha256"],
                 "tts_client": root + "/tts-once", "asr_client": root + "/asr-once",
                 "preauthorize_all_actions": True}
-    # W0 requires its legacy list. "all" is only introduced after the TLS barrier.
     actions = value.get("allowed_actions") if type(value) is dict else None
+    optional = {"volume"} if hashes[0] == CALIBRATED_BASE_SHA256 else set()
+    if optional:
+        _updates(station, {k: value[k] for k in optional if k in value})
+    valid_actions = (actions == rt.ALL if hashes[0] != BASE_AGENT_SHA256 else
+                     type(actions) is list
+                     and all(type(a) is str and a in {"speech.say", "speech.listen"}
+                             for a in actions)
+                     and len(set(actions)) == len(actions))
     if (type(value) is not dict
-        or set(value) - {"allowed_actions"} != set(expected) | {"listen", "local_pcm"}
+        or set(value) - {"allowed_actions"} - optional != set(expected) | {"listen", "local_pcm"}
         or any(value[k] != v for k, v in expected.items())
         or not _hex(value["firmware_sha256"])
         or value["preauthorize_all_actions"] is not True
-        or type(actions) is not list
-        or any(type(a) is not str or a not in {"speech.say", "speech.listen"} for a in actions)
-        or len(set(actions)) != len(actions)
+        or not valid_actions
         or not rt.allows(value, "speech.say")
         or type(value["listen"]) is not str):
         raise ValueError
@@ -112,8 +120,18 @@ def _updates(station: Station, fields: dict[str, Any]) -> dict[str, Any]:
     result = dict(fields)
     if "volume" in fields:
         v = fields["volume"]
-        if (not rt._keys(v, {"amixer", "amixer_sha256", "card", "control", "max_percent"})
-            or not rt._safe_path(v["amixer"]) or not _hex(v["amixer_sha256"])
+        alsa = type(v) is dict and v.get("backend") == "alsa_ctl"
+        valid_backend = (
+            rt._keys(v, {"backend", "card", "control", "max_percent", "numid", "raw_min",
+                         "raw_max", "channels"})
+            and rt._integer(v["numid"], 1, 65535)
+            and rt._integer(v["raw_min"], -(1 << 24), 1 << 24)
+            and rt._integer(v["raw_max"], v["raw_min"] + 1, v["raw_min"] + (1 << 24))
+            and rt._integer(v["channels"], 1, 2)
+            if alsa else
+            rt._keys(v, {"amixer", "amixer_sha256", "card", "control", "max_percent"})
+            and rt._safe_path(v["amixer"]) and _hex(v["amixer_sha256"]))
+        if (not valid_backend
             or not rt._integer(v["card"], 0, 7)
             or not rt._integer(v["max_percent"], 0, station.controls.get("max_volume", 30))
             or type(v["control"]) is not str

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -122,7 +123,7 @@ func TestPCMRequestIsTypedOnceAndNeverRoutedToCloud(t *testing.T) {
 	s := testServer(t, &calls)
 	audio := syntheticWAV()
 	sum := sha256.Sum256(audio)
-	s.pcm = func(p pcmPayload, expected ...string) map[string]any {
+	s.pcm = func(ctx context.Context, p pcmPayload, expected ...string) map[string]any {
 		pcmCalls++
 		if p.SHA256 != hex.EncodeToString(sum[:]) {
 			t.Fatal("PCM payload changed")
@@ -136,6 +137,27 @@ func TestPCMRequestIsTypedOnceAndNeverRoutedToCloud(t *testing.T) {
 	w := request(t, s, string(body), testToken)
 	if w.Code != 200 || pcmCalls != 1 || calls != 0 || !strings.Contains(w.Body.String(), `"tts_backend":"local_pcm"`) {
 		t.Fatal("local PCM was lost, repeated or routed to cloud")
+	}
+}
+
+func TestPCMReceivesRequestCancellation(t *testing.T) {
+	calls := 0
+	s := testServer(t, &calls)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	seen := false
+	s.pcm = func(request context.Context, p pcmPayload, expected ...string) map[string]any {
+		seen = request.Err() == context.Canceled
+		return map[string]any{"outcome": "unknown"}
+	}
+	wav := syntheticWAV()
+	sum := sha256.Sum256(wav)
+	args, _ := json.Marshal(map[string]any{"station_id": "desk", "action": "speech.say",
+		"expected_state_sha256": testToken, "parameters": pcmPayload{
+			WAV: base64.StdEncoding.EncodeToString(wav), SHA256: hex.EncodeToString(sum[:])}})
+	_, ok := s.tool(ctx, "run_station_action", args)
+	if !ok || !seen || calls != 0 {
+		t.Fatal("PCM did not receive cancellation or reached the cloud route")
 	}
 }
 

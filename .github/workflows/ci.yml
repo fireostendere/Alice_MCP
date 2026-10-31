@@ -29,11 +29,11 @@ jobs:
         with:
           node-version: "20"
       - name: OpenCode integration tests
-        run: node --test integrations/opencode/alice-voice/lib.test.js
+        run: node --test integrations/opencode/*/*.test.js
       - name: Lint
         run: python -m ruff check --no-cache src tests scripts
       - name: Types
-        run: python -m mypy --no-incremental src/alice_mcp
+        run: python -m mypy --no-incremental src/alice_mcp scripts/agent_sessions.py
       - name: MCP contract snapshot
         run: PYTHONPATH=src python scripts/snapshot_tools.py --check
       - name: Publication source check

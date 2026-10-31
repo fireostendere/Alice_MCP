@@ -116,3 +116,38 @@ func TestALSAControlMetadataMismatchBlocksBeforeWrite(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestALSAControlCoarseIntegerStepsAndUnspecifiedStep(t *testing.T) {
+	for _, step := range []int64{0, 1, 2, -1} {
+		v := &volumeConfig{Backend: "alsa_ctl", Control: "Master", NumID: 7, RawMax: 32, Channels: 2, MaxPercent: 30}
+		current, writes := int64(10), 0
+		tx := func(request uintptr, b []byte) error {
+			switch request & 255 {
+			case 0x11:
+				binary.LittleEndian.PutUint32(b[4:], 2)
+				copy(b[16:60], v.Control)
+				binary.LittleEndian.PutUint32(b[64:], 2)
+				binary.LittleEndian.PutUint32(b[68:], 3)
+				binary.LittleEndian.PutUint32(b[72:], 2)
+				putALSALong(b[80+alsaWord:], 32)
+				putALSALong(b[80+2*alsaWord:], step)
+			case 0x12:
+				putALSALong(b[72:], current)
+				putALSALong(b[72+alsaWord:], current)
+			case 0x13:
+				writes++
+				current = alsaLong(b[72:])
+			}
+			return nil
+		}
+		percent := 20
+		got := changeALSAControl(v, volumeRequest{Percent: &percent}, tx)
+		if step == 0 || step == 1 {
+			if got["outcome"] != "applied" || got["percent"] != 19 || current != 6 || writes != 1 {
+				t.Fatalf("step %d: coarse control: %v, writes %d", step, got, writes)
+			}
+		} else if got["outcome"] != "blocked" || writes != 0 {
+			t.Fatal("unsupported step reached write", got)
+		}
+	}
+}

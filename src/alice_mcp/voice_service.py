@@ -21,8 +21,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from alice_mcp import controls, native_transport, station_wake
+from alice_mcp import controls, native_transport, station_asr, station_wake
 from alice_mcp import io_channel_pilot as iop
+from alice_mcp import opencode_voice as ov
 from alice_mcp import realtime_voice as rv
 from alice_mcp import voice_indicator as vi
 from alice_mcp import wake_listen as wl
@@ -34,7 +35,8 @@ WORD = "компьютер"
 FILE_LIMIT = 256 * 1024  # Rotated to voice-events.jsonl.1 past this size.
 STOP_S = 45.0  # Chunk stop (<= 10 s each) plus verified station cleanup over SSH.
 RESULT_KEYS = ("outcome", "reason", "error_code", "cleanup_verified", "quasar_running",
-               "quasar_unchanged", "stale_reclaimed", "audio_s")
+               "quasar_unchanged", "stale_reclaimed", "audio_s", "decoder_exit", "wake_exit",
+               "memory_low_kib")
 
 
 def events_path() -> Path:
@@ -101,6 +103,11 @@ class VoiceService:
         self.utterances = 0
         self.indicator: Any = None
         self.realtime: rv.RealtimeTurn | None = None
+        self._local_pending_until = 0.0
+        self._local_keyword_seen = False
+        self._station_fast_wake = False
+        self._station_wake_audio_ms = 0
+        self._station_activity_audio_ms = 0
 
     def _record(self, record: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
         with self.lock:
@@ -130,19 +137,25 @@ class VoiceService:
         iop._permitted(self.controller, station)
         if voice.get("source") == "station" and not station.native_mcp:
             raise SafetyError("Station wake source requires the resident TLS transport")
-        key = rv.api_key() if voice.get("source", "PC") == "PC" else None
+        key = rv.api_key() if voice.get("source", "PC") in {"PC", "station_asr"} else None
         with self.lock:
             if self.state != "stopped" or self.thread is not None and self.thread.is_alive():
                 raise SafetyError("Voice listener already running; stop it first")
             self.stop_event = threading.Event()
             self.station, self.live, self.last_error, self.result = station.id, {}, None, None
             self.source = voice.get("source", "PC")
-            self.indicator = vi.Indicator(self.controller, station.id)
+            self.indicator = vi.Indicator(self.controller, station.id,
+                                          defer_preparation=self.source == "station_asr")
+            executable = os.environ.get("ALICE_MCP_OPENCODE")
+            agent = ov.Agent(executable, station.id, Path.cwd()) if executable and key else None
             self.realtime = rv.RealtimeTurn(
                 key, self.indicator,
                 lambda audio: native_transport.play_pcm(
-                    self.controller, self.controller.station(station.id), audio),
+                    self.controller, self.controller.station(station.id), audio,
+                    cancel=self.realtime.cancel if self.realtime else None),
                 action=self._action,
+                answer=agent.answer if agent else None,
+                local_transcripts=self.source == "station_asr",
                 emit=lambda event: self._record({**event, "kind": "dictation",
                                                   "station": station.id, "trusted": False},
                                                  persist=False)) if key else None
@@ -155,6 +168,20 @@ class VoiceService:
 
     def _run(self, station_id: str, voice: dict[str, Any], stop: threading.Event) -> None:
         try:
+            if voice.get("source") == "station_asr":
+                while not stop.is_set():
+                    summary = station_asr.listen(self.controller, station_id, self._station_event,
+                                                 stop=stop, live=self.live,
+                                                 interrupt_only=lambda: bool(self.realtime
+                                                     and self.realtime.active
+                                                     and self.realtime.state in {"reasoning",
+                                                         "responding", "synthesizing", "speaking"}))
+                    self.result = {k: summary[k] for k in RESULT_KEYS if k in summary}
+                    if summary["outcome"] != "complete":
+                        self.last_error = "Station ASR stopped: " + str(
+                            summary.get("reason", "unknown"))
+                        return
+                return
             if voice.get("source") == "station":
                 self._run_station(station_id, stop)
                 return
@@ -212,6 +239,80 @@ class VoiceService:
             for _ in summary["events"]:
                 self._wake(station_id)({"word": WORD, "command": "",
                                         "sources": ["station_mww"]})
+
+    def _station_event(self, event: dict[str, Any]) -> None:
+        if event["event"] in {"interrupt_partial", "interrupt_final"}:
+            key = "partial" if event["event"].endswith("partial") else "text"
+            text = event["result"][key].replace("[unk]", " ")
+            if self.realtime is not None and rv.stop_command(text):
+                self.realtime.emergency_stop()
+            return
+        if event["event"] == "ready":
+            self._station_wake_audio_ms = self._station_activity_audio_ms = 0
+            self._local_pending_until = 0.0
+            self._local_keyword_seen = False
+            self._station_fast_wake = event.get("wake_source") == "station_mww"
+            if self.indicator is not None:
+                self.indicator.listen_ready()
+            self._state("listening")
+            return
+        if event["event"] == "wake" and not self.stop_event.is_set():
+            if self.realtime is not None:
+                if (not self.realtime.active
+                        and time.monotonic() >= self.realtime.echo_until):
+                    self._station_wake_audio_ms = event["audio_ms"]
+                    self._detected()
+                    if self._station_activity_audio_ms > self._station_wake_audio_ms + 600:
+                        self.realtime.activity()
+            elif time.monotonic() > self._local_pending_until:
+                self._detected()
+                self._local_pending_until = time.monotonic() + 5
+            return
+        if event["event"] == "activity":
+            self._station_activity_audio_ms = event["audio_ms"]
+            if (not self.stop_event.is_set() and self.realtime is not None
+                    and self.realtime.active and self._station_fast_wake
+                    and self.realtime.state in {"connecting", "transcribing", "conversation"}
+                    and event["audio_ms"] > self._station_wake_audio_ms + 600):
+                self.realtime.activity()
+            return
+        if event["event"] not in {"partial", "final"} or self.stop_event.is_set():
+            return
+        final = event["event"] == "final"
+        text = event["result"]["text" if final else "partial"].strip()
+        if rv.stop_command(text):
+            if self.realtime is not None:
+                self.realtime.emergency_stop()
+            return
+        keyword = text.casefold() == WORD or text.casefold().startswith(WORD + " ")
+        if self.realtime is not None:
+            if (self._station_fast_wake and not keyword and self.realtime.active
+                    and self.realtime.state in {"connecting", "transcribing"}
+                    and not self.realtime.command_started.is_set()
+                    and self._station_activity_audio_ms <= self._station_wake_audio_ms + 600):
+                return  # A decoder rotation can turn the wake word tail into unrelated text.
+            if (keyword and not self._station_fast_wake
+                    and not self._local_keyword_seen and not self.realtime.active
+                    and time.monotonic() >= self.realtime.echo_until):
+                self._detected()
+            self._local_keyword_seen = (self._local_keyword_seen or keyword) and not final
+            if self.realtime.active:
+                command = rv._normalized(text) if keyword else text
+                if command:
+                    if final:
+                        self.realtime.transcript(command)
+                    else:
+                        self.realtime.speech_started()
+            return
+        if keyword and not self._station_fast_wake:
+            if time.monotonic() > self._local_pending_until:
+                self._detected()
+            self._local_pending_until = time.monotonic() + 5
+        command = rv._normalized(text) if keyword else text
+        if final and command and time.monotonic() < self._local_pending_until:
+            self._wake(str(self.station))({"word": WORD, "command": command,
+                                           "sources": ["station_vosk"]})
+            self._local_pending_until = 0.0
 
     def _detected(self) -> None:
         if self.stop_event.is_set():
@@ -293,7 +394,16 @@ class VoiceService:
                 "source": self.source,
                 "configured_stations": configured,
                 **{k: live.get(k, 0) for k in ("chunks", "handovers", "gaps", "failures")},
-                "audio_s": round(live.get("audio_bytes", 0) / 32000, 1),
+                "audio_s": round(live.get("audio_ms", 0) / 1000 if self.source == "station_asr"
+                                 else live.get("audio_bytes", 0) / 32000, 1),
+                **({"asr": {"load_ms": live.get("load_ms", 0),
+                            "wake_source": live.get("wake_source", "station_vosk"),
+                            **{k: live[k] for k in ("wake_failure", "wake_error_type", "wake_lines",
+                                "wake_line_bytes", "wake_runtime_error", "wake_preface_bytes",
+                                "stop_trigger")
+                               if k in live},
+                            "lag_ms": max(0, live.get("elapsed_ms", 0) - live.get("audio_ms", 0))}}
+                   if self.source == "station_asr" else {}),
                 "utterances": self.utterances, "recent_events": len(self.events),
                 "last_event_id": self.events[-1]["id"] if self.events else 0,
                 "last_error": self.last_error, "last_session": self.result,

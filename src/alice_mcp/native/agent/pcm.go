@@ -116,8 +116,16 @@ func (n *nativeRuntime) playPCM(p pcmPayload, expected ...string) map[string]any
 	return n.playLocal("speech.say", p, func(config, []byte) bool { return true }, expected...)
 }
 
+func (n *nativeRuntime) playPCMContext(ctx context.Context, p pcmPayload, expected ...string) map[string]any {
+	return n.playLocalContext(ctx, "speech.say", p, func(config, []byte) bool { return true }, expected...)
+}
+
 // Shared by local TTS and registered media; admit adds the action's own limits.
 func (n *nativeRuntime) playLocal(action string, p pcmPayload, admit func(config, []byte) bool, expected ...string) map[string]any {
+	return n.playLocalContext(context.Background(), action, p, admit, expected...)
+}
+
+func (n *nativeRuntime) playLocalContext(parent context.Context, action string, p pcmPayload, admit func(config, []byte) bool, expected ...string) map[string]any {
 	if !n.lock.TryLock() {
 		return blocked("Another native action is active")
 	}
@@ -138,7 +146,7 @@ func (n *nativeRuntime) playLocal(action string, p pcmPayload, admit func(config
 	library, err := filepath.EvalSymlinks("/system/vendor/quasar/libs/libasound.so.2")
 	playback, nodeErr := os.Stat("/dev/snd/pcmC0D0p")
 	if err != nil || nodeErr != nil || playback.Mode()&os.ModeCharDevice == 0 ||
-		os.Geteuid() != 0 || !quasarRunning() || hashPath(firmwarePath) != c.FirmwareSHA256 ||
+		os.Geteuid() != 0 || !quasarRunning() || n.firmware.read(firmwarePath) != c.FirmwareSHA256 ||
 		hashPath("/etc/asound.conf") != c.LocalPCM.ALSAConfigSHA256 || hashPath(library) != c.LocalPCM.LibrarySHA256 {
 		return blocked("Reviewed local playback firmware, ALSA or Quasar unavailable")
 	}
@@ -153,9 +161,11 @@ func (n *nativeRuntime) playLocal(action string, p pcmPayload, admit func(config
 		return blocked("Reviewed PCM player or policy changed")
 	}
 	rate, frames := int(binary.LittleEndian.Uint32(wav[24:])), (len(wav)-44)/2
-	ctx, cancel := context.WithTimeout(context.Background(), 27*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 27*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "/proc/self/fd/3", "--play")
+	// SIGINT reaches the reviewed player's snd_pcm_drop; WaitDelay bounds a stuck driver.
+	command.Cancel = func() error { return command.Process.Signal(os.Interrupt) }
 	command.ExtraFiles, command.Stdin, command.Stderr = []*os.File{client}, bytes.NewReader(wav), io.Discard
 	// The inspected vendor library contains hw/plug/dmix; do not load external plugins.
 	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "HOME=/nonexistent", "ALSA_PLUGIN_DIR=/nonexistent"}

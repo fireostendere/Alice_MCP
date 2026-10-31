@@ -294,7 +294,7 @@ func (n *nativeRuntime) listenWake(seconds int, expected ...string) map[string]a
 	}
 	c, _, err := n.policy()
 	if err != nil || c.Wake == nil || !c.Wake.valid() || !c.permits("wake.listen") || seconds < 5 || seconds > 20 ||
-		os.Geteuid() != 0 || hashPath(firmwarePath) != c.FirmwareSHA256 || !wakePortOwned() || !n.stateMatches(state) {
+		os.Geteuid() != 0 || n.firmware.read(firmwarePath) != c.FirmwareSHA256 || !wakePortOwned() || !n.stateMatches(state) {
 		return blocked("Reviewed wake source, artifacts or policy unavailable")
 	}
 	events, complete := runWakeChildren(c.Wake, seconds)

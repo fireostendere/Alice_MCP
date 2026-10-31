@@ -25,7 +25,7 @@ from alice_mcp.core import Controller, SafetyError, Station, _check_ssh_file, _u
 from alice_mcp.speech_capture import CLIENT_SHA256 as ASR_CLIENT_SHA256
 from alice_mcp.speech_capture import TTS_CLIENT_SHA256
 
-AGENT_SHA256 = "32f709fd80a9769f02bf44473719e403a8ce665234924be44270999e15f46f5e"
+AGENT_SHA256 = "f967d14d546bd8ad835c28d68baa5ca0b0d455587989d11f113133f991526186"
 NAMES = ("agent", "tts-once", "asr-once", "config.json", "certificate.pem", "private-key.pem",
          "credential", "start")
 MAX_PACKAGE = 20 * 1024 * 1024

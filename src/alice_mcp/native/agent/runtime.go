@@ -29,6 +29,7 @@ type nativeRuntime struct {
 	stationID      string
 	model          string
 	lock           sync.Mutex
+	firmware       firmwareHashCache
 	sessionsMu     sync.Mutex
 	capture        *capture
 	generation     uint64
@@ -65,7 +66,7 @@ func (n *nativeRuntime) stateStamp() string {
 		}
 		identities += entry.Name() + ":" + fields[19] + ";"
 	}
-	firmware := hashPath(firmwarePath)
+	firmware := n.firmware.read(firmwarePath)
 	if err != nil || bootErr != nil || procErr != nil || identities == "" || firmware == "" {
 		return ""
 	}
@@ -141,8 +142,9 @@ func (n *nativeRuntime) controls() map[string]any {
 		"writes_enabled": len(actions) != 0, "allowed_actions": actions,
 		"preauthorize_all_actions": c.PreauthorizeAllActions, "preauthorized_actions": preauthorized,
 		"transport": "streamable_http_tls", "independent_wake_word": c.Wake != nil,
-		"tts_backend":    backend,
-		"state_contract": "alice.native.state.v1", "state_sha256": n.previewState(),
+		"tts_backend":      backend,
+		"pcm_cancellation": true,
+		"state_contract":   "alice.native.state.v1", "state_sha256": n.previewState(),
 		"evidence_class": "caller", "physical_effects_verified": false}
 }
 
@@ -367,7 +369,7 @@ func (n *nativeRuntime) say(text string, expected ...string) map[string]any {
 	if err != nil || !validText(text) || !c.permits("speech.say") {
 		return blocked("Literal TTS is not preauthorized by the local policy")
 	}
-	if os.Geteuid() != 0 || !quasarRunning() || hashPath(firmwarePath) != c.FirmwareSHA256 {
+	if os.Geteuid() != 0 || !quasarRunning() || n.firmware.read(firmwarePath) != c.FirmwareSHA256 {
 		return blocked("Reviewed firmware or running Quasar unavailable")
 	}
 	firmware, err := trustedFile(firmwarePath, false)

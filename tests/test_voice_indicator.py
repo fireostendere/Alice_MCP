@@ -8,6 +8,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 import wave
 from pathlib import Path
@@ -186,6 +187,7 @@ def test_helper_reads_plays_until_released_then_darkens_and_cleans(station: Any)
     pattern = vi.recolor(LISTENING, "red")
     command = vi.play_command(ssh, pattern, 90)
     hold = vi.Hold(station["spawn"](ssh, command), command.data)
+    assert hold.wait_started()
     wait(lambda: lines(station))
     time.sleep(0.3)
     assert hold.alive() and lines(station) == ["start indicator.led " + "000000 " * 6 + "80"]
@@ -193,9 +195,75 @@ def test_helper_reads_plays_until_released_then_darkens_and_cleans(station: Any)
     assert played.read_text() == pattern
     assert hold.release() == {"outcome": "applied", "left_running": False}
     assert lines(station) == ["start indicator.led " + "000000 " * 6 + "80",
-                              "SIGINT indicator.led",
-                              "start off.led " + "000000 " * 6 + "100", "SIGINT off.led"]
+                              "SIGTERM indicator.led",
+                              "start off.led " + "000000 " * 6 + "100", "SIGTERM off.led"]
     assert not (station["root"] / "tmp/alice-mcp-indicator").exists() and not players(station)
+
+
+@pytest.mark.parametrize("activate", [False, True])
+def test_prepared_player_waits_for_activation_and_cleans_on_disconnect(
+        station: Any, activate: bool) -> None:
+    ssh = ssh_only(native_station(station["root"], "led.show"))
+    command = vi._command(ssh, "prepare_verified", 90, vi.recolor(LISTENING, "red"))
+    hold = vi.Hold(station["spawn"](ssh, command), command.data)
+    assert hold.wait_started(prepared=True)
+    assert not lines(station)  # The stock parser is waiting for the FIFO, not displaying red.
+    if activate:
+        assert hold.start()
+        wait(lambda: lines(station))
+    assert hold.release() == {"outcome": "applied", "left_running": False}
+    assert any(line.startswith("start ") for line in lines(station)) == activate
+    assert not (station["root"] / "tmp/alice-mcp-indicator").exists() and not players(station)
+
+
+@pytest.mark.parametrize("term_delay", [0, 1])
+def test_background_player_ignoring_sigint_does_not_delay_darkening(
+        station: Any, term_delay: int) -> None:
+    player = station["root"] / "system/vendor/quasar/led_util"
+    player.write_text(player.read_text().replace(
+        "signal.signal(signal.SIGINT, stop)", "signal.signal(signal.SIGINT, signal.SIG_IGN)")
+        .replace("    sys.exit(0)", f"    time.sleep({term_delay})\n    sys.exit(0)"))
+    ssh = ssh_only(native_station(station["root"], "led.show"))
+    command = vi.play_command(ssh, vi.recolor(LISTENING, "red"), 90)
+    hold = vi.Hold(station["spawn"](ssh, command), command.data)
+    assert hold.wait_started()
+    wait(lambda: lines(station))
+    before = time.monotonic()
+    assert hold.release() == {"outcome": "applied", "left_running": False}
+    assert time.monotonic() - before < 2.5
+    assert not players(station)
+
+
+def test_prepared_indicator_also_prepares_dark_frame_before_releasing_red(station: Any) -> None:
+    player = station["root"] / "system/vendor/quasar/led_util"
+    player.write_text(player.read_text().replace(
+        'note("start "', 'time.sleep(1.3)\nnote("start "'))
+    ssh = ssh_only(native_station(station["root"], "led.show"))
+    command = vi._command(ssh, "prepare_verified", 90, vi.recolor(LISTENING, "red"))
+    hold = vi.Hold(station["spawn"](ssh, command), command.data)
+    assert hold.wait_started(prepared=True)
+    time.sleep(1.5)
+    assert hold.start()
+    wait(lambda: any(line.startswith("start wait.led ") for line in lines(station)))
+    time.sleep(1.5)  # The three-second command window lets the off-player initialize too.
+    assert hold.release() == {"outcome": "applied", "left_running": False}
+    assert "start off.led " + "000000 " * 6 + "100" in lines(station)
+    assert not players(station)
+
+
+def test_prepared_player_renewal_keeps_it_alive_past_original_deadline(
+        station: Any, monkeypatch: Any) -> None:
+    monkeypatch.setattr(vi, "SCRIPT", vi.SCRIPT.replace("sleep 240", "sleep 2"))
+    ssh = ssh_only(native_station(station["root"], "led.show"))
+    command = vi._command(ssh, "prepare_verified", 90, vi.recolor(LISTENING, "red"))
+    hold = vi.Hold(station["spawn"](ssh, command), command.data)
+    assert hold.wait_started(prepared=True)
+    time.sleep(1.2)
+    assert hold.renew()
+    time.sleep(1.2)
+    assert hold.alive() and not lines(station)
+    assert hold.start()
+    assert hold.release() == {"outcome": "applied", "left_running": False}
 
 
 def test_on_device_deadline_and_dropped_session_never_leave_a_player(station: Any) -> None:
@@ -213,7 +281,7 @@ def test_on_device_deadline_and_dropped_session_never_leave_a_player(station: An
                       str(stale / "indicator.led")], env=station["env"], start_new_session=True)
     wait(lambda: players(station))
     assert vi.cleanup(station["runner"], ssh) == {"outcome": "cleanup", "left_running": False}
-    assert not players(station) and lines(station)[-1] == "SIGINT off.led"
+    assert not players(station) and lines(station)[-1] == "SIGTERM off.led"
 
 
 def test_a_foreign_player_blocks_without_writing(station: Any) -> None:
@@ -225,7 +293,9 @@ def test_a_foreign_player_blocks_without_writing(station: Any) -> None:
     try:
         wait(lambda: lines(station))
         command = vi.play_command(ssh, vi.recolor(LISTENING, "red"), 90)
-        result = vi.Hold(station["spawn"](ssh, command), command.data).release()
+        hold = vi.Hold(station["spawn"](ssh, command), command.data)
+        assert not hold.wait_started()
+        result = hold.release()
         assert result == {"outcome": "blocked", "error_code": "player_busy"}
         assert lines(station) == ["start other.led " + "000000 " * 6 + "100"]
     finally:
@@ -320,7 +390,7 @@ def test_lit_while_busy_then_dark_when_the_agent_answers(
     assert item.status()["state"] == "lit" and len(players(station)) == 1
     agent(state, "idle", 6)
     wait(lambda: item.status()["state"] == "idle")
-    assert [x.split()[0] for x in lines(station)] == ["start", "SIGINT", "start", "SIGINT"]
+    assert [x.split()[0] for x in lines(station)] == ["start", "SIGTERM", "start", "SIGTERM"]
     assert not players(station) and not played
     item.close()
     assert item.status()["clean"] is True
@@ -354,6 +424,181 @@ def test_wake_refreshes_the_limit_before_the_cloud_deadline_is_bound(
     item.close()
 
 
+@pytest.mark.parametrize("changed", ["none", "state", "expired", "ssh"])
+def test_prepared_indicator_rechecks_native_state_before_skipping_slow_hash(
+        station: Any, monkeypatch: Any, tmp_path: Path, changed: str) -> None:
+    stamp = ["a" * 64]
+    monkeypatch.setattr(native_transport, "_state", lambda *args: stamp[0])
+    item, _, _ = indicator(station, monkeypatch, tmp_path)
+    try:
+        wait(lambda: item.status().get("prepared") is True)
+        assert not lines(station)  # Preparation must never light the ring.
+        if changed == "state":
+            stamp[0] = "b" * 64
+        elif changed == "expired":
+            now = item.controller.clock() + 301
+            monkeypatch.setattr(item.controller, "clock", lambda: now)
+        elif changed == "ssh":
+            item.controller.station("mini1").known_hosts_file.write_text("rotated synthetic key\n")
+        commands: list[Any] = []
+        spawn = item.spawn
+
+        def record(target: Station, command: Any) -> Any:
+            commands.append(command)
+            return spawn(target, command)
+
+        item.spawn = record
+        item.wake(44, managed=True)
+        wait(lambda: item.state == "lit" and any(
+            line.startswith("start ") for line in lines(station)))
+        assert len(commands) == (1 if changed == "ssh" else 0)
+        assert all(" prepare_verified " in command.command for command in commands)
+        assert item.prepared is None  # A warm preview is consumed once.
+        item.complete(44)
+    finally:
+        item.close()
+
+
+def test_managed_completion_wakes_indicator_without_waiting_for_poll(
+        station: Any, monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setattr(vi, "POLL_S", 10)
+    item, _, _ = indicator(station, monkeypatch, tmp_path)
+    try:
+        item.wake(46, managed=True)
+        wait(lambda: item.state == "lit")
+        item.complete(46)
+        wait(lambda: item.state == "idle", seconds=3)
+    finally:
+        item.close()
+
+
+def test_fresh_state_rebinds_preview_without_restarting_unchanged_prepared_player(
+        station: Any, monkeypatch: Any, tmp_path: Path) -> None:
+    stamp = ["a" * 64]
+    monkeypatch.setattr(native_transport, "_state", lambda *args: stamp[0])
+    item, _, _ = indicator(station, monkeypatch, tmp_path)
+    try:
+        wait(lambda: item.prepared is not None)
+        warmed = item.warm
+        stamp[0] = "b" * 64
+        item._prepare()
+        assert item.warm is warmed and item.prepared is not None
+        assert item.controller.take_plan(*item.prepared).remote_sha256 == stamp[0]
+        assert not lines(station)
+    finally:
+        item.close()
+
+
+def test_uncertain_preparation_never_falls_through_to_another_player(
+        station: Any, monkeypatch: Any, tmp_path: Path) -> None:
+    item, _, _ = indicator(station, monkeypatch, tmp_path)
+    try:
+        item.pattern = LISTENING
+        monkeypatch.setattr(item, "_prepare", lambda: setattr(item, "latched", True))
+        monkeypatch.setattr(item, "_verdict", lambda: "busy")
+        monkeypatch.setattr(item, "spawn", lambda *args: pytest.fail("uncertain write retried"))
+        assert item._start() is None and item.latched
+    finally:
+        item.close()
+
+
+def test_deferred_indicator_does_not_touch_station_before_source_is_ready(
+        station: Any, monkeypatch: Any, tmp_path: Path) -> None:
+    mini = native_station(station["root"], "led.show", indicator={"backend": "ssh_led"})
+    controller = Controller(None, writes=True, runner=station["runner"])
+    monkeypatch.setattr(controller, "station", lambda _: mini)
+    states: list[bool] = []
+    monkeypatch.setattr(native_transport, "_state", lambda *args: states.append(True) or "a" * 64)
+    item = vi.Indicator(controller, "mini1", spawn=station["spawn"],
+                        state_path=tmp_path / "state", defer_preparation=True)
+    try:
+        item._prepare()
+        assert not states and item.warm is None
+        item.listen_ready()
+        wait(lambda: item.prepared is not None)
+        assert states and not lines(station)
+    finally:
+        item.close()
+
+
+def test_prepared_indicator_does_not_cache_write_permission(
+        station: Any, monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setattr(native_transport, "_state", lambda *args: "a" * 64)
+    item, _, _ = indicator(station, monkeypatch, tmp_path)
+    try:
+        wait(lambda: item.status().get("prepared") is True)
+        item.controller.writes = False
+        item.wake(45, managed=True)
+        wait(lambda: item.status()["state"] == "unavailable")
+        assert not lines(station)
+        item.complete(45)
+    finally:
+        item.close()
+
+
+@pytest.mark.parametrize("changed", ["none", "state", "ssh", "station", "revoked"])
+def test_rearming_reuses_pattern_only_for_the_same_verified_station_state(
+        station: Any, monkeypatch: Any, tmp_path: Path, changed: str) -> None:
+    stamp = ["a" * 64]
+    monkeypatch.setattr(native_transport, "_state", lambda *args: stamp[0])
+    reads: list[Station] = []
+
+    def read(runner: Any, target: Station, *, verified: bool = False) -> str:
+        assert verified
+        reads.append(target)
+        return LISTENING
+
+    monkeypatch.setattr(vi, "read_pattern", read)
+    item, _, _ = indicator(station, monkeypatch, tmp_path)
+    try:
+        wait(lambda: item.prepared is not None)
+        first = item.prepared
+        assert first is not None and len(reads) == 1
+        item.controller.take_plan(*first)
+        item.prepared = None
+        if changed == "state":
+            stamp[0] = "b" * 64
+        elif changed == "ssh":
+            item.controller.station("mini1").known_hosts_file.write_text("rotated synthetic\n")
+        elif changed == "station":
+            old = item.controller.station("mini1")
+            new = Station(**{**old.__dict__, "port": 2223})
+            monkeypatch.setattr(item.controller, "station", lambda _: new)
+        elif changed == "revoked":
+            item.controller.writes = False
+        item._prepare()
+        assert len(reads) == (1 if changed in {"none", "revoked"} else 2)
+        if changed == "revoked":
+            assert item.prepared is None
+        else:
+            assert item.prepared is not None and item.prepared != first
+            item.controller.take_plan(*item.prepared)
+            with pytest.raises(SafetyError):
+                item.controller.take_plan(*item.prepared)
+        assert not any(line.startswith("start ") for line in lines(station))
+    finally:
+        item.close()
+
+
+def test_invalid_warmup_pattern_does_not_kill_indicator_worker(
+        station: Any, monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setattr(native_transport, "_state", lambda *args: "a" * 64)
+
+    def invalid(*args: Any, **kwargs: Any) -> str:
+        raise ValueError("unknown pattern line")
+
+    monkeypatch.setattr(vi, "read_pattern", invalid)
+    item, _, _ = indicator(station, monkeypatch, tmp_path)
+    try:
+        item.wake(46, managed=True)
+        wait(lambda: item.status()["state"] == "unavailable")
+        assert item.thread.is_alive() and not lines(station)
+        assert item.status()["reason"] == "pattern_format_unknown"
+        item.complete(46)
+    finally:
+        item.close()
+
+
 @pytest.mark.parametrize("failure", ["error", "timeout"])
 def test_error_or_timeout_darkens_first_then_plays_the_stock_phrase_once(
         station: Any, monkeypatch: Any, tmp_path: Path, failure: str) -> None:
@@ -365,7 +610,7 @@ def test_error_or_timeout_darkens_first_then_plays_the_stock_phrase_once(
         agent(state, "error", 7)
     wait(lambda: played, 12)
     time.sleep(0.5)
-    assert len(played) == 1 and played[0][0] == "SIGINT off.led"  # Dark before speaking.
+    assert len(played) == 1 and played[0][0] == "SIGTERM off.led"  # Dark before speaking.
     audio = played[0][1]
     assert audio[:4] == b"RIFF" and audio[36:40] == b"data" and len(audio) == 44 + 600
     assert max(abs(s) for (s,) in struct.iter_unpack("<h", audio[44:])) <= 8191
@@ -448,6 +693,40 @@ def test_play_pcm_sends_the_pinned_canonical_wav_through_the_resident(
     assert result["outcome"] == "unknown" and "SENSITIVE" not in str(result)
     with pytest.raises(SafetyError):  # Only where the resident expects host PCM.
         native_transport.play_pcm(controller, native_station(tmp_path, "speech.say"), audio)
+
+
+def test_cancelling_pcm_verifies_resident_cleanup_without_resending_playback(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    mini = native_station(tmp_path, "speech.say")
+    mini = Station(**{**mini.__dict__, "controls": {**mini.controls, "local_tts": {
+        "model_file": "/PRIVATE/voice.onnx", "model_sha256": "a" * 64,
+        "config_sha256": "b" * 64}}})
+    c = Controller(None, writes=True)
+    monkeypatch.setattr(c, "station", lambda _: mini)
+    cancel = threading.Event()
+    states = []
+
+    def state(*args: Any, **kwargs: Any) -> str:
+        states.append(kwargs)
+        return "a" * 64
+
+    monkeypatch.setattr(native_transport, "_state", state)
+    calls = []
+
+    def call(*args: Any, **kwargs: Any) -> Any:
+        calls.append(args[1])
+        assert kwargs["cancel"] is cancel
+        cancel.set()
+        raise SafetyError("cancelled synthetic transport")
+
+    monkeypatch.setattr(native_transport, "call", call)
+    audio = vi.stock_wav(canonical(LOUD))
+    assert native_transport.play_pcm(c, mini, audio, cancel=cancel) == {
+        "outcome": "cancelled", "cleanup_verified": True, "do_not_retry": True}
+    assert calls == ["run_station_action"] and states == [{"cancellable": True}] * 2
+    native_transport.play_pcm(c, mini, audio, cancel=cancel)
+    assert calls == ["run_station_action"]  # Cancellation before dispatch makes no write.
 
 
 # Capture over explicit SSH (still used by other Mini 1 LED actions) and its pruning.

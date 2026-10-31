@@ -1,7 +1,8 @@
 """Wake-gated Realtime audio through the existing guarded resident PCM path.
 
-Only post-wake room audio leaves this host. Keys, audio and transcripts are never
-logged or saved. The host remains required; this is not an on-station cloud client.
+Only post-wake room audio leaves this host. This module never logs keys or audio.
+The optional OpenCode answer backend retains its normal text session history.
+The host remains required; this is not an on-station cloud client.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from alice_mcp.core import SafetyError
+from alice_mcp.opencode_voice import MODEL as OPENCODE_MODEL
 
 MODEL = "gpt-realtime-2.1"
 STT_MODEL = "gpt-transcribe"
@@ -129,12 +131,17 @@ class Resampler:
 
 def playback_wav(pcm: bytes) -> bytes:
     samples = array.array("h", (max(-8191, min(8191, s // 4)) for s in _samples(pcm)))
+    # Mini 1's vendor rate converter fails on 24 kHz; feed its verified 48 kHz rate.
+    output_samples: array.array[int] = array.array("h")
+    for i, sample in enumerate(samples):
+        following = samples[min(i + 1, len(samples) - 1)]
+        output_samples.extend((sample, (sample + following) // 2))
     output = io.BytesIO()
     with wave.open(output, "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
-        wav.setframerate(RATE)
-        wav.writeframes(_bytes(samples))
+        wav.setframerate(RATE * 2)
+        wav.writeframes(_bytes(output_samples))
     return output.getvalue()
 
 
@@ -143,9 +150,19 @@ def _normalized(text: str) -> str:
     return "" if words == "компьютер" else words.removeprefix("компьютер ")
 
 
+def stop_command(text: str) -> bool:
+    return _normalized(text) in {"стоп", "хватит", "замолчи", "прекрати", "остановись",
+        "хватит говорить", "хватит разговаривать", "закончи разговор", "стоп разговор"}
+
+
 def route(text: str) -> str:
     words = _normalized(text)
-    if words == "давай поговорим" or words.startswith("давай поговорим "):
+    if any(words == phrase or words.startswith(phrase + " ")
+           for phrase in ("давай поговорим", "давай попиздим", "давай поболтаем",
+                          "давай пообщаемся", "поговори со мной", "поболтай со мной",
+                          "хочу с тобой поговорить", "хочу с тобой поболтать",
+                          "поговорим", "поболтаем", "пообщаемся", "попиздим",
+                          "давай по пизди")):  # Observed local ASR spelling of the slang request.
         return "conversation"
     if words in {"начни диктовку", "включи диктовку"}:
         return "dictation"
@@ -169,10 +186,18 @@ class RealtimeTurn:
                  play: Callable[[bytes], dict[str, Any]], *,
                  connect: Callable[[str, float, str], Any] = _connect,
                  action: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+                 answer: Callable[[str, float], dict[str, Any]] | None = None,
+                 local_transcripts: bool = False,
                  emit: Callable[[dict[str, Any]], Any] = lambda _: None) -> None:
         self._key, self.indicator, self.play, self.connect = key, indicator, play, connect
         self.active = self.latched = False
         self.action, self.emit = action, emit
+        self.answer = answer
+        self.local_transcripts = local_transcripts
+        self.text: queue.Queue[str] = queue.Queue(maxsize=16)
+        self.text_stopped = threading.Event()
+        self.command_started = threading.Event()
+        self.echo_until = 0.0
         self.state = "idle"
         self.error: str | None = None
         self.mode = "command"
@@ -182,13 +207,28 @@ class RealtimeTurn:
         self.thread: threading.Thread | None = None
         self.socket: Any = None
         self.audio: queue.Queue[bytes | None] = queue.Queue(maxsize=100)
+        self.pending = bytearray()
+        self.started_at = 0.0
+        self.timing_ms: dict[str, int] = {}
+        self.last_playback: dict[str, Any] = {}
+        self.conversation_idle_at: float | None = None
+        self.last_input_at = 0.0
 
     def status(self) -> dict[str, Any]:
-        return {"model": MODEL, "stt_model": STT_MODEL, "live_stt_model": LIVE_STT_MODEL,
-                "tts_model": TTS_MODEL, "llm_model": LLM_MODEL,
+        return {"model": MODEL,
+                "stt_model": "station_vosk" if self.local_transcripts else STT_MODEL,
+                "live_stt_model": "station_vosk" if self.local_transcripts else LIVE_STT_MODEL,
+                "tts_model": TTS_MODEL,
+                "llm_model": OPENCODE_MODEL if self.answer else LLM_MODEL,
+                "command_backend": "opencode_alice" if self.answer else "responses",
                 "state": self.state, "mode": self.mode, "active": self.active,
                 "last_error": self.error, "do_not_retry": self.latched,
+                "timing_ms": dict(self.timing_ms),
+                "last_playback": dict(self.last_playback),
                 "transport": "host_relay", "audio_saved": False}
+
+    def _timing(self, stage: str) -> None:
+        self.timing_ms[stage] = round((time.monotonic() - self.started_at) * 1000)
 
     def wake(self, event_id: int) -> bool:
         with self.lock:
@@ -196,7 +236,15 @@ class RealtimeTurn:
                 return False
             self.cancel, self.input_done = threading.Event(), threading.Event()
             self.audio = queue.Queue(maxsize=100)
+            self.text = queue.Queue(maxsize=16)
+            self.text_stopped.clear()
+            self.command_started.clear()
+            self.pending.clear()
             self.active, self.state, self.error = True, "connecting", None
+            self.started_at, self.timing_ms = time.monotonic(), {}
+            self.last_playback = {}
+            self.conversation_idle_at = None
+            self.last_input_at = 0.0
             self.indicator.wake(event_id, managed=True)
             deadline = time.monotonic() + self.indicator.max_s
             self.thread = threading.Thread(target=self._run, args=(event_id, deadline),
@@ -205,20 +253,112 @@ class RealtimeTurn:
         return True
 
     def feed(self, pcm: bytes) -> None:
+        if self.local_transcripts:
+            raise SafetyError("Local recognition accepts transcripts only")
         if (self.active and not self.cancel.is_set() and not self.input_done.is_set()
                 and self.state != "speaking"):
             if type(pcm) is not bytes or len(pcm) % 2 or len(pcm) > 32000:
                 raise SafetyError("Invalid Realtime input PCM")
             try:
-                self.audio.put_nowait(pcm)
+                self.pending.extend(pcm)
+                while len(self.pending) >= 3200:
+                    self.audio.put_nowait(bytes(self.pending[:3200]))
+                    del self.pending[:3200]
             except queue.Full:
                 self.error = "input_overrun"
+                self.cancel.set()
+
+    def transcript(self, text: str) -> bool:
+        """Untrusted on-station text; never upload its source microphone audio."""
+        if type(text) is not str or len(text.encode()) > 8192 or "\0" in text:
+            raise SafetyError("Invalid station transcript")
+        if (not self.local_transcripts or not self.active or self.cancel.is_set()
+                or self.input_done.is_set() or time.monotonic() < self.echo_until
+                or self.state not in {"connecting", "transcribing", "conversation", "dictation"}
+                or not text.strip()):
+            return False
+        try:
+            self.last_input_at = time.monotonic()
+            self.text.put_nowait(text.strip())
+            return True
+        except queue.Full:
+            self.error = "input_overrun"
+            self.cancel.set()
+            return False
+
+    def activity(self) -> None:
+        """Local energy extends the silence window without promising a transcript."""
+        if self.local_transcripts and self.active:
+            self.last_input_at = time.monotonic()
+
+    def speech_started(self) -> None:
+        """A nonempty local partial after the wake word keeps the command window open."""
+        if self.local_transcripts and self.active:
+            self.activity()
+            if self.state in {"connecting", "transcribing"}:
+                self.command_started.set()
+
+    def emergency_stop(self) -> None:
+        """Signal cancellation immediately; the playback channel drops native PCM."""
+        if self.active and "emergency_stop" not in self.timing_ms:
+            self._timing("emergency_stop")
+        self.text_stopped.set()
+        self.input_done.set()
+        self.cancel.set()
+
+    def _local_text(self, deadline: float) -> str:
+        while True:
+            if self.state == "transcribing" and time.monotonic() >= deadline:
+                return ""  # No final text within the collection window is also normal silence.
+            self._remaining(deadline)
+            try:
+                return self.text.get(timeout=0.05)
+            except queue.Empty:
+                lit_at = getattr(self.indicator, "started_at", self.started_at)
+                if (self.state == "transcribing" and not self.command_started.is_set()
+                        and lit_at is not None
+                        and time.monotonic() - max(lit_at, self.last_input_at) >= 3):
+                    return ""  # No command is a normal idle transition, never a spoken error.
+
+    def _send_transcripts(self, deadline: float, done: threading.Event) -> None:
+        try:
+            while not done.is_set() and not self.cancel.is_set():
+                self._remaining(deadline)
+                try:
+                    text = self.text.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if done.is_set():
+                    return
+                if stop_command(text):
+                    self.emergency_stop()
+                    return
+                while self.state != "conversation":
+                    self._remaining(deadline)
+                    if done.wait(0.05):
+                        return
+                self._remaining(deadline)
+                if done.is_set():
+                    return
+                self.state = "responding"
+                self.socket.send(json.dumps({"type": "conversation.item.create", "item": {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": text}]}}))
+                self.socket.send(json.dumps({"type": "response.create"}))
+        except Exception:
+            if not done.is_set() and not self.text_stopped.is_set():
+                self.error = self.error or "input_transport_failed"
                 self.cancel.set()
 
     def endpoint(self) -> None:
         """Local endpointer commits a cloud STT turn; its transcript is unused locally."""
         if self.active and self.state in {"transcribing", "dictation"}:
+            if self.state == "transcribing":
+                self._timing("command_endpoint")
             try:
+                if self.pending:
+                    self.audio.put_nowait(bytes(self.pending))
+                    self.pending.clear()
                 self.audio.put_nowait(None)
             except queue.Full:
                 self.cancel.set()
@@ -232,6 +372,8 @@ class RealtimeTurn:
 
     def _remaining(self, deadline: float) -> float:
         remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            self.error = self.error or "deadline_exceeded"
         if remaining <= 0 or self.cancel.is_set():
             raise TimeoutError
         return remaining
@@ -239,21 +381,39 @@ class RealtimeTurn:
     def _run(self, event_id: int, deadline: float) -> None:
         failed = True
         try:
-            text = self._transcribe(STT_MODEL, deadline)
+            if self.local_transcripts:
+                self.state = "transcribing"
+                text = self._local_text(min(deadline, time.monotonic() + 15))
+                if not text:
+                    self._timing("no_command")
+                    failed = False
+                    return
+            else:
+                text = self._transcribe(STT_MODEL, deadline)
+            self._timing("transcript")
             self.mode = route(text)
             self.audio = queue.Queue(maxsize=100)
+            self.pending.clear()
+            answer = text
+            if self.mode == "command":
+                self.input_done.set()
+                answer = self._reason(text, deadline)
+                self._timing("answer")
             if self.mode == "conversation":
                 self._stream(MODEL, text, deadline, True)
             elif self.mode == "dictation":
                 self._dictate(deadline)
             else:
-                self.input_done.set()
-                answer = self._reason(text, deadline)
                 self._stream(TTS_MODEL, answer, deadline, False)
             failed = False
-        except Exception:
-            self.error = self.error or "realtime_failed"
+        except Exception as error:
+            known = {"api_error", "transcription_failed", "response_failed", "action_unverified"}
+            if not self.text_stopped.is_set():
+                self.error = self.error or (str(error) if isinstance(error, SafetyError)
+                                           and str(error) in known else "realtime_failed")
         finally:
+            if self.text_stopped.is_set():
+                failed = False
             self.cancel.set()
             if self.socket is not None:
                 self.socket.close()
@@ -263,11 +423,22 @@ class RealtimeTurn:
 
     def _receive(self, deadline: float) -> dict[str, Any]:
         while True:
+            if self.text_stopped.is_set():
+                return {"type": "local.stop"}
+            if (self.mode == "conversation" and self.state == "conversation"
+                    and self.conversation_idle_at is not None and self.text.empty()
+                    and time.monotonic() - max(self.conversation_idle_at, self.last_input_at) >= 7):
+                self._timing("silence_timeout")
+                return {"type": "local.stop"}
             remaining = self._remaining(deadline)
             try:
-                event = json.loads(self.socket.recv(timeout=min(0.1, remaining)))
+                raw = self.socket.recv(timeout=min(0.1, remaining))
             except TimeoutError:
                 continue
+            except Exception:
+                self.error = self.error or "output_transport_failed"
+                raise SafetyError("output_transport_failed") from None
+            event = json.loads(raw)
             if type(event) is not dict or not isinstance(event.get("type"), str):
                 raise ValueError("invalid event")
             if event["type"] == "error":
@@ -297,7 +468,7 @@ class RealtimeTurn:
                     sent += len(data)
         except Exception:
             if not done.is_set():
-                self.error = "input_transport_failed"
+                self.error = self.error or "input_transport_failed"
                 self.cancel.set()
 
     def _transcribe(self, model: str, deadline: float) -> str:
@@ -345,12 +516,36 @@ class RealtimeTurn:
             self.socket.close()
 
     def _dictate(self, deadline: float) -> None:
+        if self.local_transcripts:
+            self.state = "dictation"
+            self.input_done.clear()
+            while True:
+                text = self._local_text(deadline)
+                if _normalized(text) in {"закончи диктовку", "стоп диктовка"}:
+                    return
+                self.emit({"text": text, "final": True, "trusted": False})
         self._transcribe(LIVE_STT_MODEL, deadline)
 
     def _reason(self, text: str, deadline: float) -> str:
         import httpx
 
         self.state = "reasoning"
+        if self.answer is not None:
+            reply = self.answer(text, deadline)
+            self._remaining(deadline)
+            if reply["mode"] in {"conversation", "dictation"}:
+                self.mode = reply["mode"]
+                return text
+            if reply["mode"] == "action":
+                if self.action is None:
+                    raise SafetyError("unsupported tool")
+                result = self.action({"action": reply["action"], "parameters": reply["parameters"]})
+                if result.get("outcome") == "unknown":
+                    self.latched = True
+                    raise SafetyError("action_unverified")
+                if result.get("outcome") != "applied":
+                    return "Не удалось выполнить команду: действие недоступно."
+            return str(reply["text"])
         history: list[dict[str, Any]] = [{"role": "user", "content": text}]
         tool = {"type": "function", "name": "station_action",
                 "description": "Run one requested action on this station under its live policy.",
@@ -400,7 +595,9 @@ class RealtimeTurn:
         sender: threading.Thread | None = None
         player: threading.Thread | None = None
         done = threading.Event()
+        drained = threading.Event()
         try:
+            self.state = "responding" if continuous else "synthesizing"
             self.socket = self.connect(self._key, self._remaining(deadline), model)
             if continuous:
                 self.input_done.clear()
@@ -415,35 +612,64 @@ class RealtimeTurn:
                 "type": "realtime", "model": model, "output_modalities": ["audio"],
                 "instructions": instructions,
                 "audio": {"input": {"format": {"type": "audio/pcm", "rate": RATE},
-                                    "transcription": {"model": STT_MODEL},
+                                    "transcription": (None if self.local_transcripts
+                                                      else {"model": STT_MODEL}),
                                     "turn_detection": {"type": "server_vad",
                                                        "silence_duration_ms": 500,
                                                        "create_response": True,
                                                        "interrupt_response": False}
-                                    if continuous else None},
+                                    if continuous and not self.local_transcripts else None},
                           "output": {"format": {"type": "audio/pcm", "rate": RATE},
                                      "voice": "marin"}},
             }}, ensure_ascii=False))
 
             def play() -> None:
+                boundary: list[bytes | None] = []
                 try:
                     while not self.cancel.is_set() and not done.is_set():
                         self._remaining(deadline)
                         try:
-                            pcm = output.get(timeout=0.05)
+                            pcm = boundary.pop() if boundary else output.get(timeout=0.05)
                         except queue.Empty:
                             continue
                         if pcm is None:
                             break
                         if not pcm:
                             self.state = "conversation"
+                            self.conversation_idle_at = time.monotonic()
+                            drained.set()
                             continue
+                        # Drain ready audio up to four seconds, preserving response boundaries.
+                        while len(pcm) < PLAY_BYTES * 8:
+                            try:
+                                more = output.get_nowait()
+                            except queue.Empty:
+                                break
+                            if not more:
+                                boundary.append(more)
+                                break
+                            pcm += more
                         self._remaining(deadline)
                         self.state = "speaking"
+                        if "playback_dispatched" not in self.timing_ms:
+                            self._timing("playback_dispatched")
                         result = self.play(playback_wav(pcm))
+                        if (self.cancel.is_set() and result.get("outcome") == "cancelled"
+                                and result.get("cleanup_verified") is True):
+                            self.last_playback = {"outcome": "cancelled", "cleanup_verified": True}
+                            self._timing("playback_cancelled")
+                            return
+                        if self.local_transcripts:
+                            self.echo_until = time.monotonic() + 1.5
+                        self.last_playback = {k: result[k] for k in (
+                            "outcome", "stage", "frames_written", "input_frames", "sample_rate",
+                            "alsa_return_code", "cleanup_verified", "hardware_parameters_verified",
+                            "playback_elapsed_ms", "error_code") if k in result}
                         if result.get("outcome") != "applied":
                             self.latched = True  # Uncertain playback must never be retried.
                             raise SafetyError("playback_unverified")
+                        if "first_playback_completed" not in self.timing_ms:
+                            self._timing("first_playback_completed")
                 except (TimeoutError, queue.Empty):
                     self.cancel.set()
                 except Exception:
@@ -459,11 +685,14 @@ class RealtimeTurn:
                 if kind == "error":
                     raise SafetyError("api_error")
                 if kind == "session.updated" and player is None:
-                    self.state = "conversation" if continuous else "synthesizing"
+                    self.state = "responding" if self.local_transcripts else "conversation"
+                    if not continuous:
+                        self.state = "synthesizing"
                     if continuous:
-                        sender = threading.Thread(target=self._send_audio,
-                                                   args=(deadline, done),
-                                                   kwargs={"commit": False}, daemon=True)
+                        sender = threading.Thread(
+                            target=(self._send_transcripts if self.local_transcripts
+                                    else self._send_audio), args=(deadline, done),
+                            kwargs={} if self.local_transcripts else {"commit": False}, daemon=True)
                         sender.start()
                     player = threading.Thread(target=play, daemon=True)
                     player.start()
@@ -471,9 +700,11 @@ class RealtimeTurn:
                         "type": "message", "role": "user",
                         "content": [{"type": "input_text", "text": text}]}}))
                     self.socket.send(json.dumps({"type": "response.create"}))
+                elif kind == "local.stop":
+                    return
                 elif kind == "conversation.item.input_audio_transcription.completed":
-                    if continuous and _normalized(event["transcript"]) in {
-                            "закончи разговор", "стоп разговор", "хватит разговаривать"}:
+                    if continuous and stop_command(event["transcript"]):
+                        self.emergency_stop()
                         return
                 elif kind == "input_audio_buffer.speech_stopped" and continuous:
                     self.state = "responding"
@@ -497,6 +728,13 @@ class RealtimeTurn:
                         output.put_nowait(buffer)
                     output.put_nowait(b"" if continuous else None)
                     if continuous:
+                        # A completed response remains playable if the peer closes next.
+                        while not drained.wait(0.05):
+                            if self.text_stopped.is_set():
+                                return
+                            self._remaining(deadline)
+                        self._remaining(deadline)
+                        drained.clear()
                         buffer, audio_bytes = b"", 0
                         continue
                     assert player is not None

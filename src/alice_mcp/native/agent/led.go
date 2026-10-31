@@ -293,7 +293,7 @@ func (n *nativeRuntime) showLED(p ledPayload, expected ...string) map[string]any
 	if err != nil || n.model != "station-mini" || !c.permits("led.show") {
 		return blocked("LED show is not preauthorized by the local policy")
 	}
-	if os.Geteuid() != 0 || hashPath(firmwarePath) != c.FirmwareSHA256 {
+	if os.Geteuid() != 0 || n.firmware.read(firmwarePath) != c.FirmwareSHA256 {
 		return blocked("Reviewed firmware unavailable")
 	}
 	return runShow(p, c.FirmwareSHA256)

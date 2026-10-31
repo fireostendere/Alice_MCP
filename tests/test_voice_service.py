@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,6 +22,11 @@ from alice_mcp.core import SafetyError, Station
 
 CLIENT = b"\x7fELF synthetic client"
 FIRMWARE = {"firmware_sha256": "a" * 64}
+
+
+@pytest.fixture(autouse=True)
+def no_private_cloud_key(monkeypatch: Any) -> None:
+    monkeypatch.setattr(vs.rv, "api_key", lambda: None)
 
 
 def voice(tmp_path: Path, **extra: Any) -> dict[str, Any]:
@@ -298,7 +304,8 @@ def test_heard_commands_drive_the_ring_indicator(tmp_path: Path, monkeypatch: An
     made: list[Any] = []
 
     class Indicator:
-        def __init__(self, controller: Any, station_id: str) -> None:
+        def __init__(self, controller: Any, station_id: str, *,
+                     defer_preparation: bool = False) -> None:
             self.station_id, self.woken, self.closed = station_id, [], False
             made.append(self)
 
@@ -324,16 +331,29 @@ def test_heard_commands_drive_the_ring_indicator(tmp_path: Path, monkeypatch: An
     assert made[0].closed
 
 
+@pytest.mark.parametrize("opencode", [False, True])
 def test_realtime_uses_early_wake_and_never_emits_a_second_agent_command(
-        tmp_path: Path, monkeypatch: Any) -> None:
+        tmp_path: Path, monkeypatch: Any, opencode: bool) -> None:
     fake_stream(monkeypatch, {"outcome": "complete", "cleanup_verified": True})
     turns: list[Any] = []
     monkeypatch.setattr(vs.rv, "api_key", lambda: "synthetic")
+    answer = lambda *a: {"mode": "command", "text": "Ответ"}  # noqa: E731
+    bindings: list[Any] = []
+
+    def agent(executable: str, station_id: str, directory: Path) -> Any:
+        bindings.append((executable, station_id, directory))
+        return SimpleNamespace(answer=answer)
+
+    monkeypatch.setattr(vs.ov, "Agent", agent)
+    monkeypatch.delenv("ALICE_MCP_OPENCODE", raising=False)
+    if opencode:
+        monkeypatch.setenv("ALICE_MCP_OPENCODE", "/PRIVATE/opencode2")
 
     class Turn:
         active = False
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            assert kwargs["answer"] is (answer if opencode else None)
             self.closed, self.frames, self.wakes = False, 0, []
             turns.append(self)
 
@@ -372,6 +392,7 @@ def test_realtime_uses_early_wake_and_never_emits_a_second_agent_command(
     assert len(turns[0].wakes) == 1 and turns[0].closed
     assert voice_service.get_events()["events"] == []  # No OpenCode/Piper duplicate.
     assert voice_service.status()["realtime"]["model"] == "gpt-realtime-2.1"
+    assert bindings == ([("/PRIVATE/opencode2", "mini1", Path.cwd())] if opencode else [])
 
 
 def test_voice_model_cannot_switch_station_or_bypass_live_authorization(
@@ -396,3 +417,252 @@ def test_dictation_events_are_ram_only(tmp_path: Path, monkeypatch: Any) -> None
                             "trusted": False}, persist=False)
     assert voice_service.get_events()["events"][0]["text"] == "synthetic"
     assert not voice_service.sink.path.exists()
+
+
+def test_on_station_asr_wakes_from_partial_then_delivers_local_finals(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    heard: list[str] = []
+    wakes: list[int] = []
+    speech: list[bool] = []
+
+    class LocalTurn:
+        active = False
+        state = "idle"
+        echo_until = 0.0
+
+        def wake(self, event_id: int) -> bool:
+            self.active, self.state = True, "transcribing"
+            wakes.append(event_id)
+            return True
+
+        def transcript(self, text: str) -> bool:
+            heard.append(text)
+            return True
+
+        def speech_started(self) -> None:
+            speech.append(True)
+
+    turn = LocalTurn()
+    voice_service.realtime = turn  # type: ignore[assignment]
+    voice_service.station = "mini1"
+    voice_service._station_event({"event": "ready", "load_ms": 100})
+    assert voice_service.state == "listening"
+    voice_service._station_event({"event": "partial", "result": {"partial": "компьютер"}})
+    assert not speech
+    voice_service._station_event({"event": "partial", "result": {"partial": "компьютер давай"}})
+    assert speech == [True]
+    voice_service._station_event({"event": "final", "result": {"text": "компьютер"}})
+    voice_service._station_event({"event": "final", "result": {"text": "давай попиздим"}})
+    assert len(wakes) == 1 and heard == ["давай попиздим"]
+    assert voice_service.get_events()["events"] == []
+    turn.active, turn.state = False, "idle"
+    voice_service._station_event({"event": "final", "result": {"text": "просто шум"}})
+    assert len(wakes) == 1
+    voice_service._station_event({"event": "partial", "result": {"partial": "компьютер"}})
+    assert len(wakes) == 2
+    turn.active, turn.state = False, "idle"  # The empty command timed out quietly.
+    voice_service._station_event({"event": "final", "result": {"text": "компьютер"}})
+    assert len(wakes) == 2  # Its delayed final must not wake the ring a second time.
+    voice_service._station_event({"event": "partial", "result": {"partial": "компьютер"}})
+    assert len(wakes) == 3
+
+
+def test_station_asr_status_reports_actual_audio_progress(tmp_path: Path, monkeypatch: Any) -> None:
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    voice_service.source = "station_asr"
+    voice_service.live.update(audio_ms=3200, elapsed_ms=3400, load_ms=10000)
+    status = voice_service.status()
+    assert status["audio_s"] == 3.2
+    assert status["asr"] == {"load_ms": 10000, "lag_ms": 200, "wake_source": "station_vosk"}
+
+
+@pytest.mark.parametrize("ready", [False, True])
+def test_station_asr_only_owner_can_enable_indicator_preparation(
+        tmp_path: Path, monkeypatch: Any, ready: bool) -> None:
+    made: list[Any] = []
+
+    class Indicator:
+        def __init__(self, *args: Any, defer_preparation: bool = False) -> None:
+            self.deferred = defer_preparation
+            self.armed = not defer_preparation
+            self.closed = False
+            made.append(self)
+
+        def listen_ready(self) -> None:
+            self.armed = True
+
+        def close(self) -> None:
+            self.closed = True
+
+        def status(self) -> dict[str, str]:
+            return {"state": "idle"}
+
+    def listen(controller: Any, station_id: str, sink: Any, *, stop: Any,
+               **kwargs: Any) -> dict[str, Any]:
+        assert not made[0].armed
+        if not ready:
+            raise SafetyError("source already owned")
+        sink({"event": "ready", "wake_source": "station_mww"})
+        assert made[0].armed
+        stop.set()
+        return {"outcome": "complete", "cleanup_verified": True}
+
+    monkeypatch.setattr(vs.vi, "Indicator", Indicator)
+    monkeypatch.setattr(vs.station_asr, "listen", listen)
+    voice_service = service(tmp_path, monkeypatch, station(
+        tmp_path, source="station_asr",
+        asr_directory="/bkupgrade/data/opt/alice-local-asr-aaaaaaaaaaaa"))
+    voice_service.start("mini1")
+    wait(lambda: voice_service.state == "stopped")
+    assert made[0].deferred and made[0].closed and made[0].armed == ready
+    assert (voice_service.last_error is None) == ready
+
+
+def test_fast_station_wake_starts_before_vosk_and_late_text_cannot_reactivate(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice = service(tmp_path, monkeypatch, station(tmp_path))
+    heard = []
+    wakes = []
+
+    class Turn:
+        active = False
+        echo_until = 0.0
+
+        def wake(self, event_id: int) -> bool:
+            self.active = True
+            wakes.append(event_id)
+            return True
+
+        def transcript(self, text: str) -> bool:
+            heard.append(text)
+            return True
+
+        def speech_started(self) -> None:
+            pass
+
+    turn = Turn()
+    voice.realtime = turn  # type: ignore[assignment]
+    voice.station = "mini1"
+    voice._station_event({"event": "ready", "wake_source": "station_mww"})
+    voice._station_event({"event": "wake", "audio_ms": 500, "trusted": False})
+    assert len(wakes) == 1
+    voice._station_event({"event": "final", "result": {"text": "компьютер давай попиздим"}})
+    assert heard == ["давай попиздим"]
+    turn.active = False
+    for kind in ("partial", "final"):
+        voice._station_event({"event": kind, "result": {
+            "partial" if kind == "partial" else "text": "компьютер"}})
+    assert len(wakes) == 1
+    turn.echo_until = time.monotonic() + 10
+    voice._station_event({"event": "wake", "audio_ms": 4000, "trusted": False})
+    assert len(wakes) == 1
+    turn.echo_until = 0
+    voice._station_event({"event": "wake", "audio_ms": 7000, "trusted": False})
+    assert len(wakes) == 2
+
+
+@pytest.mark.parametrize("text", ["стоп", "хватит", "замолчи", "компьютер стоп",
+                                  "прекрати", "остановись", "хватит говорить"])
+def test_emergency_words_interrupt_partials_during_playback_without_wake_or_echo_gate(
+    tmp_path: Path, monkeypatch: Any, text: str,
+) -> None:
+    voice = service(tmp_path, monkeypatch, station(tmp_path))
+    turn = vs.rv.RealtimeTurn("synthetic", None, lambda _: {}, local_transcripts=True)
+    turn.active, turn.state = True, "speaking"
+    turn.echo_until = time.monotonic() + 20
+    voice.realtime = turn
+    voice._station_event({"event": "partial", "result": {"partial": text}})
+    assert turn.cancel.is_set() and turn.text_stopped.is_set() and turn.error is None
+
+
+def test_station_activity_keeps_a_lagging_command_open_but_ignores_wake_tail(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice = service(tmp_path, monkeypatch, station(tmp_path))
+    turn = vs.rv.RealtimeTurn('synthetic', None, lambda _: {}, local_transcripts=True)
+    voice.realtime = turn
+    voice._station_event({'event': 'ready', 'wake_source': 'station_mww'})
+    monkeypatch.setattr(voice, '_detected', lambda: None)
+    voice._station_event({'event': 'wake', 'audio_ms': 1000, 'trusted': False})
+    turn.active, turn.state = True, 'transcribing'
+    voice._station_event({'event': 'activity', 'audio_ms': 1500, 'trusted': False})
+    assert not turn.command_started.is_set()
+    assert turn.last_input_at == 0
+    voice._station_event({'event': 'activity', 'audio_ms': 1800, 'trusted': False})
+    assert turn.last_input_at > 0 and not turn.command_started.is_set()
+    last_input = turn.last_input_at
+    turn.state = 'speaking'
+    voice._station_event({'event': 'activity', 'audio_ms': 2000, 'trusted': False})
+    assert turn.last_input_at == last_input and not turn.command_started.is_set()
+
+
+@pytest.mark.parametrize('kind,key', [('interrupt_partial','partial'), ('interrupt_final','text')])
+def test_stop_grammar_output_can_only_interrupt_not_execute_commands(
+    tmp_path: Path, monkeypatch: Any, kind: str, key: str,
+) -> None:
+    voice = service(tmp_path, monkeypatch, station(tmp_path))
+    turn = vs.rv.RealtimeTurn('synthetic', None, lambda _: {}, local_transcripts=True)
+    turn.active, turn.state = True, 'speaking'
+    turn.echo_until = time.monotonic() + 10
+    voice.realtime = turn
+    voice._station_event({'event':kind, 'result':{key:'[unk] включи свет'}})
+    assert not turn.cancel.is_set() and turn.text.empty()
+    voice._station_event({'event':kind, 'result':{key:'[unk] стоп [unk]'}})
+    assert turn.cancel.is_set() and turn.text_stopped.is_set()
+
+
+def test_fast_wake_drops_a_vosk_word_fragment_until_post_wake_command_activity(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice = service(tmp_path, monkeypatch, station(tmp_path))
+    turn = vs.rv.RealtimeTurn('synthetic', None, lambda _: {}, local_transcripts=True)
+    voice.realtime = turn
+    voice._station_event({'event':'ready','wake_source':'station_mww'})
+    monkeypatch.setattr(voice, '_detected', lambda: None)
+    voice._station_event({'event':'wake','audio_ms':1000,'trusted':False})
+    turn.active,turn.state = True,'transcribing'
+    # A decoder rotation during the wake word can decode only its last syllables.
+    voice._station_event({'event':'partial','result':{'partial':'питер'}})
+    voice._station_event({'event':'final','result':{'text':'питер'}})
+    assert turn.text.empty() and not turn.command_started.is_set()
+    voice._station_event({'event':'activity','audio_ms':2200,'trusted':False})
+    voice._station_event({'event':'partial','result':{'partial':'давай поговорим'}})
+    voice._station_event({'event':'final','result':{'text':'давай поговорим'}})
+    assert turn.text.get_nowait() == 'давай поговорим'
+
+
+def test_activity_from_the_other_channel_can_arrive_before_its_wake(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice = service(tmp_path, monkeypatch, station(tmp_path))
+    turn = vs.rv.RealtimeTurn('synthetic', None, lambda _: {}, local_transcripts=True)
+    voice.realtime = turn
+    voice._station_event({'event':'ready','wake_source':'station_mww'})
+    def detected():
+        turn.active,turn.state = True,'transcribing'
+    monkeypatch.setattr(voice, '_detected', detected)
+    voice._station_event({'event':'activity','audio_ms':2000,'trusted':False})
+    voice._station_event({'event':'wake','audio_ms':1000,'trusted':False})
+    assert turn.last_input_at > 0 and not turn.command_started.is_set()
+    voice._station_event({'event':'final','result':{'text':'давай поговорим'}})
+    assert turn.text.get_nowait() == 'давай поговорим'
+
+
+def test_speech_activity_prevents_false_seven_second_conversation_timeout(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice = service(tmp_path, monkeypatch, station(tmp_path))
+    turn = vs.rv.RealtimeTurn('synthetic', None, lambda _: {}, local_transcripts=True)
+    voice.realtime = turn
+    voice._station_event({'event':'ready','wake_source':'station_mww'})
+    turn.active,turn.mode,turn.state = True,'conversation','conversation'
+    turn.conversation_idle_at = 100.0
+    now = [106.5]
+    monkeypatch.setattr(vs.rv.time,'monotonic',lambda:now[0])
+    turn.socket = SimpleNamespace(recv=lambda **kw:json.dumps({'type':'response.created'}))
+    voice._station_event({'event':'activity','audio_ms':20000,'trusted':False})
+    now[0] = 107.0
+    assert turn._receive(200) == {'type':'response.created'}

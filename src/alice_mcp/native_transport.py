@@ -9,7 +9,10 @@ import json
 import math
 import re
 import secrets
+import socket
 import ssl
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -41,11 +44,14 @@ def validate_config(value: Any) -> dict[str, str]:
     return dict(value)
 
 
-def call(station: Station, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def call(station: Station, tool: str, arguments: dict[str, Any], *,
+         cancel: threading.Event | None = None) -> dict[str, Any]:
     """One MCP session and one tool invocation. No retries, redirects or raw error output."""
     if tool not in TOOLS or not station.native_mcp:
         raise SafetyError("Native tool is not supported")
     connection: http.client.HTTPSConnection | None = None
+    finished = threading.Event()
+    watcher: threading.Thread | None = None
     try:
         config = validate_config(station.native_mcp)
         with Path(config["token_file"]).open("rb") as source:
@@ -57,6 +63,21 @@ def call(station: Station, tool: str, arguments: dict[str, Any]) -> dict[str, An
         url = urlsplit(config["url"])
         connection = http.client.HTTPSConnection(url.hostname or "", url.port or 443,
                                                  context=context, timeout=35)
+
+        def interrupt() -> None:
+            while not finished.wait(0.01):
+                if cancel is not None and cancel.is_set() and connection is not None:
+                    channel = connection.sock
+                    if channel is not None:
+                        try:
+                            channel.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                        return
+
+        if cancel is not None:
+            watcher = threading.Thread(target=interrupt, daemon=True)
+            watcher.start()
         bearer = "Bearer " + credential.decode("ascii")
         headers = {"Authorization": bearer,
                    "Content-Type": "application/json",
@@ -64,6 +85,8 @@ def call(station: Station, tool: str, arguments: dict[str, Any]) -> dict[str, An
                    "MCP-Protocol-Version": PROTOCOL}
 
         def exchange(method: str, params: dict[str, Any], *, notification: bool = False) -> Any:
+            if cancel is not None and cancel.is_set():
+                raise SafetyError("Native request cancelled")
             identifier = secrets.token_hex(16)
             request: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "params": params}
             if not notification:
@@ -107,8 +130,11 @@ def call(station: Station, tool: str, arguments: dict[str, Any]) -> dict[str, An
             "Native MCP channel unavailable or incompatible; no SSH fallback",
         ) from None
     finally:
+        finished.set()
         if connection is not None:
             connection.close()
+        if watcher is not None:
+            watcher.join(1)
 
 
 def capabilities(controller: Controller, station: Station) -> dict[str, Any]:
@@ -199,7 +225,8 @@ def _permission(controller: Controller, station: Station, action: str) -> None:
         raise SafetyError("Native action is not preauthorized by the host policy")
 
 
-def _state(controller: Controller, station: Station, action: str) -> str:
+def _state(controller: Controller, station: Station, action: str, *,
+           cancellable: bool = False) -> str:
     # Read-only compatibility remains available, but old residents cannot write.
     try:
         raw = call(station, "get_station_controls", {"station_id": station.id})
@@ -212,6 +239,7 @@ def _state(controller: Controller, station: Station, action: str) -> str:
     if (not result["writes_enabled"] or not result["preauthorize_all_actions"]
         or action not in result["allowed_actions"]
         or raw.get("state_contract") != "alice.native.state.v1"
+            or cancellable and raw.get("pcm_cancellation") is not True
         or not rt._match(rt.HEX64, stamp)
         or action == "speech.say" and raw.get("tts_backend", "yandex") != backend
         or action == "audio.play" and raw.get("tts_backend") != "local_pcm"):
@@ -320,7 +348,8 @@ def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
                  "do_not_retry": True, "physical_effects_verified": False}
 
 
-def play_pcm(controller: Controller, station: Station, audio: bytes) -> dict[str, Any]:
+def play_pcm(controller: Controller, station: Station, audio: bytes, *,
+             cancel: threading.Event | None = None) -> dict[str, Any]:
     """A host-pinned canonical WAV through the resident's local-PCM speech path, without
     synthesis (e.g. Alice's stock error phrase). Bound to the resident state; once."""
     from alice_mcp.local_tts import wav_parameters
@@ -330,19 +359,38 @@ def play_pcm(controller: Controller, station: Station, audio: bytes) -> dict[str
         raise SafetyError("Resident local PCM playback is not configured")
     parameters = wav_parameters(audio)
     with controller._execution_lock:  # Never over the agent's own speech.
-        state = _state(controller, station, "speech.say")
+        if cancel is not None and cancel.is_set():
+            return {"outcome": "cancelled", "cleanup_verified": True, "do_not_retry": True}
+        state = (_state(controller, station, "speech.say", cancellable=True)
+                 if cancel is not None else _state(controller, station, "speech.say"))
         fresh = controller.station(station.id)
         _permission(controller, fresh, "speech.say")
         if fresh != station:
             raise SafetyError("Native station configuration or trust changed")
         try:
-            result = call(station, "run_station_action", {
+            arguments = {
                 "station_id": station.id, "action": "speech.say", "parameters": parameters,
                 "expected_state_sha256": state,
-            })
+            }
+            result = (call(station, "run_station_action", arguments, cancel=cancel)
+                      if cancel is not None else call(station, "run_station_action", arguments))
+            if cancel is not None and cancel.is_set():
+                raise SafetyError("Native request cancelled")
             return _pcm_result(result, expected_frames=(len(audio) - 44) // 2,
                                expected_rate=int.from_bytes(audio[24:28], "little"))
         except Exception:
+            if cancel is not None and cancel.is_set():
+                # Read-only verification after cancellation; never resend the playback.
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    try:
+                        _state(controller, station, "speech.say", cancellable=True)
+                        if controller.station(station.id) != station:
+                            break
+                        return {"outcome": "cancelled", "cleanup_verified": True,
+                                "do_not_retry": True}
+                    except SafetyError:
+                        time.sleep(0.05)
             return {"outcome": "unknown", "error_code": "native_action_unverified",
                     "do_not_retry": True, "physical_effects_verified": False}
 
@@ -350,7 +398,20 @@ def play_pcm(controller: Controller, station: Station, audio: bytes) -> dict[str
 def _pcm_result(result: dict[str, Any], *, expected_frames: int | None = None,
                 expected_rate: int | None = None) -> dict[str, Any]:
     if result.get("outcome") == "blocked" and set(result) <= {"outcome", "error"}:
-        return {"outcome": "blocked", "error": "Resident local PCM policy/runtime blocked action"}
+        reasons = {
+            "Another native action is active": "native_busy",
+            "Fresh state-bound preview required": "stale_preview",
+            "Local PCM is not preauthorized by the resident policy": "pcm_not_authorized",
+            "Local PCM outside reviewed bounds": "pcm_outside_bounds",
+            "Reviewed local playback firmware, ALSA or Quasar unavailable": "playback_unavailable",
+            "Reviewed PCM player unavailable": "player_unavailable",
+            "Reviewed PCM player or policy changed": "player_or_policy_changed",
+        }
+        message = result.get("error")
+        code = (reasons.get(message, "resident_blocked")
+                if type(message) is str else "resident_blocked")
+        return {"outcome": "blocked", "error_code": code,
+                "error": "Resident local PCM policy/runtime blocked action"}
     if (set(result) != {"outcome", "playback_started", "playback_completed", "cleanup_verified",
                         "frames_written", "sample_rate", "quasar_running", "do_not_retry",
                         "evidence_class", "physical_effects_verified", "tts_backend",

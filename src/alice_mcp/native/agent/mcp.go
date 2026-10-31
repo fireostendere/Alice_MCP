@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
@@ -26,7 +27,7 @@ type server struct {
 	run       func(string, ...string) map[string]any
 	listen    func(int, ...string) map[string]any
 	status    func(string) map[string]any
-	pcm       func(pcmPayload, ...string) map[string]any
+	pcm       func(context.Context, pcmPayload, ...string) map[string]any
 	volume    func(volumeRequest, ...string) map[string]any
 	media     func(mediaPayload, ...string) map[string]any
 	show      func(ledPayload, ...string) map[string]any
@@ -204,7 +205,7 @@ func validText(text string) bool {
 	return true
 }
 
-func (s *server) tool(name string, arguments json.RawMessage) (map[string]any, bool) {
+func (s *server) tool(ctx context.Context, name string, arguments json.RawMessage) (map[string]any, bool) {
 	if len(arguments) == 0 {
 		arguments = json.RawMessage("{}")
 	}
@@ -264,7 +265,7 @@ func (s *server) tool(name string, arguments json.RawMessage) (map[string]any, b
 				if _, valid := decodePCM(audio); !valid {
 					return nil, false
 				}
-				return s.pcm(audio, args.Expected), true
+				return s.pcm(ctx, audio, args.Expected), true
 			}
 			var params struct {
 				Text string `json:"text"`
@@ -434,7 +435,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reply(w, request.ID, nil, -32602, "Invalid tool request")
 			return
 		}
-		value, ok := s.tool(args.Name, args.Arguments)
+		value, ok := s.tool(r.Context(), args.Name, args.Arguments)
 		if !ok {
 			reply(w, request.ID, nil, -32602, "Unknown tool or invalid arguments")
 			return

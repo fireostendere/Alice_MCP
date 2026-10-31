@@ -100,6 +100,46 @@ def test_w0_baseline_migrates_to_all_without_changing_pcm_or_credentials(setup: 
     assert controller.plans == {}
 
 
+def test_first_combined_baseline_accepts_reviewed_alsa_mapping(setup: Any) -> None:
+    _, station, package, _, _ = setup
+    config = json.loads(package.old_config)
+    config["allowed_actions"] = "all"
+    old = json.dumps(config).encode()
+    hashes = ("32f709fd80a9769f02bf44473719e403a8ce665234924be44270999e15f46f5e",
+              *package.old_hashes[1:3], sha(old), *package.old_hashes[4:])
+    volume = {"backend": "alsa_ctl", "card": 0, "control": "Master", "numid": 178,
+              "raw_min": 0, "raw_max": 32, "channels": 2, "max_percent": 30}
+    updated = agent_upgrade.bundle(station, b"new agent", b"player", old, hashes,
+                                   "d" * 64, "e" * 64, layout="direct",
+                                   config_updates={"volume": volume})
+    agent_upgrade._verify(station, updated)
+    for change in ({"control": "Mic Capture"}, {"channels": 3}, {"raw_max": 0},
+                   {"numid": True}, {"max_percent": 31}, {"amixer": "/bin/amixer"}):
+        with pytest.raises(ValueError):
+            agent_upgrade._updates(station, {"volume": {**volume, **change}})
+
+
+def test_calibrated_baseline_preserves_verified_volume_and_rejects_unknown_fields(
+        setup: Any) -> None:
+    _, station, package, _, _ = setup
+    config = json.loads(package.old_config)
+    config.update(allowed_actions="all", volume={"backend": "alsa_ctl", "card": 0,
+                  "control": "Master", "numid": 178, "raw_min": 0, "raw_max": 32,
+                  "channels": 2, "max_percent": 30})
+    for extra in ({}, {"arbitrary": True}, {"volume": {**config["volume"], "control": "Mic"}}):
+        old = json.dumps({**config, **extra}).encode()
+        hashes = ("19d233ad5dc29b3468d5be985d299e6c99428e13cf5eec9aac66365ab6d68ee3",
+                  *package.old_hashes[1:3], sha(old), *package.old_hashes[4:])
+        if extra:
+            with pytest.raises(SafetyError):
+                agent_upgrade.bundle(station, b"new agent", b"player", old, hashes,
+                                     "d" * 64, "e" * 64, layout="direct")
+        else:
+            updated = agent_upgrade.bundle(station, b"new agent", b"player", old, hashes,
+                                           "d" * 64, "e" * 64, layout="direct")
+            agent_upgrade._verify(station, updated)
+
+
 def test_long_helper_uses_short_exec_requests_not_the_ssh_command_argument(setup: Any) -> None:
     _, station, package, _, _ = setup
     script = "# reviewed helper\n" * 1000

@@ -1,0 +1,6 @@
+{
+  "name": "alice-mcp-agent-sessions",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./index.js" }
+}

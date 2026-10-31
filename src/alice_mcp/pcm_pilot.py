@@ -13,6 +13,7 @@ import re
 import shlex
 import subprocess
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -146,11 +147,14 @@ def _command(station: Station, item: Candidate, expected: str = "") -> _Transfer
                      item.player + item.audio if expected else b"")
 
 
-def _transfer(station: Station, request: _Transfer, *, limit: int = 4096) -> str:
-    return _transfer_bytes(station, request, limit=limit).decode("utf-8", errors="strict")
+def _transfer(station: Station, request: _Transfer, *, limit: int = 4096,
+              on_line: Callable[[bytes], None] | None = None) -> str:
+    return _transfer_bytes(station, request, limit=limit, on_line=on_line).decode(
+        "utf-8", errors="strict")
 
 
-def _transfer_bytes(station: Station, request: _Transfer, *, limit: int) -> bytes:
+def _transfer_bytes(station: Station, request: _Transfer, *, limit: int,
+                    on_line: Callable[[bytes], None] | None = None) -> bytes:
     """Bounded binary stdin over existing pinned SSH; no bootstrap result-contract reuse."""
     if len(request.data) > MAX_TRANSFER or len(request.command.encode()) > 20000:
         raise SafetyError("Local PCM transfer exceeds reviewed bounds")
@@ -169,9 +173,24 @@ def _transfer_bytes(station: Station, request: _Transfer, *, limit: int) -> byte
                 failed.append(True)
 
         def read() -> None:
-            body = source.read(limit + 1)
-            output.append(body)
-            if len(body) > limit:
+            try:
+                if on_line is None:
+                    body = source.read(limit + 1)
+                else:
+                    parts: list[bytes] = []
+                    size = 0
+                    while line := source.readline(limit + 1 - size):
+                        size += len(line)
+                        if size > limit or not line.endswith(b"\n"):
+                            raise ValueError("Incomplete or oversized stream line")
+                        on_line(line)
+                        parts.append(line)
+                    body = b"".join(parts)
+                output.append(body)
+                if len(body) > limit:
+                    raise ValueError("Transfer output limit")
+            except Exception:
+                failed.append(True)
                 process.kill()
 
         writer = threading.Thread(target=write, daemon=True)

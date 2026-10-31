@@ -106,6 +106,13 @@ def native(tmp_path: Path) -> Any:
                         assert len(audio) > 16384 and "text" not in parameters
                     else:
                         assert parameters == {"text": "synthetic"}
+                    if "_await_disconnect" in result:
+                        started, closed = result["_await_disconnect"]
+                        started.set()
+                        self.connection.settimeout(3)
+                        if self.connection.recv(1) == b"":
+                            closed.set()
+                        return
                     data = copy.deepcopy(result)
                 value = {"content": [{"type": "text", "text": json.dumps(data)}],
                          "structuredContent": data, "isError": False}
@@ -155,6 +162,22 @@ def test_native_only_inventory_does_not_need_or_use_ssh(native: Any) -> None:
     assert result["data"]["memory_available_kib"] == 100000
     assert result["data"]["agent_rss_kib"] == 9000
     assert calls == ["station_probe"]
+
+
+def test_cancelled_native_request_closes_the_connection_without_resending(native: Any) -> None:
+    controller, calls, result, _, _ = native
+    started, closed, cancel = threading.Event(), threading.Event(), threading.Event()
+    result["_await_disconnect"] = (started, closed)
+    station = controller.station("desk")
+    with ThreadPoolExecutor(1) as workers:
+        pending = workers.submit(native_transport.call, station, "run_station_action", {
+            "station_id": "desk", "action": "speech.say", "parameters": {"text": "synthetic"},
+            "expected_state_sha256": "c" * 64}, cancel=cancel)
+        assert started.wait(3)
+        cancel.set()
+        with pytest.raises(SafetyError):
+            pending.result(timeout=2)
+    assert closed.wait(1) and calls == ["run_station_action"]
 
 
 def test_native_controls_and_one_action_preserve_unknown_without_retry(native: Any,
@@ -353,6 +376,16 @@ def test_local_pcm_results_reject_uncorrelated_or_private_fields() -> None:
                        ("playback_elapsed_ms", True), ("playback_elapsed_ms", 25001)]:
         with pytest.raises(SafetyError):
             native_transport._pcm_result(dict(valid, **{key: value}))
+
+
+def test_pcm_block_reason_is_diagnostic_without_exposing_peer_text() -> None:
+    result = native_transport._pcm_result({
+        "outcome": "blocked", "error": "Reviewed PCM player or policy changed"})
+    assert result["error_code"] == "player_or_policy_changed"
+    for message in ("PRIVATE_SENTINEL", ["unexpected"]):
+        result = native_transport._pcm_result({"outcome": "blocked", "error": message})
+        assert result["error_code"] == "resident_blocked"
+        assert "PRIVATE_SENTINEL" not in str(result)
 
 
 def test_local_pcm_result_is_bound_to_the_submitted_audio_not_just_plausible_counts() -> None:

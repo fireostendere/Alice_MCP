@@ -20,6 +20,7 @@ import secrets
 import shlex
 import sys
 import wave
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,8 @@ from alice_mcp.vqe_experiment import _ssh
 
 # W5's three-model ARM32 build (komp, okey_dom, marusya); docs/MICRO_WAKE_WORD.md.
 DETECTOR_SHA256 = "d2b73953eeaa144ff4b8baa08f06a660bbbc8be698852a3f4881f39c25be45c4"
+# Personalized komp model; ARM build inspected locally, room latency still unqualified.
+FT_DETECTOR_SHA256 = "bbafcf720f097f08a5effb1e162c535bed1e9fc4c23f5e82f2c1e8267421631f"
 ACTION = "wake.pilot"
 OUTPUT_LIMIT = 32768
 REPLAY_LIMIT = 131072  # 10 s traced by three models is about 1,000 lines, 55 KB.
@@ -186,7 +189,8 @@ class Pilot:
             or not re.fullmatch("[a-f0-9]{32}", self.nonce)
             or type(self.client) is not bytes or type(self.detector) is not bytes
             or hashlib.sha256(self.client).hexdigest() != iop.HELPER_SHA256
-            or hashlib.sha256(self.detector).hexdigest() != DETECTOR_SHA256):
+            or hashlib.sha256(self.detector).hexdigest() not in {
+                DETECTOR_SHA256, FT_DETECTOR_SHA256}):
             raise SafetyError("Wake pilot input or reviewed helpers invalid; no transfer")
 
     @property
@@ -223,7 +227,8 @@ class Replay:
             or type(self.gain_db) is not int or not 0 <= self.gain_db <= 30
             or type(self.port) is not int or not 1024 <= self.port <= 65535
             or not re.fullmatch("[a-f0-9]{32}", self.nonce) or type(self.detector) is not bytes
-            or hashlib.sha256(self.detector).hexdigest() != DETECTOR_SHA256):
+            or hashlib.sha256(self.detector).hexdigest() not in {
+                DETECTOR_SHA256, FT_DETECTOR_SHA256}):
             raise SafetyError("Replay clip or reviewed detector invalid; no transfer")
 
     @property
@@ -265,7 +270,8 @@ def shell(station: Station, mode: str, expected: str, purpose: str, *, nonce: st
     source = SCRIPT if mode == "apply" else SCRIPT[:SCRIPT.index('[ "$mode" = apply ]')]
     args = [mode, nonce, str(port), str(seconds), str(gain_db),
             station.controls["firmware_sha256"], hashlib.sha256(first).hexdigest(),
-            DETECTOR_SHA256, str(len(first)), expected, purpose]
+            hashlib.sha256(detector).hexdigest() if detector else DETECTOR_SHA256,
+            str(len(first)), expected, purpose]
     return _Transfer("sh -c " + shlex.quote(source) + " sh "
                      + " ".join(shlex.quote(a) for a in args),
                      first + detector if mode == "apply" else b"")
@@ -323,7 +329,8 @@ def _ready(value: dict[str, Any], gain_db: int) -> dict[str, int]:
     return names
 
 
-def _detector(events: list[dict[str, Any]], gain_db: int, trace: bool = False) -> tuple[
+def _detector(events: list[dict[str, Any]], gain_db: int, trace: bool = False, *,
+              limit_ms: int = 90000) -> tuple[
         dict[str, int] | None, list[dict[str, Any]], dict[str, Any] | None, str | None,
         dict[str, list[int]]]:
     """Detector lines in their own order: ready, (p|wake)*, then end or error. Untrusted."""
@@ -345,7 +352,7 @@ def _detector(events: list[dict[str, Any]], gain_db: int, trace: bool = False) -
             models = _ready(value, gain_db)
         elif (kind == "p" and trace and models is not None
               and set(value) == {"event", "model", "t_ms", "q"} and value["model"] in models
-              and iop._integer(value["t_ms"], last.get(value["model"], -1) + 1, 90000)
+              and iop._integer(value["t_ms"], last.get(value["model"], -1) + 1, limit_ms)
               and iop._integer(value["q"], 0, 255)):
             expected_ms = (2 + (len(traces.get(value["model"], [])) + 1)
                            * models[value["model"]]) * 10
@@ -356,14 +363,16 @@ def _detector(events: list[dict[str, Any]], gain_db: int, trace: bool = False) -
         elif (kind == "wake" and models is not None
               and set(value) == {"event", "model", "t_ms", "probability", "peak", "last",
                                  "trusted"}
-              and value["model"] in models and iop._integer(value["t_ms"], 0, 90000)
+              and value["model"] in models and iop._integer(value["t_ms"], 0, limit_ms)
               and all(_unit(value[k]) for k in ("probability", "peak", "last"))
-              and value["trusted"] is False and len(detections) < 128):
+              and value["trusted"] is False
+              and len(detections) < max(128, limit_ms // 2500 + 1)):
             detections.append({"word": value["model"], "probability": value["probability"],
                                "t_ms": value["t_ms"], "trusted": False})
         elif (kind == "end" and models is not None
               and set(value) == {"event", "reason", "audio_ms", "detections"}
-              and value["reason"] in END_REASONS and iop._integer(value["audio_ms"], 0, 90000)
+              and value["reason"] in END_REASONS
+              and iop._integer(value["audio_ms"], 0, limit_ms)
               and type(value["detections"]) is list
               and all(type(n) is int for n in value["detections"])
               and value["detections"] == [sum(d["word"] == name for d in detections)
@@ -524,7 +533,8 @@ def _json(line: str) -> Any:
 
 
 def apply(controller: Controller, plan_id: str, expected: str,
-          item: Pilot | Replay) -> dict[str, Any]:
+          item: Pilot | Replay, *,
+          on_event: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     try:
         plan = controller.take_plan(plan_id, expected)
         with controller._execution_lock:
@@ -540,6 +550,21 @@ def apply(controller: Controller, plan_id: str, expected: str,
                 if isinstance(item, Replay):
                     return parse_replay(_transfer(ssh, request, limit=REPLAY_LIMIT),
                                         item.gain_db, len(item.pcm))
+                if on_event is not None:
+                    events: list[dict[str, Any]] = []
+
+                    def line(raw: bytes) -> None:
+                        value = _json(raw.decode("utf-8", "strict"))
+                        if type(value) is not dict:
+                            raise ValueError("Invalid detector event")
+                        if "event" in value:
+                            events.append(value)
+                            _detector(events, item.gain_db)
+                            # Provisional, untrusted observations; final cleanup still matters.
+                            on_event(value)
+
+                    return parse_result(_transfer(ssh, request, limit=OUTPUT_LIMIT,
+                                                  on_line=line), item.gain_db)
                 return parse_result(_transfer(ssh, request, limit=OUTPUT_LIMIT), item.gain_db)
             except Exception:
                 return {"outcome": "unknown", "error_code": "transport_uncertain",

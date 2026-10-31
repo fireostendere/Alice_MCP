@@ -60,6 +60,55 @@ conversation ends silently after seven seconds; generation/playback are excluded
 and local partials refresh activity. These combined changes await manual device
 acceptance; the successful keyword-only pilot is separate evidence.
 
+### Stock command spotter
+
+Quasar's own command spotter (model `ru-RU-quasar-commands-10Feb25`, 25 phrases such
+as «стоп», «хватит», «громче», «тише», «пауза») keeps running beside our wake word.
+With the optional private `quasar_client` path, the listener also runs the pinned
+client (`asr_once.c` built with `ASR_ONCE_SPOTTER`, SHA-256 in
+`quasar_client.CLIENT_SHA256`). It is sent over pinned SSH into a private tmpfs
+directory and adds itself as an `AddListener(CommandSpotterCapability)` on aliced 9875.
+Only allowlisted phrases of that model leave the station, as untrusted `spotter`
+events in `get_voice_events`; closing SSH stdin stops it and removes the directory.
+«Стоп» and «хватит» cancel the assistant's reply and end conversation or dictation,
+like the local stop grammar. Quasar acts on its phrases itself: bare «громче» and
+«тише» (also inside «сделай громче») change its volume locally, with the stock ring
+and click. The host never adds a second step: a voice volume step within four seconds
+of the matching stock event is reported as applied by `quasar_spotter` (waiting at
+most 0.3 s for a late event while the listener runs).
+
+### Quasar level and stock Alice
+
+Mini 1 accepts method calls from local clients only in Quasar's own full
+`QuasarMessage{210: Remoting}` form (the packed 252/253 form works only for listeners);
+its `DirectiveSequencer` host rejects external calls. The same pinned client therefore
+sends only fixed requests:
+
+- `quasar.volume`: `AliceCapability.START_REQUEST` with the text «громкость <0–10>»,
+  «громче» or «тише». Quasar runs `sound_set_level` through its `VolumeCapability`, so
+  its saved level, ring, click, VQE and the app stay consistent. This is Alice's normal
+  text path and needs Yandex's cloud. The station script confirms the requested change
+  in `/data/quasar/last_vendor_volume`; no confirmation within five seconds is
+  `unknown` and never retried. A step at 0 or 10 is blocked before sending.
+- `alice.activation`: `ActivationSpotterCapability` DISABLE, or ENABLE then START. Only
+  the stock «Алиса» wake word stops; Quasar, its command spotter and our pipeline keep
+  running, and a Quasar restart or reboot re-enables it. Confirmed by Quasar's
+  `onPhraseSpotterStop`/`onPhraseSpotterBegin` log line.
+
+With a resident, a full SSH firmware hash runs once per resident state stamp; later
+actions under the same fresh stamp skip re-hashing. Measured on one Mini 1: about
+2 s per warm volume action, 4.4 s cold. No caller text reaches Alice.
+
+### Volume commands on this PC
+
+After the wake word, `realtime_voice.volume_command` parses volume phrases locally, with
+no answer agent and no speech: «громкость N» or «громкость на N» (N = 0–10, digits or
+words), «громкость N процентов» (rounded to tens), «поставь/сделай громкость N»,
+«погромче», «потише», «сделай громче/тише», «ещё громче/тише». Each runs
+`quasar.volume` once; Quasar shows its own ring. The private `max_volume` must allow
+the level. Our ring darkens before the action so Quasar's ring is not covered. An unknown
+outcome latches the voice route.
+
 With `REAL_TIME_API_KEY` configured, only audio received after detection is sent
 to OpenAI. The current 100 ms audio block may contain the end of the wake word.
 The key remains on the host. Audio stays in RAM. The direct API routes do not save
@@ -75,6 +124,10 @@ remains available.
 | Speak the resulting text | `gpt-realtime-2.1-mini`, text input and streamed audio output |
 | **компьютер, давай поговорим** / **компьютер, давай попиздим** | `gpt-realtime-2.1`, ongoing speech-to-speech session |
 | **компьютер, начни диктовку** | `gpt-live-transcribe`, ongoing transcription session |
+
+An optional private `voice.conversation_prompt` (1–1000 characters) is appended to the
+Realtime conversation instructions only, never to spoken command replies; use it for
+the assistant's character or how it opens a conversation.
 
 Say **закончи разговор** to leave conversation mode, or **закончи диктовку** to
 leave dictation mode. Subsequent conversation turns need no wake word. Dictation
@@ -124,7 +177,10 @@ SYSTEM and Administrators is checked instead. Symlink dotenv files are refused.
 If the MCP process has a different working directory, set its private
 `ALICE_MCP_REALTIME_ENV` to the absolute path of this project's `.env`. Restart or
 reload the single project-local `alice` MCP, then use `voice_listen_start` for the
-configured Mini 1. `voice_status().realtime` reports the selected route, models,
+configured Mini 1. Only one MCP process per PC can own the listener (an owner-only
+`voice-owner.lock` beside the voice events file): parallel OpenCode sessions once
+exhausted the Mini 1's memory while starting together. Other processes report
+the listener as owned elsewhere; the kernel drops the claim when its owner exits. `voice_status().realtime` reports the selected route, models,
 stage, sanitized playback metadata and timings, never the key or transcript.
 `timing_ms` measures from wake detection: command endpoint, completed transcript,
 answer, first playback dispatch and first completed playback. Dispatch/completion

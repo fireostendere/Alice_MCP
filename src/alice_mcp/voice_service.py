@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from alice_mcp import controls, native_transport, station_asr, station_wake
+from alice_mcp import controls, native_transport, quasar_client, station_asr, station_wake
 from alice_mcp import io_channel_pilot as iop
 from alice_mcp import opencode_voice as ov
 from alice_mcp import realtime_voice as rv
@@ -32,6 +32,7 @@ from alice_mcp.core import Controller, SafetyError, load_inventory
 from alice_mcp.wake_simulate import read_pinned
 
 WORD = "компьютер"
+STOCK_STOP = frozenset({"стоп", "хватит"})
 FILE_LIMIT = 256 * 1024  # Rotated to voice-events.jsonl.1 past this size.
 STOP_S = 45.0  # Chunk stop (<= 10 s each) plus verified station cleanup over SSH.
 RESULT_KEYS = ("outcome", "reason", "error_code", "cleanup_verified", "quasar_running",
@@ -102,6 +103,10 @@ class VoiceService:
         self.last_id = 0
         self.utterances = 0
         self.indicator: Any = None
+        self._owner_fd: int | None = None
+        self._spotted: dict[str, float] = {}
+        self._spotter_seen = threading.Condition()
+        self._spotter_running = False
         self.realtime: rv.RealtimeTurn | None = None
         self._local_pending_until = 0.0
         self._local_keyword_seen = False
@@ -114,7 +119,7 @@ class VoiceService:
             self.last_id = max(self.last_id + 1, int(time.time() * 1000))
             record = {"id": self.last_id,
                       "ts": datetime.now(UTC).isoformat(timespec="seconds"), **record}
-            if record["kind"] in {"wake", "dictation"}:
+            if record["kind"] in {"wake", "dictation", "spotter"}:
                 self.events.append(record)
         if not persist:
             return record
@@ -141,32 +146,44 @@ class VoiceService:
         with self.lock:
             if self.state != "stopped" or self.thread is not None and self.thread.is_alive():
                 raise SafetyError("Voice listener already running; stop it first")
-            self.stop_event = threading.Event()
-            self.station, self.live, self.last_error, self.result = station.id, {}, None, None
-            self.source = voice.get("source", "PC")
-            self.indicator = vi.Indicator(self.controller, station.id,
-                                          defer_preparation=self.source == "station_asr")
-            executable = os.environ.get("ALICE_MCP_OPENCODE")
-            agent = ov.Agent(executable, station.id, Path.cwd()) if executable and key else None
-            self.realtime = rv.RealtimeTurn(
-                key, self.indicator,
-                lambda audio: native_transport.play_pcm(
-                    self.controller, self.controller.station(station.id), audio,
-                    cancel=self.realtime.cancel if self.realtime else None),
-                action=self._action,
-                answer=agent.answer if agent else None,
-                local_transcripts=self.source == "station_asr",
-                emit=lambda event: self._record({**event, "kind": "dictation",
-                                                  "station": station.id, "trusted": False},
-                                                 persist=False)) if key else None
-            self.thread = threading.Thread(target=self._run, name="alice-voice", daemon=True,
-                                           args=(station.id, dict(voice), self.stop_event))
-            self.state = "starting"
-            self._state("starting")
-            self.thread.start()
+            self._claim_owner()
+            try:
+                self._prepare_start(station, voice, key)
+            except BaseException:
+                self._release_owner()  # Nothing started: do not hold the PC-wide claim.
+                raise
         return {"outcome": "started", **self.status()}
 
+    def _prepare_start(self, station: Any, voice: dict[str, Any], key: str | None) -> None:
+        self.stop_event = threading.Event()
+        self.station, self.live, self.last_error, self.result = station.id, {}, None, None
+        self.source = voice.get("source", "PC")
+        self.indicator = vi.Indicator(self.controller, station.id,
+                                      defer_preparation=self.source == "station_asr")
+        executable = os.environ.get("ALICE_MCP_OPENCODE")
+        agent = ov.Agent(executable, station.id, Path.cwd()) if executable and key else None
+        self.realtime = rv.RealtimeTurn(
+            key, self.indicator,
+            lambda audio: native_transport.play_pcm(
+                self.controller, self.controller.station(station.id), audio,
+                cancel=self.realtime.cancel if self.realtime else None),
+            action=self._action,
+            answer=agent.answer if agent else None,
+            local_transcripts=self.source == "station_asr",
+            conversation_prompt=voice.get("conversation_prompt", ""),
+            emit=lambda event: self._record({**event, "kind": "dictation",
+                                              "station": station.id, "trusted": False},
+                                             persist=False)) if key else None
+        self.thread = threading.Thread(target=self._run, name="alice-voice", daemon=True,
+                                       args=(station.id, dict(voice), self.stop_event))
+        self.state = "starting"
+        self._state("starting")
+        self.thread.start()
+
     def _run(self, station_id: str, voice: dict[str, Any], stop: threading.Event) -> None:
+        if self.controller.station(station_id).controls.get("quasar_client"):
+            threading.Thread(target=self._watch_spotter, args=(station_id, stop),
+                             name="alice-spotter", daemon=True).start()
         try:
             if voice.get("source") == "station_asr":
                 while not stop.is_set():
@@ -223,10 +240,35 @@ class VoiceService:
             # Never hand private paths or transport errors to MCP output.
             self.last_error = "Voice listener failed; inspect locally"
         finally:
+            stop.set()  # This session is over: its stock spotter watcher ends with it.
+            self._release_owner()
             if self.realtime is not None:
                 self.realtime.close()
             self.indicator.close()  # Darkens the ring and verifies no player is left.
             self._state("stopped")
+
+    def _watch_spotter(self, station_id: str, stop: threading.Event) -> None:
+        try:
+            self._watch_spotter_sessions(station_id, stop)
+        finally:
+            self._spotter_running = False
+
+    def _watch_spotter_sessions(self, station_id: str, stop: threading.Event) -> None:
+        """Read-only stock spotter events; a new ≤1 h session only after a clean deadline."""
+        while not stop.is_set():
+            try:
+                self._spotter_running = True
+                summary = quasar_client.watch(self.controller, station_id,
+                                                self._station_event, stop=stop)
+            except SafetyError as error:
+                self.live["spotter"] = str(error)
+                return
+            except Exception:
+                self.live["spotter"] = "failed"  # Never hand private paths to MCP output.
+                return
+            self.live["spotter"] = summary.get("reason") or summary.get("error_code")
+            if summary.get("reason") != "deadline":
+                return
 
     def _run_station(self, station_id: str, stop: threading.Event) -> None:
         self._state("listening")
@@ -241,6 +283,16 @@ class VoiceService:
                                         "sources": ["station_mww"]})
 
     def _station_event(self, event: dict[str, Any]) -> None:
+        if event["event"] == "spotter":
+            # Quasar already acted on its own phrase (e.g. volume); we only stop our dialogue.
+            with self._spotter_seen:
+                self._spotted[event["phrase"]] = time.monotonic()
+                self._spotter_seen.notify_all()
+            self._record({"kind": "spotter", "station": self.station, "phrase": event["phrase"],
+                          "source": "quasar_spotter", "trusted": False}, persist=False)
+            if event["phrase"] in STOCK_STOP and self.realtime is not None:
+                self.realtime.emergency_stop()
+            return
         if event["event"] in {"interrupt_partial", "interrupt_final"}:
             key = "partial" if event["event"].endswith("partial") else "text"
             text = event["result"][key].replace("[unk]", " ")
@@ -309,6 +361,11 @@ class VoiceService:
                 self._detected()
             self._local_pending_until = time.monotonic() + 5
         command = rv._normalized(text) if keyword else text
+        volume = rv.volume_command(command) if final and command else None
+        if volume is not None and (keyword or time.monotonic() < self._local_pending_until):
+            self._local_pending_until = 0.0  # Handled on this PC, never by the agent.
+            self._action({"action": "quasar.volume", "parameters": volume})
+            return
         if final and command and time.monotonic() < self._local_pending_until:
             self._wake(str(self.station))({"word": WORD, "command": command,
                                            "sources": ["station_vosk"]})
@@ -334,13 +391,35 @@ class VoiceService:
             if not station.preauthorize_all_actions:
                 raise SafetyError("Standing station authorization required")
             action, params = arguments["action"], arguments["parameters"]
-            if station.native_mcp:
-                return native_transport.run_action(self.controller, station, action, params)
-            plan = controls.preview(self.controller, station.id, action, params)
-            return self.controller.execute_plan(self.controller.take_plan(
-                plan["plan_id"], plan["expected_sha256"]))
+            step = params.get("step") if action in {"audio.volume", "quasar.volume"} else None
+            if step in ("louder", "quieter") and self._stock_stepped(
+                    "громче" if step == "louder" else "тише"):
+                return {"outcome": "applied", "source": "quasar_spotter"}
+            if station.native_mcp and action not in controls.QUASAR_ACTIONS:
+                result = native_transport.run_action(self.controller, station, action, params)
+            else:
+                plan = controls.preview(self.controller, station.id, action, params)
+                result = self.controller.execute_plan(self.controller.take_plan(
+                    plan["plan_id"], plan["expected_sha256"]))
         except (SafetyError, ValueError, TypeError):
             return {"outcome": "blocked", "error": "Station policy or runtime blocked action"}
+        return result
+
+    def _stock_stepped(self, phrase: str) -> bool:
+        """Quasar's own spotter already stepped its volume for this phrase (consumed once).
+
+        Its event normally precedes our final transcript; allow a short grace for lag.
+        """
+        deadline = time.monotonic() + (0.3 if self._spotter_running else 0)
+        with self._spotter_seen:
+            while True:
+                seen = self._spotted.pop(phrase, None)
+                if seen is not None and time.monotonic() - seen < 4:
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._spotter_seen.wait(remaining)
 
     def _wake(self, station_id: str) -> Callable[[dict[str, Any]], None]:
         def emit(event: dict[str, Any]) -> None:
@@ -358,6 +437,35 @@ class VoiceService:
             self.utterances += 1
         elif "mww" in entry:
             self.last_error = "mww detector disabled after repeated exits; Vosk only"
+
+    def _claim_owner(self) -> None:
+        """One voice listener per PC: parallel OpenCode sessions must not race the station.
+
+        Concurrent starts once exhausted the Mini 1's memory (ASR memory_guard). The
+        kernel drops the lock when its owner process exits.
+        """
+        if self._owner_fd is not None:
+            return
+        try:
+            import fcntl
+        except ImportError:  # Native Windows has no voice listener support anyway.
+            return
+        directory = self.sink.path.parent
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(directory / "voice-owner.lock",
+                     os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            raise SafetyError("Voice listener is owned by another MCP process on this PC; "
+                              "use that session or stop it first") from None
+        self._owner_fd = fd
+
+    def _release_owner(self) -> None:
+        fd, self._owner_fd = self._owner_fd, None
+        if fd is not None:
+            os.close(fd)  # Closing the only descriptor releases the flock.
 
     def stop(self, timeout: float = STOP_S) -> dict[str, Any]:
         with self.lock:

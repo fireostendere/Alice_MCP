@@ -100,6 +100,8 @@ and unapproved aliases are not valid parameters. Aliases match
 | `media.upload` | `asset`: approved media alias; `content_base64`: encoded content, decoded size at most 49,152 bytes | Decoded SHA-256 must match the asset's preregistered policy hash. This limit deliberately bounds SSH arguments; it is not a streaming upload API. |
 | `sound.replace` | `asset`: approved media alias; `slot`: `spotter_start`, `spotter_cancel`, `volume_sound` or `notification_sound` | Backs up and replaces only that fixed system-sound slot. Reload and audible effect remain unverified. |
 | `config.select` | `binding`: approved config alias; `option`: one of that binding's approved option aliases | Changes an existing known JSON leaf to its private operator-approved value. No supplied URL/value, new field, backend installation or automatic reload. |
+| `quasar.volume` | `level`: integer 0–10 (×10 %, within `max_volume`), or `step`: `louder`/`quieter` | Mini 1 with private `quasar_client`. Asks stock Alice locally (fixed text, Quasar's IPC) so Quasar sets its own level, ring, click and app/VQE state; verified by its saved level. Uses the Alice text path (Yandex cloud). |
+| `alice.activation` | `enabled`: boolean | Mini 1 with private `quasar_client`. Stops or starts only the stock «Алиса» wake word; Quasar keeps running and a restart/reboot re-enables it. Verified by Quasar's spotter log. |
 | `restore` | `backup_id`: 32 lowercase hexadecimal characters | Rechecks the recorded post-edit state before restoring one exact runtime backup. Optimistic check, not atomic CAS. Not factory recovery or a broad reset. |
 
 For example, after local opt-in, a read-only preview request may be:

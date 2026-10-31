@@ -36,6 +36,8 @@ RESULT_KEYS = {
 OUTCOMES = {"ready", "applied", "blocked", "conflict", "unknown", "capturing", "complete"}
 # The installed Mini 1 resident has no LED adapter: these use explicit pinned SSH on request.
 SSH_LED_ACTIONS = frozenset({"led.capture", "led.animate", "led.pulse", "led.show"})
+# Quasar's own level and wake word through its local IPC (quasar_client.py), pinned SSH only.
+QUASAR_ACTIONS = frozenset({"quasar.volume", "alice.activation"})
 
 
 def parse_response(text: str) -> dict[str, Any]:
@@ -101,6 +103,10 @@ def parse_response(text: str) -> dict[str, Any]:
 
 
 def invoke(controller: Controller, station: Station, request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("action") in QUASAR_ACTIONS:
+        from alice_mcp import quasar_client
+
+        return quasar_client.invoke(controller, station, request)
     if request.get("action") in {"speech.listen", "speech.say"}:
         from alice_mcp import speech_capture
 
@@ -189,8 +195,8 @@ def _station(controller: Controller, station_id: str, action: str, ssh: bool) ->
     station = controller.station(station_id)
     if not ssh:
         return station
-    if station.model != "station-mini" or action not in SSH_LED_ACTIONS:
-        raise SafetyError("Explicit SSH is only for Mini 1 LED capture, pulses, shows and presets")
+    if station.model != "station-mini" or action not in SSH_LED_ACTIONS | QUASAR_ACTIONS:
+        raise SafetyError("Explicit SSH is only for Mini 1 LED and Quasar IPC actions")
     if not station.native_mcp:
         return station
     from alice_mcp.vqe_experiment import _ssh
@@ -209,6 +215,16 @@ def _check_permission(controller: Controller, station: Station, action: str) -> 
 
 def describe(request: dict[str, Any]) -> str:
     action, params = request["action"], request["params"]
+    if action == "quasar.volume":
+        what = (f"set Quasar's own volume level to {params['level']} of 10" if "level" in params
+                else f"one stock step {params['step']}")
+        return (f"Ask stock Alice locally to {what} through Quasar's IPC text path (the pinned "
+                "client is sent over SSH and removed). Quasar sets the level, ring, click and "
+                "app state itself; verified by its saved level. No other text, no retry.")
+    if action == "alice.activation":
+        return (("Re-enable" if params["enabled"] else "Disable") + " the stock «Алиса» wake "
+                "word through Quasar's spotter capability. Quasar keeps running; a Quasar "
+                "restart or reboot re-enables it. Verified by its spotter log. No retry.")
     if action == "speech.say":
         from alice_mcp.speech_capture import TTS_CLIENT_SHA256
 
@@ -314,7 +330,7 @@ def _digest(station: Station, request: dict[str, Any], state: str) -> str:
 
 def preview(controller: Controller, station_id: str, action: str,
             parameters: dict[str, Any], *, ssh: bool = False) -> dict[str, Any]:
-    station = _station(controller, station_id, action, ssh)
+    station = _station(controller, station_id, action, ssh or action in QUASAR_ACTIONS)
     if station.native_mcp:
         raise SafetyError("Use run_station_action for native MCP atomic preview/application")
     _check_permission(controller, station, action)

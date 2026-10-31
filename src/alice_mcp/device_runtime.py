@@ -28,7 +28,7 @@ ACTIONS = frozenset({"led.effect", "led.capture", "led.replay", "led.pulse", "le
                      "led.show",
                      "speech.listen", "speech.say",
                      "audio.volume", "audio.play", "media.upload", "sound.replace",
-                     "config.select", "restore"})
+                     "config.select", "restore", "quasar.volume", "alice.activation"})
 PREAUTHORIZED_ACTIONS = frozenset({"led.effect", "audio.volume", "audio.play"})
 ALL = "all"
 ANIMATION_MODES = frozenset({"blink", "rainbow", "rainbow_swirl"})
@@ -172,7 +172,7 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
         _require(_keys(policy, {"firmware_sha256"},
                        {"allowed_actions", "max_volume", "allow_rootfs_remount", "media",
                         "configs", "speech_client", "tts_client", "local_tts", "local_media",
-                        "led_map", "preauthorized_actions", "voice"}))
+                        "led_map", "preauthorized_actions", "voice", "quasar_client"}))
         _require(_match(HEX64, policy["firmware_sha256"]))
         actions = policy.get("allowed_actions", ALL)
         _require(actions == ALL or type(actions) is list and len(actions) <= len(ACTIONS)
@@ -194,6 +194,10 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
                    "media": {}, "configs": {}}
         if preauthorized:
             result["preauthorized_actions"] = sorted(preauthorized)
+        if "quasar_client" in policy:
+            # Host path of the pinned stock-IPC client (quasar_client.CLIENT_SHA256).
+            _require(model == "station-mini" and _safe_path(policy["quasar_client"]))
+            result["quasar_client"] = policy["quasar_client"]
         if "led_map" in policy:
             result["led_map"] = validate_led_map(model, policy["led_map"])
         if "voice" in policy:
@@ -210,12 +214,16 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
                 _require(_match(re.compile(r"/bkupgrade/data/opt/alice-local-asr-[a-f0-9]{12}"),
                                 voice.get("asr_directory")))
             _require(model == "station-mini" and source in ("PC", "station", "station_asr")
-                     and _keys(voice, fields, pc_fields | {"indicator"})
+                     and _keys(voice, fields, pc_fields | {"indicator", "conversation_prompt"})
                      and type(voice["autostart"]) is bool)
             _require(all(_safe_path(voice[k]) for k in ("client", "mww", "libvosk", "vosk_zip")
                          if k in voice)
                      and voice.get("mww_model", "ft") in ("ft", "old")
                      and voice.get("mode", "either") in ("vosk", "mww", "either", "both"))
+            prompt = voice.get("conversation_prompt", "ok")
+            # Private owner text appended to the Realtime conversation instructions only.
+            _require(isinstance(prompt, str) and 1 <= len(prompt) <= 1000 and not any(
+                ord(c) < 32 and c != "\n" or 127 <= ord(c) <= 159 for c in prompt))
             if "indicator" in voice:
                 # Ring pattern while the agent works (voice_indicator.py); off by default.
                 # palette_index/capture_id are earlier fields, still accepted but unused.
@@ -422,7 +430,17 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
             "audio.volume": {"percent"}, "audio.play": {"asset", "duration_seconds"},
             "media.upload": {"asset", "content_base64"}, "sound.replace": {"asset", "slot"},
             "config.select": {"binding", "option"}, "restore": {"backup_id"},
+            "alice.activation": {"enabled"},
         }
+        if action == "quasar.volume":
+            # Quasar's own level 0-10 (×10 %), or one stock step; never a supplied text.
+            _require(model == "station-mini" and "quasar_client" in policy and len(params) == 1)
+            if "step" in params:
+                _require(params["step"] in ("louder", "quieter"))
+            else:
+                _require(_keys(params, {"level"}) and _integer(params["level"], 0, 10)
+                         and params["level"] * 10 <= policy.get("max_volume", 30))
+            return dict(params)
         _require(_keys(params, fields[action]))
         if action == "led.effect":
             _require(all(_integer(params[c], 0, 32) for c in ("red", "green", "blue")))
@@ -433,6 +451,10 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
         elif action == "speech.listen":
             _require(model == "station-mini" and "speech_client" in policy
                      and _integer(params["duration_seconds"], 5, 60))
+        elif action == "alice.activation":
+            # Only the stock wake word; Quasar itself keeps running.
+            _require(model == "station-mini" and "quasar_client" in policy
+                     and type(params["enabled"]) is bool)
         elif action == "speech.say":
             text = params["text"]
             _require(model in {"station-mini", "station-mini3"} and "tts_client" in policy

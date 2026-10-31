@@ -281,7 +281,9 @@ is a separate, explicit service action, never an implied configuration reload.
 The runtime implements `led.effect`, `led.capture`, `led.replay`, `led.pulse`, `led.animate`,
 `speech.listen`, `speech.say`,
 `audio.volume`, `audio.play`, `media.upload`,
-`sound.replace`, `config.select`, and narrow backup-record `restore`.
+`sound.replace`, `config.select`, narrow backup-record `restore`, and on Mini 1
+`quasar.volume` / `alice.activation` through Quasar's own local IPC
+([voice architecture](docs/VOICE_ARCHITECTURE.md#quasar-level-and-stock-alice)).
 `led.show` (source-tested, not live-accepted) adds bounded reference-effect equivalents
 and a channel-calibration runner; see [LED parity](docs/LED_PARITY.md).
 They require `ALICE_MCP_ALLOW_WRITES=1`, a private per-station `controls` policy

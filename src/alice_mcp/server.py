@@ -234,7 +234,7 @@ def get_station_controls(station_id: str) -> dict[str, Any]:
 DeviceAction = Literal["led.effect", "led.capture", "led.replay", "led.pulse", "led.animate",
                        "led.show", "speech.listen", "speech.say",
                        "audio.volume", "audio.play", "media.upload", "sound.replace",
-                       "config.select", "restore"]
+                       "config.select", "restore", "quasar.volume", "alice.activation"]
 
 
 @mcp.tool(annotations=READ)
@@ -274,7 +274,7 @@ async def run_station_action(
     """Do one device action now: fresh one-use preview, then apply; no form if preauthorized."""
     try:
         station = controller.station(station_id)
-        if station.native_mcp:
+        if station.native_mcp and action not in controls.QUASAR_ACTIONS:
             from alice_mcp import native_transport
 
             return await asyncio.to_thread(

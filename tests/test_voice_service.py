@@ -599,6 +599,115 @@ def test_station_activity_keeps_a_lagging_command_open_but_ignores_wake_tail(
     assert turn.last_input_at == last_input and not turn.command_started.is_set()
 
 
+def test_stock_spotter_stop_interrupts_and_other_phrases_are_only_reported(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice = service(tmp_path, monkeypatch, station(tmp_path))
+    turn = vs.rv.RealtimeTurn('synthetic', None, lambda _: {}, local_transcripts=True)
+    turn.active, turn.state = True, 'speaking'
+    voice.realtime = turn
+    voice._station_event({'event': 'spotter', 'phrase': 'громче', 'trusted': False})
+    assert not turn.cancel.is_set() and turn.text.empty()
+    voice._station_event({'event': 'spotter', 'phrase': 'хватит', 'trusted': False})
+    assert turn.cancel.is_set() and turn.text_stopped.is_set() and turn.error is None
+    events = voice.get_events()['events']
+    assert [(e['kind'], e['phrase']) for e in events] == [('spotter', 'громче'),
+                                                          ('spotter', 'хватит')]
+    assert all(e['trusted'] is False and e['source'] == 'quasar_spotter' for e in events)
+
+
+def test_spotter_watcher_feeds_station_events_and_renews_only_after_deadline(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice = service(tmp_path, monkeypatch, station(tmp_path))
+    calls: list[str] = []
+
+    def watch(controller: Any, station_id: str, sink: Any, *, stop: Any) -> dict[str, Any]:
+        calls.append(station_id)
+        sink({'event': 'spotter', 'phrase': 'тише', 'trusted': False})
+        return {'event': 'end', 'outcome': 'complete',
+                'reason': 'deadline' if len(calls) == 1 else 'stopped', 'spotted': 1}
+
+    monkeypatch.setattr(vs.quasar_client, 'watch', watch)
+    voice._watch_spotter('mini', threading.Event())
+    assert calls == ['mini', 'mini'] and voice.live['spotter'] == 'stopped'
+    assert [e['phrase'] for e in voice.get_events()['events']] == ['тише', 'тише']
+
+
+def native(tmp_path: Path) -> Station:
+    return Station(**{**station(tmp_path).__dict__, "preauthorize_all_actions": True,
+                      "native_mcp": {"url": "https://h/mcp"}})
+
+
+def quasar_actions(voice: vs.VoiceService, monkeypatch: Any) -> list[Any]:
+    """Quasar IPC actions use the pinned SSH preview/apply path even on a resident station."""
+    sent: list[Any] = []
+    monkeypatch.setattr(vs.native_transport, "run_action",
+                        lambda *args: pytest.fail("resident has no Quasar IPC adapter"))
+    monkeypatch.setattr(vs.controls, "preview", lambda controller, station_id, action, params:
+                        sent.append((action, params)) or {"plan_id": "p", "expected_sha256": "e"})
+    voice.controller.take_plan = lambda plan_id, digest: (plan_id, digest)
+    voice.controller.execute_plan = lambda plan: {"outcome": "applied", "previous_level": 3,
+                                                  "level": 4}
+    return sent
+
+
+def test_stock_spotter_step_is_not_repeated_but_other_volume_changes_run(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice = service(tmp_path, monkeypatch, native(tmp_path))
+    voice.station = "mini1"
+    sent = quasar_actions(voice, monkeypatch)
+    voice._station_event({'event': 'spotter', 'phrase': 'громче', 'trusted': False})
+    louder = {"action": "quasar.volume", "parameters": {"step": "louder"}}
+    assert voice._action(louder) == {"outcome": "applied", "source": "quasar_spotter"}
+    assert not sent  # Quasar already stepped and showed its own ring.
+    started = time.monotonic()
+    assert voice._action({"action": "quasar.volume",
+                          "parameters": {"step": "quieter"}})["outcome"] == "applied"
+    assert time.monotonic() - started < 2  # Bounded wait for a late stock event.
+    assert sent == [("quasar.volume", {"step": "quieter"})]
+
+
+def test_spotter_watcher_ends_with_its_failed_listener_session(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    mini = Station(**{**native(tmp_path).__dict__, "controls": {
+        **native(tmp_path).controls, "quasar_client": "/x/client"}})
+    voice = service(tmp_path, monkeypatch, mini)
+    voice.indicator = SimpleNamespace(close=lambda: None)
+    watching = threading.Event()
+    ended = threading.Event()
+
+    def watch(controller: Any, station_id: str, sink: Any, *, stop: Any) -> dict[str, Any]:
+        watching.set()
+        assert stop.wait(5), "watcher kept running after its listener ended"
+        ended.set()
+        return {"event": "end", "outcome": "complete", "reason": "stopped", "spotted": 0}
+
+    def listen(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        assert watching.wait(5)
+        return {"outcome": "unknown", "reason": "decoder_start"}  # e.g. a busy ASR source
+
+    monkeypatch.setattr(vs.quasar_client, "watch", watch)
+    monkeypatch.setattr(vs.station_asr, "listen", listen)
+    stop = threading.Event()
+    voice._run("mini1", {"source": "station_asr"}, stop)
+    assert ended.wait(5) and stop.is_set()
+
+
+def test_keyless_volume_phrase_runs_locally_instead_of_reaching_the_agent(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice = service(tmp_path, monkeypatch, native(tmp_path))
+    voice.station, voice.realtime = "mini1", None
+    sent = quasar_actions(voice, monkeypatch)
+    monkeypatch.setattr(voice, '_detected', lambda: None)
+    voice._station_event({'event': 'final', 'result': {'text': 'компьютер громкость пять'}})
+    assert sent == [("quasar.volume", {"level": 5})]
+    assert not [e for e in voice.get_events()['events'] if e['kind'] == 'wake' and e['command']]
+
+
 @pytest.mark.parametrize('kind,key', [('interrupt_partial','partial'), ('interrupt_final','text')])
 def test_stop_grammar_output_can_only_interrupt_not_execute_commands(
     tmp_path: Path, monkeypatch: Any, kind: str, key: str,
@@ -666,3 +775,16 @@ def test_speech_activity_prevents_false_seven_second_conversation_timeout(
     voice._station_event({'event':'activity','audio_ms':20000,'trusted':False})
     now[0] = 107.0
     assert turn._receive(200) == {'type':'response.created'}
+
+
+def test_only_one_mcp_process_per_pc_may_own_the_voice_listener(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    first = service(tmp_path, monkeypatch, station(tmp_path))
+    second = vs.VoiceService(first.controller, vs.Sink(first.sink.path), engines=engines)
+    first._claim_owner()
+    with pytest.raises(SafetyError, match="another MCP"):
+        second._claim_owner()
+    first._release_owner()
+    second._claim_owner()  # Free again once the owner stops (or its process exits).
+    second._release_owner()

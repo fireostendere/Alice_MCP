@@ -223,8 +223,11 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
             _require(model == "station-mini"
                      and source in ("PC", "station", "station_asr", "station_live")
                      and _keys(voice, fields,
-                               pc_fields | {"indicator", "conversation_prompt", "say_backend"})
-                     and type(voice["autostart"]) is bool)
+                                pc_fields | {"indicator", "conversation_prompt", "say_backend",
+                                             "vad_silence_ms", "command_vad_silence_ms"})
+                      and type(voice["autostart"]) is bool)
+            for field, default in (("vad_silence_ms", 350), ("command_vad_silence_ms", 200)):
+                _require(_integer(voice.get(field, default), 200, 1000))
             _require(all(_safe_path(voice[k]) for k in ("client", "mww", "libvosk", "vosk_zip")
                          if k in voice)
                      and voice.get("mww_model", "ft") in ("ft", "old")

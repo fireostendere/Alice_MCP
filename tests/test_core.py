@@ -174,6 +174,27 @@ def test_process_client_binding_preserves_inventory_and_binds_effective_state(
     assert load_inventory(inventory)["desk"] == original
 
 
+def test_indicator_process_binding_changes_only_an_already_enabled_indicator(
+    inventory: Path, monkeypatch: Any,
+) -> None:
+    data = json.loads(inventory.read_text())
+    entry = data["stations"][0]
+    entry.update(model="station-mini", controls={"firmware_sha256": "a" * 64, "voice": {
+        "source": "station", "indicator": {"backend": "ssh_led", "color": "red"}}})
+    inventory.write_text(json.dumps(data))
+    before = inventory.read_bytes()
+    original = load_inventory(inventory)["desk"]
+    monkeypatch.setenv("ALICE_MCP_INDICATOR_COLORS", '{"desk":"purple"}')
+    selected = load_inventory(inventory)["desk"]
+    assert selected.controls["voice"]["indicator"]["color"] == "purple"
+    assert selected.config_sha256 != original.config_sha256
+    assert selected.trust_sha256 == original.trust_sha256 and inventory.read_bytes() == before
+    entry["controls"]["voice"]["indicator"]["backend"] = "off"
+    inventory.write_text(json.dumps(data))
+    with pytest.raises(SafetyError):
+        load_inventory(inventory)  # A process colour choice must not enable LEDs.
+
+
 @pytest.mark.parametrize("value", [
     "not json", "[]", '{"unknown":"/PRIVATE/client"}', '{"desk":"relative"}',
     '{"desk":"/PRIVATE/client","desk":"/PRIVATE/other"}', '{"desk":false}',

@@ -21,8 +21,8 @@ python -m venv .venv
 .venv/bin/alice-mcp
 ```
 
-The host router uses **stdio**, makes no outbound connection at startup, and
-works as an offline knowledge/skills server without any station configuration.
+The host router uses **stdio**. Without optional private station/voice configuration,
+it makes no outbound connection at startup and works as an offline knowledge/skills server.
 There is no telemetry, discovery or arbitrary shell. The optional resident agent
 has a separately authenticated TLS listener; see [native transport](docs/NATIVE_AGENT.md).
 Do not launch it manually in a terminal expecting a chat interface: configure
@@ -128,7 +128,7 @@ involved; reboot persistence and other firmware remain unqualified. Host tests
 and an ARM build alone do not prove sound. See [native local voice](docs/NATIVE_AGENT.md)
 and [speech clients](docs/SPEECH_CLIENT.md).
 
-The server exposes **23 tools**. See the generated [MCP contract](docs/TOOLS.md)
+The server exposes **24 tools**. See the generated [MCP contract](docs/TOOLS.md)
 and the [runtime control contract](docs/CONTROLS.md).
 
 | Tools | Behavior |
@@ -145,11 +145,25 @@ and the [runtime control contract](docs/CONTROLS.md).
 | `preview_station_action(station_id, action, parameters)` | Read-only runtime inspection and a 300-second one-use device preview |
 | `apply_station_action(plan_id, expected_sha256)` | Private preauthorization or native human approval, fresh-state validation, bounded device action, post-check |
 | `run_station_action(station_id, action, parameters)` | Preview and apply in one call: fresh one-use preview, then private preauthorization or one native approval form |
+| `ask_station(station_id, question)` | Answer and speak once on the selected station: local clock, current news/weather/facts through actual web search, with separate source links; normal speech gates remain |
 | `get_capture_status(station_id, capture_id)` | Read fresh capture readiness, bounded LED records or one approved ASR text; never starts capture |
 | `start_job`, `list_jobs`, `cancel_job` | Owned host timers, declarative presets and a bounded generated-tone siren; cancel by owned ID; lost when this process exits ([jobs](docs/JOBS.md)) |
 | `voice_listen_start`, `voice_listen_stop`, `voice_status`, `get_voice_events` | Mini 1 wake word «компьютер», optional [recognition on the station](docs/ON_STATION_ASR.md), untrusted voice commands for OpenCode Alice or Realtime; audio stays in RAM |
 
-With a private root `.env` containing `REAL_TIME_API_KEY`, voice commands instead
+The active Mini 1 `station_live` pilot uses **one generated answer per wake**, not
+automatic free conversation. Weather without a city defaults to Belgrade. Its
+model receives a fresh clock snapshot and validated public weather/news data cached
+in RAM for at most five minutes; answers are not prerecorded. Only an explicit
+request to talk enables continuous conversation. Command endpointing defaults to
+200 ms, conversation to 350 ms (independently tunable from 200 to 1000 ms). The
+short-answer voice is coral; ordinary chat speech keeps its existing voice. The
+short route uses the station's already processed PCM without a second cloud filter;
+conversation restores that filter. Latest three-pair clock/weather medians were
+about 1.59/1.54 s versus stock 1.37/1.62 s; strict stock-speed parity remains unmet.
+See [one-shot evidence and limits](docs/VOICE_ARCHITECTURE.md#one-question-one-generated-answer).
+
+For the earlier PC/`station_asr` routes, a private root `.env` containing
+`REAL_TIME_API_KEY` makes voice commands
 use STT → an answer agent → mini TTS. With `voice.source="station_asr"`, Russian
 STT runs on the Mini 1 and only text leaves the speaker; the PC source uses cloud STT.
 Setting `ALICE_MCP_OPENCODE` to the

@@ -16,6 +16,7 @@ from alice_mcp import device_runtime as rt
 from alice_mcp import live_voice as lv
 from alice_mcp import quasar_client as qc
 from alice_mcp import realtime_voice as rv
+from alice_mcp import station_assistant as sa
 from alice_mcp.core import Controller, SafetyError, Station
 
 ASR = "/bkupgrade/data/opt/alice-local-asr-0123456789ab"
@@ -25,6 +26,14 @@ echo '{"event":"connected","ms":5}'
 printf '{"event":"end","reason":"idle","args":"%s","first":"%s","opening":"%s"}\n' \
  "$*" "$secret" "$opening"
 """
+
+
+@pytest.fixture(autouse=True)
+def no_live_weather_network(monkeypatch: Any) -> None:
+    monkeypatch.setattr(sa, "weather", lambda **kwargs: {"source": "unavailable"})
+    monkeypatch.setattr(sa, "_weather_cache", None, raising=False)
+    monkeypatch.setattr(sa, "news", lambda **kwargs: {"source": "unavailable"}, raising=False)
+    monkeypatch.setattr(sa, "_news_cache", None, raising=False)
 
 
 @pytest.fixture
@@ -374,7 +383,8 @@ def test_conversation_runs_on_the_station_with_barge_in_and_the_ring_held() -> N
     assert call["session"]["model"] == rv.MODEL and "transcription" not in audio
     assert audio["turn_detection"]["interrupt_response"] is True
     assert "Начни первым." in call["session"]["instructions"]
-    assert [t["name"] for t in call["session"]["tools"]] == ["web_search"]
+    assert [t["name"] for t in call["session"]["tools"]] == [
+        "web_search", "get_time", "get_weather", "get_news"]
     assert call["session"]["tool_choice"] == "auto" and callable(call["tool"])
     assert ring.calls == [("wake", 1), ("complete", 1, False)]  # Lit for the whole call.
     assert turn.error is None and "first_audio" in turn.timing_ms
@@ -390,6 +400,7 @@ def test_answer_is_spoken_by_the_station_without_microphone_or_vad(monkeypatch: 
     [call] = sessions
     assert call["listen"] is False and call["text"] == "Двенадцать"
     assert call["session"]["model"] == rv.TTS_MODEL
+    assert call["session"]["audio"]["output"]["voice"] == "marin"
     assert call["session"]["audio"]["input"]["turn_detection"] is None
     assert "tools" not in call["session"] and call["tool"] is None
 
@@ -549,8 +560,9 @@ def test_standby_reports_wakes_and_runs_one_session_per_secret(
     assert sunk[-1]["outcome"] == "complete"
 
 
+@pytest.mark.parametrize("player_outcome", ["complete", "unknown"])
 def test_standby_session_cancel_and_a_dead_standby(
-        live_station: tuple[Controller, Path]) -> None:
+        live_station: tuple[Controller, Path], player_outcome: str) -> None:
     controller, _ = live_station
     pipe = Pipe()
     stop = threading.Event()
@@ -574,12 +586,13 @@ def test_standby_session_cancel_and_a_dead_standby(
         while b"cancel\n" not in pipe.written:
             time.sleep(0.01)
         pipe.say({"event": "session_end", "reason": "stopped", "barge_ins": 0,
-                  "player": {"outcome": "complete"}})
+                  "player": {"outcome": player_outcome}})
 
     threading.Thread(target=station_side).start()
     result = standby.session({"model": rv.MODEL}, "", listen=True,
                              deadline=time.monotonic() + 30, cancel=cancel)
-    assert result["outcome"] == "complete" and result["reason"] == "stopped"
+    assert result["outcome"] == player_outcome and result["reason"] == "stopped"
+    assert result["interrupted"] is (player_outcome == "complete")
     stop.set()
     runner.join(5)
 
@@ -593,7 +606,7 @@ def test_policy_station_live_needs_the_wake_directory_and_both_live_builds() -> 
                               "station-mini")["voice"]["source"] == "station_live"
 
 
-def test_wake_opens_a_listening_session_at_once_with_search_and_volume() -> None:
+def test_wake_opens_a_listening_session_at_once_with_search_and_volume(monkeypatch: Any) -> None:
     sessions: list[dict[str, Any]] = []
     actions: list[dict[str, Any]] = []
     outputs: list[str] = []
@@ -609,17 +622,187 @@ def test_wake_opens_a_listening_session_at_once_with_search_and_volume() -> None
         return {"outcome": "applied"}
 
     ring = Ring()
+    weather = {"city": "Белград", "current": {"temperature_c": 9.6,
+               "time": "UNRELATED_WEATHER_OBSERVATION_TIME"}, "forecast": [],
+               "sources": ["https://example.com/weather"], "retrieved_at": "unused"}
+    news = {"publisher": "BBC", "headlines": [{"title": "Свежий заголовок", "url":
+             "https://example.com/news", "published": "unused"}], "sources": []}
+    monkeypatch.setattr(sa, "weather_snapshot", lambda: weather)
+    monkeypatch.setattr(sa, "news_snapshot", lambda: news)
     turn = rv.RealtimeTurn("synthetic", ring, lambda _: pytest.fail("WAV playback"),
                            connect=lambda *a: pytest.fail("host Realtime socket"),
-                           action=action, direct=direct, listen_on_wake=True)
+                           action=action, direct=direct, listen_on_wake=True,
+                           conversation_prompt="CONVERSATION_ONLY_SENTINEL")
     assert turn.wake(1)  # No transcript: the model hears the command itself.
     wait_idle(turn)
     [call] = sessions
     assert call["listen"] is True and call["text"] == ""
-    assert [t["name"] for t in call["session"]["tools"]] == ["web_search", "set_volume"]
+    assert call["one_shot"] is True and turn.mode == "command"
+    assert call["session"]["model"] == rv.TTS_MODEL
+    assert call["session"]["audio"]["output"]["voice"] == "coral"
+    assert "Белград" in call["session"]["instructions"]
+    assert '"temperature_c":9.6' in call["session"]["instructions"]
+    assert "Свежий заголовок" in call["session"]["instructions"]
+    assert "https://example.com" not in call["session"]["instructions"]
+    assert "unused" not in call["session"]["instructions"]
+    assert "UNRELATED_WEATHER_OBSERVATION_TIME" not in call["session"]["instructions"]
+    assert weather["current"]["time"] == "UNRELATED_WEATHER_OBSERVATION_TIME"
+    assert weather["sources"] and news["headlines"][0]["url"]  # Do not mutate cached evidence.
+    assert call["session"]["audio"]["input"]["turn_detection"]["silence_duration_ms"] == 200
+    assert call["session"]["audio"]["input"]["noise_reduction"] is None
+    assert "CONVERSATION_ONLY_SENTINEL" not in call["session"]["instructions"]
+    assert [t["name"] for t in call["session"]["tools"]] == [
+        "web_search", "set_volume", "start_conversation"]
+    assert "перед вызовом коротко скажи" not in call["session"]["instructions"]
+    assert "get_time" not in call["session"]["instructions"]
+    assert "get_weather" not in call["session"]["instructions"]
+    assert "get_news" not in call["session"]["instructions"]
+    assert "по-русски" in call["session"]["instructions"]
     assert actions == [{"action": "quasar.volume", "parameters": {"level": 5}}]
     assert outputs[0] and outputs[1] and "компьютер" in call["session"]["instructions"]
     assert ring.calls == [("wake", 1), ("complete", 1, False)] and turn.error is None
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_default_weather_refresh_runs_only_in_idle_preparation(
+        live_station: tuple[Controller, Path], monkeypatch: Any, busy: bool) -> None:
+    controller, _ = live_station
+    stop, pipe, calls = threading.Event(), Pipe(), []
+    standby = lv.Standby(controller, "mini1", "synthetic", lambda _: None, stop)
+    standby.process = pipe
+    standby.command_supported = standby.warm_supported = True
+    monkeypatch.setattr(sa, "weather", lambda **kw: calls.append(kw) or {"source": "open_meteo"})
+    monkeypatch.setattr(sa, "news", lambda **kw: calls.append(kw) or {"source": "bbc_rss"})
+    monkeypatch.setattr(standby, "_prepare_speech", stop.set)
+    if busy:
+        standby.busy.acquire()
+    standby._keep_spare(pipe)
+    assert calls == ([] if busy else [{"timeout": 5, "refresh": True}] * 2)
+    if busy:
+        standby.busy.release()
+
+
+def test_late_tool_result_never_writes_into_a_new_standby_session(
+        live_station: tuple[Controller, Path]) -> None:
+    import time
+
+    controller, _ = live_station
+    standby = lv.Standby(controller, "mini1", "synthetic", lambda _: None, threading.Event())
+    pipe = Pipe()
+    standby.process = pipe
+    started, release = threading.Event(), threading.Event()
+    results: list[dict[str, Any]] = []
+
+    def tool(name: str, arguments: dict[str, Any]) -> str:
+        started.set()
+        assert release.wait(3)
+        return "old result"
+
+    def run(cancel: threading.Event, callback: Any = None) -> None:
+        results.append(standby._run_session("session", {"model": rv.MODEL}, "",
+            time.monotonic() + 5, cancel, lambda _: None, callback))
+
+    standby.minter = lambda *args: "ek_synthetic"
+    first_cancel = threading.Event()
+    first = threading.Thread(target=run, args=(first_cancel, tool))
+    first.start()
+    until = time.monotonic() + 2
+    while standby.events is None and time.monotonic() < until:
+        time.sleep(0.01)
+    assert standby.events is not None
+    standby.events.put({"event": "tool", "message": {
+        "call_id": "call_old", "name": "web_search", "arguments": "{}"}})
+    assert started.wait(2)
+    first_cancel.set()
+    standby.events.put({"event": "session_end", "reason": "stopped",
+                        "player": {"outcome": "complete"}})
+    first.join(2)
+    assert not first.is_alive()
+    second = threading.Thread(target=run, args=(threading.Event(),))
+    second.start()
+    until = time.monotonic() + 2
+    while standby.events is None and time.monotonic() < until:
+        time.sleep(0.01)
+    assert standby.events is not None
+    release.set()
+    time.sleep(0.1)
+    standby.events.put({"event": "session_end", "reason": "idle",
+                        "player": {"outcome": "complete"}})
+    second.join(2)
+    assert not second.is_alive() and len(results) == 2
+    assert b"call_old" not in pipe.written
+
+
+@pytest.mark.parametrize(("command_ms", "conversation_ms"), [(200, 350), (250, 500)])
+def test_only_explicit_conversation_tool_switches_the_one_shot_mode(
+        command_ms: int, conversation_ms: int, monkeypatch: Any) -> None:
+    monkeypatch.setattr(sa, "weather_snapshot", lambda: {
+        "city": "Белград", "current": {}, "forecast": []})
+    monkeypatch.setattr(sa, "news_snapshot", lambda: {"publisher": "BBC", "headlines": []})
+
+    def direct(session: dict[str, Any], text: str, **options: Any) -> dict[str, Any]:
+        assert turn.mode == "command" and options["one_shot"]
+        detection = session["audio"]["input"]["turn_detection"]
+        assert detection["silence_duration_ms"] == command_ms
+        assert session["audio"]["input"]["noise_reduction"] is None
+        options["tool"]("start_conversation", {"permission": "allow"})
+        assert turn.mode == "command"
+        options["tool"]("start_conversation", {})
+        assert turn.mode == "conversation"
+        assert detection["silence_duration_ms"] == conversation_ms
+        assert session["audio"]["input"]["noise_reduction"] == {"type": "far_field"}
+        assert "get_time" in [t["name"] for t in session["tools"]]
+        assert "get_weather" in [t["name"] for t in session["tools"]]
+        assert "get_news" in [t["name"] for t in session["tools"]]
+        assert "Режим рации" not in session["instructions"]
+        return {"outcome": "complete", "reason": "idle", "player": {}}
+
+    turn = rv.RealtimeTurn("synthetic", Ring(), lambda _: {}, direct=direct, listen_on_wake=True,
+                           command_vad_silence_ms=command_ms, vad_silence_ms=conversation_ms)
+    assert turn.wake(1)
+    wait_idle(turn)
+    assert turn.error is None and turn.status()["command_backend"] == "station_oneshot"
+    assert turn.status()["command_vad_silence_ms"] == command_ms
+    assert turn.status()["vad_silence_ms"] == conversation_ms
+
+
+@pytest.mark.parametrize("value", [True, 199, 1001, "200"])
+def test_direct_command_endpointer_rejects_invalid_values(value: Any) -> None:
+    with pytest.raises(SafetyError, match="endpointer"):
+        rv.RealtimeTurn("synthetic", Ring(), lambda _: {}, command_vad_silence_ms=value)
+
+
+def test_one_shot_never_falls_back_to_continuous_on_an_old_client(
+        live_station: tuple[Controller, Path]) -> None:
+    import time
+
+    controller, _ = live_station
+    standby = lv.Standby(controller, "mini1", "synthetic", lambda _: None, threading.Event())
+    with pytest.raises(SafetyError, match="live_unavailable"):
+        standby.session({"model": rv.TTS_MODEL}, "", listen=True, one_shot=True,
+                        deadline=time.monotonic() + 5, cancel=threading.Event())
+
+
+def test_direct_clock_uses_current_host_time_and_configured_endpoint() -> None:
+    sessions: list[dict[str, Any]] = []
+    answers: list[str] = []
+
+    def direct(session: dict[str, Any], text: str, **options: Any) -> dict[str, Any]:
+        sessions.append(session)
+        options["on_event"]({"event": "speech_stopped"})
+        answers.append(options["tool"]("get_time", {}))
+        return {"outcome": "complete", "reason": "idle", "player": {"outcome": "complete"}}
+
+    turn = rv.RealtimeTurn("synthetic", Ring(), lambda _: {}, direct=direct,
+                           listen_on_wake=True, vad_silence_ms=500,
+                           command_vad_silence_ms=250)
+    assert turn.wake(1)
+    wait_idle(turn)
+    assert json.loads(answers[0])["source"] == "host_clock"
+    assert sessions[0]["audio"]["input"]["turn_detection"]["silence_duration_ms"] == 250
+    assert "get_time" not in [t["name"] for t in sessions[0]["tools"]]
+    assert {"get_weather", "get_news"} <= {t["name"] for t in sessions[0]["tools"]}
+    assert "command_endpoint" in turn.timing_ms
 
 
 def test_each_turn_reports_a_sanitized_summary_when_it_ends() -> None:
@@ -635,7 +818,7 @@ def test_each_turn_reports_a_sanitized_summary_when_it_ends() -> None:
     assert turn.wake(1)
     wait_idle(turn)
     [report] = reports
-    assert report["mode"] == "conversation" and report["error"] == "api_error"
+    assert report["mode"] == "command" and report["error"] == "api_error"
     assert "first_audio" in report["timing_ms"] and set(report) == {
         "mode", "error", "timing_ms", "playback", "do_not_retry", "mic"}
     assert report["mic"] == {"peak": 900, "sent_ms": 4000}
@@ -856,12 +1039,13 @@ def test_a_spare_speech_secret_is_minted_ahead_and_used_once(
 
 
 @pytest.mark.parametrize("outcome", ["idle", "failed", "not_prepared"])
+@pytest.mark.parametrize("verb", ["say", "ask"])
 def test_preconnected_speech_consumes_connection_without_mint_or_reconnect(
-        live_station: tuple[Controller, Path], monkeypatch: Any, outcome: str) -> None:
+        live_station: tuple[Controller, Path], monkeypatch: Any, outcome: str, verb: str) -> None:
     import time
 
     controller, _ = live_station
-    monkeypatch.setattr(lv, "WARM_CLIENT_SHA256", lv.CLIENT_SHA256, raising=False)
+    monkeypatch.setattr(lv, "ONESHOT_CLIENT_SHA256", lv.CLIENT_SHA256)
     pipe, stop, minted = Pipe(), threading.Event(), []
 
     def minter(*args: Any) -> str:
@@ -887,7 +1071,8 @@ def test_preconnected_speech_consumes_connection_without_mint_or_reconnect(
 
         def station_side() -> None:
             until = time.monotonic() + 3
-            while b"speak " not in pipe.written and time.monotonic() < until:
+            command = b"askwarm " if verb == "ask" else b"speak "
+            while command not in pipe.written and time.monotonic() < until:
                 time.sleep(0.01)
             pipe.say({"event": "first_audio"})
             pipe.say({"event": "session_end", "reason": outcome,
@@ -895,12 +1080,15 @@ def test_preconnected_speech_consumes_connection_without_mint_or_reconnect(
             stop.set()  # Do not prepare a second connection in this test.
 
         threading.Thread(target=station_side).start()
-        result = standby.say("Привет", deadline=time.monotonic() + 30, cancel=threading.Event())
+        result = (standby.session({"model": rv.TTS_MODEL}, "", listen=True, one_shot=True,
+                                  deadline=time.monotonic() + 30, cancel=threading.Event())
+                  if verb == "ask" else
+                  standby.say("Привет", deadline=time.monotonic() + 30, cancel=threading.Event()))
         assert result["outcome"] == {"idle": "complete", "failed": "unknown",
                                      "not_prepared": "blocked"}[outcome]
         assert result["speech_runtime"]["secret_source"] == "preconnected"
         assert result["speech_runtime"]["transport"] == "standby"
-        assert bytes(pipe.written).count(b"speak ") == 1
+        assert bytes(pipe.written).count(b"askwarm " if verb == "ask" else b"speak ") == 1
         assert b"say " not in pipe.written and len(minted) == 1
         assert standby.warm_until == 0
     finally:
@@ -913,6 +1101,17 @@ def test_unreviewed_client_cannot_enable_preconnection(tmp_path: Path) -> None:
     path.write_bytes(b"unreviewed client")
     with pytest.raises(SafetyError):
         lv.load_client(path)
+
+
+def test_standby_interrupt_targets_only_its_current_speech(
+        live_station: tuple[Controller, Path]) -> None:
+    controller, _ = live_station
+    standby = lv.Standby(controller, "mini1", "sk-key", lambda e: None, threading.Event())
+    standby.interrupt()  # Idle/preparing: no audio to cancel, never write cancel blindly.
+    cancel = threading.Event()
+    standby.session_cancel = cancel
+    standby.interrupt()
+    assert cancel.is_set()
 
 
 def test_preparation_rechecks_permission_and_cannot_cancel_active_speech(

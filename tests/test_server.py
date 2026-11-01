@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from mcp import ClientSession, StdioServerParameters
@@ -269,6 +269,25 @@ def test_run_station_action_stops_at_a_blocked_preview(monkeypatch: Any) -> None
     controller.execute_plan.assert_not_called()
 
 
+def test_ask_station_speaks_one_answer_and_never_executes_question_as_a_command(
+    monkeypatch: Any,
+) -> None:
+    controller = Mock()
+    station = SimpleNamespace(controls={})
+    controller.station.return_value = station
+    monkeypatch.setattr(server, "controller", controller)
+    monkeypatch.setattr(server.controls, "_check_permission", lambda *a: None)
+    monkeypatch.setattr(server.station_assistant, "answer", lambda q: {
+        "text": "Сейчас 14:35.", "source": "host_clock", "sources": []})
+    speak = AsyncMock(return_value={"outcome": "applied", "do_not_retry": True})
+    monkeypatch.setattr(server, "run_station_action", speak)
+    result = asyncio.run(server.ask_station("desk", "Который час?", object()))
+    assert result["text"] == "Сейчас 14:35." and result["outcome"] == "applied"
+    speak.assert_awaited_once()
+    assert speak.call_args.args[:3] == ("desk", "speech.say", {"text": "Сейчас 14:35."})
+    controller.execute_plan.assert_not_called()
+
+
 def test_preauthorization_does_not_cover_another_bounded_action(monkeypatch: Any) -> None:
     controller = Mock()
     controller.take_plan.return_value = SimpleNamespace(
@@ -368,6 +387,7 @@ def test_stdio_handshake_tools_and_no_private_inventory() -> None:
                 "get_knowledge", "list_skills", "read_skill", "preview_service_action",
                 "apply_service_action", "get_model_interfaces", "get_station_controls",
                 "preview_station_action", "apply_station_action", "run_station_action",
+                "ask_station",
                 "get_capture_status", "start_job", "list_jobs", "cancel_job",
                 "voice_listen_start", "voice_listen_stop", "voice_status", "get_voice_events",
             }

@@ -60,11 +60,12 @@ OWNER_UID=0
 LC_ALL=C; export LC_ALL
 umask 077
 exec 2>/dev/null
-mode=$1; seconds=$2; firmware=$3
+mode=$1; seconds=$2; firmware=$3; state_pin=${4:--}
 blocked() { printf 'outcome=blocked\nerror_code=%s\n' "$1"; exit 0; }
 [ "$(id -u)" = "$OWNER_UID" ] || blocked not_owner
 case "$mode" in
-read|read_verified|play|play_verified|prepare_verified|cleanup) ;; *) blocked invalid_request;; esac
+read|read_verified|play|play_verified|prepare|prepare_verified|cleanup) ;;
+*) blocked invalid_request;; esac
 case "$seconds" in [1-9]|[1-8][0-9]|90) ;; *) blocked invalid_request;; esac
 case "$firmware" in *[!0-9a-f]*) blocked invalid_request;; esac
 [ "${#firmware}" = 64 ] || blocked invalid_request
@@ -72,12 +73,35 @@ for c in awk cat cut grep head id kill ls mkdir mkfifo pidof rm rmdir sha256sum 
     command -v "$c" >/dev/null 2>&1 || blocked runtime_tools_missing
 done
 Q=/system/vendor/quasar
+state_client=; firmware_identity=
+# Reuse only the exact reviewed client already loaded by this listener. Keep its
+# verified descriptor open, so a pathname replacement cannot swap the executable.
+if [ "$mode" = prepare ] && [ "${#state_pin}" = 64 ]; then
+    case "$state_pin" in *[!0-9a-f]*) blocked invalid_request;; esac
+    for candidate in /tmp/alice-mcp-live.*/client; do
+        parent=${candidate%/*}
+        [ -d "$parent" ] && [ ! -L "$parent" ] &&
+            [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+        set -- $(ls -ldn "$parent")
+        [ "$1" = drwx------ ] && [ "$3" = "$OWNER_UID" ] || continue
+        exec 9< "$candidate" || continue
+        if [ "$(sha256sum /proc/self/fd/9 | cut -d ' ' -f 1)" = "$state_pin" ]; then
+            firmware_identity=$(/proc/self/fd/9 --firmware-state 2>/dev/null) ||
+                firmware_identity=
+            if [ -n "$firmware_identity" ]; then state_client=/proc/self/fd/9; break; fi
+        fi
+        exec 9<&-
+    done
+fi
 # play_verified is internal: a consumed host preview just rechecked the resident's
 # firmware/boot/Quasar/policy stamp, whose hash cache checks nanosecond file metadata.
 if [ "$mode" != play_verified ] && [ "$mode" != prepare_verified ] &&
         [ "$mode" != read_verified ]; then
     [ -f "$Q/maind" ] && [ "$(sha256sum "$Q/maind" | cut -d ' ' -f 1)" = "$firmware" ] ||
         blocked firmware_mismatch
+fi
+if [ -n "$state_client" ]; then
+    [ "$("$state_client" --firmware-state)" = "$firmware_identity" ] || blocked firmware_mismatch
 fi
 PLAYER=$Q/led_util
 [ -x "$PLAYER" ] || blocked led_util_missing
@@ -167,7 +191,7 @@ cleanup)
     if stop; then left=0; else left=1; fi
     printf 'outcome=cleanup\nleft_running=%s\n' "$left"
     ;;
-play|play_verified|prepare_verified)
+play|play_verified|prepare|prepare_verified)
     stop || blocked stale_player_left
     [ -z "$(pidof led_util)" ] || blocked player_busy
     mkdir "$DIR" && private_dir || blocked temporary_path_busy
@@ -176,7 +200,7 @@ __PATTERN__
 ALICE_LED_PATTERN
     trap finish 0
     trap 'exit 0' HUP INT TERM
-    if [ "$mode" = prepare_verified ]; then
+    if [ "$mode" = prepare ] || [ "$mode" = prepare_verified ]; then
         darken=0
         mkfifo "$DIR/wait.led" || blocked temporary_path_busy
         "$PLAYER" "$DIR/wait.led" </dev/null >/dev/null 2>&1 &
@@ -194,6 +218,23 @@ ALICE_LED_PATTERN
         done
         [ "${activation:-}" = play ] || exit 0
         kill -0 "$player" 2>/dev/null || exit 0
+        # A changed identity (including nanosecond ctime) requires the full pin
+        # again. Without the pinned stat helper retain the full check every time.
+        unchanged=0
+        if [ -n "$state_client" ] &&
+                [ "$("$state_client" --firmware-state)" = "$firmware_identity" ]; then
+            unchanged=1
+        fi
+        if [ "$mode" = prepare ] && [ "$unchanged" = 0 ] &&
+                [ "$(sha256sum "$Q/maind" | cut -d ' ' -f 1)" != "$firmware" ]; then
+            kill "$watchdog"
+            if stop; then
+                trap - 0 HUP INT TERM
+                blocked firmware_mismatch
+                exit 0
+            fi
+            exit 1
+        fi
         kill "$watchdog"
         (sleep 10; kill -TERM "$main") >/dev/null 2>&1 &
         watchdog=$!
@@ -207,7 +248,7 @@ ALICE_LED_PATTERN
         "$PLAYER" "$DIR/indicator.led" </dev/null >/dev/null 2>&1 &
     fi
     printf 'outcome=started\n'
-    if [ "$mode" = prepare_verified ]; then
+    if [ "$mode" = prepare ] || [ "$mode" = prepare_verified ]; then
         mkfifo "$DIR/off.led" || exit 0
         "$PLAYER" "$DIR/off.led" </dev/null >/dev/null 2>&1 &
         dark_player=$!
@@ -258,8 +299,11 @@ def recolor(text: str, color: str) -> str:
     return text if target is None else "\n".join(out) + "\n"
 
 
-def _command(station: Station, mode: str, seconds: int = 1, pattern: str = "") -> SSHInput:
-    args = [mode, str(seconds), station.controls["firmware_sha256"]]
+def _command(station: Station, mode: str, seconds: int = 1, pattern: str = "", *,
+             state_pin: str = "-") -> SSHInput:
+    if state_pin != "-" and not re.fullmatch(r"[0-9a-f]{64}", state_pin):
+        raise ValueError("invalid state client pin")
+    args = [mode, str(seconds), station.controls["firmware_sha256"], state_pin]
     return SSHInput("sh -s -- " + " ".join(shlex.quote(a) for a in args),
                     SCRIPT.replace("__PATTERN__", pattern.rstrip("\n")).encode())
 
@@ -512,7 +556,7 @@ class Indicator:
         self.pattern: str | None = None
         self.pattern_cache: tuple[Station, str, str, str] | None = None
         self.warm: Hold | None = None
-        self.warm_binding: tuple[Station, str, str] | None = None
+        self.warm_binding: tuple[Station, str, str, bool] | None = None
         self.prepared: tuple[str, str] | None = None
         self.started_at: float | None = None
         self.startup_ms: int | None = None
@@ -546,8 +590,9 @@ class Indicator:
 
     def status(self) -> dict[str, Any]:
         return {"backend": self.backend, "state": self.state, "reason": self.reason,
-                "error_sound": self.sound, "clean": self.clean,
-                "prepared": self.prepared is not None, "startup_ms": self.startup_ms}
+                 "error_sound": self.sound, "clean": self.clean,
+                "prepared": self.prepared is not None, "startup_ms": self.startup_ms,
+                "color": self._config().get("color", "red")}
 
     def wake(self, event_id: int, *, managed: bool = False) -> None:
         self._configure()
@@ -614,17 +659,22 @@ class Indicator:
             return
         try:
             station = self.controller.station(self.station_id)
-            if not station.native_mcp:
-                return
             native_transport._permission(self.controller, station, "led.show")
             ssh = controls._station(self.controller, self.station_id, "led.show", True)
             controls._check_permission(self.controller, ssh, "led.show")
-            state = native_transport._state(self.controller, station, "led.show")
+            state = "ssh"
+            if station.native_mcp:
+                try:
+                    state = native_transport._state(self.controller, station, "led.show")
+                except SafetyError as error:
+                    if str(error) != "Native preview state unavailable; no action dispatched":
+                        raise
             binding = (station, ssh.trust_sha256, state)
             cached = self.pattern_cache
-            pattern = (cached[3] if cached is not None and cached[:3] == binding
-                       else read_pattern(self.controller.runner, ssh, verified=True))
-            if (native_transport._state(self.controller, station, "led.show") != state
+            pattern = (cached[3] if state != "ssh" and cached is not None and cached[:3] == binding
+                       else read_pattern(self.controller.runner, ssh, verified=state != "ssh"))
+            if (state != "ssh" and native_transport._state(
+                    self.controller, station, "led.show") != state
                     or self.controller.station(self.station_id) != station
                     or controls._station(
                         self.controller, self.station_id, "led.show", True) != ssh):
@@ -633,7 +683,8 @@ class Indicator:
             digest = hashlib.sha256(
                 repr((station, ssh, state, pattern, SCRIPT)).encode()).hexdigest()
             # Fresh previews rebind live state; unchanged assets need no cold process restart.
-            warm_binding = (station, ssh.trust_sha256, pattern)
+            # An SSH-only preview cannot reuse a helper that relies on native verification.
+            warm_binding = (station, ssh.trust_sha256, pattern, state == "ssh")
             if self.warm is not None and (not self.warm.alive()
                                           or self.warm_binding != warm_binding):
                 old, self.warm = self.warm, None
@@ -643,7 +694,7 @@ class Indicator:
                                                     remote_sha256=state)
             plan = self.controller.take_plan(identifier, digest)
             native_transport._permission(self.controller, station, "led.show")
-            if (self.controller.clock() >= plan.expires
+            if (self.latched or self.stopping.is_set() or self.controller.clock() >= plan.expires
                     or self.controller.station(self.station_id) != station
                     or controls._station(
                         self.controller, self.station_id, "led.show", True) != ssh):
@@ -651,8 +702,19 @@ class Indicator:
             hold = self.warm
             try:
                 if hold is None:
-                    command = _command(ssh, "prepare_verified", self.max_s,
-                                       recolor(pattern, self._config().get("color", "red")))
+                    state_pin = "-"
+                    voice = station.controls.get("voice", {})
+                    if state == "ssh" and voice.get("live_client"):
+                        from alice_mcp import live_voice
+
+                        _, pin = live_voice.load_client(Path(voice["live_client"]))
+                        if pin in {live_voice.FAST_LED_CLIENT_SHA256,
+                                   live_voice.ONESHOT_CLIENT_SHA256}:
+                            state_pin = pin
+                    command = _command(ssh, "prepare" if state == "ssh" else "prepare_verified",
+                                       self.max_s,
+                                       recolor(pattern, self._config().get("color", "red")),
+                                       state_pin=state_pin)
                     hold = Hold(self.spawn(ssh, command), command.data)
                     self.used = True
                     ready = hold.wait_started(prepared=True)
@@ -687,13 +749,16 @@ class Indicator:
             controls._check_permission(self.controller, ssh, "led.show")
             prepared, self.prepared = self.prepared, None
             verified = False
+            remote_state = ""
             if prepared is not None:
                 try:
                     plan = self.controller.take_plan(*prepared)
+                    remote_state = plan.remote_sha256
                     verified = (station == plan.station
                         and ssh.trust_sha256 == plan.request["ssh_trust"]
-                        and native_transport._state(
-                        self.controller, station, "led.show") == plan.remote_sha256
+                        and (self.warm is not None if remote_state == "ssh" else
+                             native_transport._state(
+                                 self.controller, station, "led.show") == remote_state)
                         and self.controller.clock() < plan.expires
                         and self.controller.station(self.station_id) == station)
                     if verified:
@@ -712,7 +777,7 @@ class Indicator:
             config = self._config()
             command = play_command(ssh, recolor(self.pattern, config.get("color", "red")),
                                    self.max_s)
-            if verified:
+            if verified and remote_state != "ssh":
                 command = _command(ssh, "play_verified", self.max_s,
                                    recolor(self.pattern, config.get("color", "red")))
         except SafetyError as error:

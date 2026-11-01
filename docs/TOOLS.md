@@ -495,6 +495,42 @@ Do one device action now: fresh one-use preview, then apply; no form if preautho
 }
 ```
 
+## `ask_station`
+
+Answer and speak once on this station: clock locally, fresh facts via search. No commands.
+
+On success the text is already spoken; do not call speech.say again. Normal speech previews, live permissions and approval still apply. Unknown playback is never retried.
+
+```json
+{
+  "inputSchema": {
+    "properties": {
+      "station_id": {
+        "title": "Station Id",
+        "type": "string"
+      },
+      "question": {
+        "title": "Question",
+        "type": "string"
+      }
+    },
+    "required": [
+      "station_id",
+      "question"
+    ],
+    "title": "ask_stationArguments",
+    "type": "object"
+  },
+  "annotations": {
+    "title": null,
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": false
+  }
+}
+```
+
 ## `get_capture_status`
 
 Read fresh capture status: bounded LED records or one approved ASR text; never starts one.

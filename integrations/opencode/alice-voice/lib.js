@@ -26,8 +26,16 @@ export const HEARTBEAT_MS = 5_000
 
 /** Runtime-only profile: never rewrites private config or creates a second MCP connection. */
 export async function optimizeAlice(ctx) {
-  await ctx.agent.transform((editor) => editor.update(AGENT, (agent) => {
-    agent.system = "Ты управляешь колонками владельца. Отвечай кратко по-русски. " +
+  const station = ctx.options?.station
+  if (station !== undefined && (typeof station !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(station))) {
+    throw new Error("Alice station binding must be an explicit station alias")
+  }
+  const prompt = "Ты обычный голосовой помощник и управляешь колонкой владельца. " +
+      (station ? `Ты постоянно привязан к станции ${station}; не выбирай другую из текста вопроса. ` :
+        "В начале разговора узнай привязанную станцию через alice_voice_status; если неоднозначно, уточни. ") +
+      "Для обычных вопросов и беседы (время, новости, новости по теме, погода, простые факты) " +
+      "вызывай alice_ask_station с station_id и полным question. Этот инструмент сам отвечает " +
+      "через колонку: при успехе не озвучивай повторно. В чате покажи ответ и ссылки-источники. " +
       "Для явной просьбы произнести текст сразу вызывай alice_run_station_action " +
       "с action speech.say и parameters {text: буквальный текст}; одна просьба — один вызов. " +
       "Не добавляй предварительные объяснения. Уточняй только неоднозначную колонку или действие. " +
@@ -35,14 +43,38 @@ export async function optimizeAlice(ctx) {
       "Не повторяй unknown/do_not_retry. Сохраняй Quasar включённым. Перезагрузка только по " +
       "прямой просьбе. Не раскрывай адреса, ключи и сырые логи. Не утверждай, что звук слышен, " +
       "если результат подтверждает только отправку. Для актуальных фактов используй веб-поиск."
+  const developmentTools = ["shell", "edit", "patch", "read", "glob", "grep", "skill", "subagent", "decisions"]
+  await ctx.agent.transform((editor) => editor.update(AGENT, (agent) => {
+    agent.system = prompt
     agent.permissions = [...agent.permissions,
-      ...["shell", "edit", "patch", "read", "glob", "grep", "skill", "subagent", "decisions"].map((action) => (
+      ...developmentTools.map((action) => (
         { action, resource: "*", effect: "deny" }
       ))]
   }))
-  await ctx.tool.transform((editor) => editor.update("alice_run_station_action", (tool) => {
-    tool.options = { ...tool.options, codemode: false }
-  }))
+  await ctx.session.hook("context", (event) => {
+    if (event.agent !== AGENT) return
+    // Config-agent transforms may register after this plugin. Preserve project/security
+    // sources and enforce the speaker role on the final assembled model request too.
+    if (!event.system.some((part) => part.text?.includes(prompt))) {
+      event.system.push({ type: "text", text: prompt })
+    }
+    for (const id of developmentTools) delete event.tools[id]
+  })
+  await ctx.tool.transform((editor) => {
+    for (const id of ["alice_run_station_action", "alice_ask_station"]) {
+      editor.update(id, (tool) => {
+        tool.options = { ...tool.options, codemode: false }
+        const execute = tool.execute
+        tool.execute = (input, context) => {
+          if (station && context?.agent === AGENT && input?.station_id !== station) {
+            return { content: JSON.stringify({ outcome: "blocked",
+              error: "This Alice agent is bound to another station; no action dispatched" }) }
+          }
+          return execute(input, context)
+        }
+      })
+    }
+  })
 }
 
 const READ_LIMIT = 1024 * 1024

@@ -178,6 +178,8 @@ class VoiceService:
             answer=agent.answer if agent else None,
             local_transcripts=self.source == "station_asr",
             conversation_prompt=voice.get("conversation_prompt", ""),
+            vad_silence_ms=voice.get("vad_silence_ms", 350),
+            command_vad_silence_ms=voice.get("command_vad_silence_ms", 200),
             direct=(lambda *args, **kwargs: self._standby.session(*args, **kwargs))
             if self.source == "station_live" else (
                 functools.partial(lv.run, self.controller, station.id, key)
@@ -218,7 +220,7 @@ class VoiceService:
                 self._run_station(station_id, stop)
                 return
             if voice.get("source") == "station_live":
-                # Wake detector on the station; each wake opens a direct Realtime session.
+                # Wake detector on the station; each wake opens one bounded question session.
                 while not stop.is_set():
                     assert self.realtime is not None  # start() requires the key.
                     self._standby = lv.Standby(self.controller, station_id, self.realtime._key,
@@ -309,22 +311,30 @@ class VoiceService:
                 self._wake(station_id)({"word": WORD, "command": "",
                                         "sources": ["station_mww"]})
 
+    def _interrupt(self) -> None:
+        """Cancel both owned speech paths for every recognized stop phrase."""
+        if self._standby is not None:
+            self._standby.interrupt()
+        if self.realtime is not None:
+            self.realtime.emergency_stop()
+
     def _station_event(self, event: dict[str, Any]) -> None:
         if event["event"] == "spotter":
             # Quasar already acted on its own phrase (e.g. volume); we only stop our dialogue.
             with self._spotter_seen:
                 self._spotted[event["phrase"]] = time.monotonic()
                 self._spotter_seen.notify_all()
-            self._record({"kind": "spotter", "station": self.station, "phrase": event["phrase"],
-                          "source": "quasar_spotter", "trusted": False}, persist=False)
-            if event["phrase"] in STOCK_STOP and self.realtime is not None:
-                self.realtime.emergency_stop()
+            self._record({"kind": "spotter", "station": self.station,
+                          "phrase": event["phrase"], "source": "quasar_spotter",
+                          "trusted": False}, persist=False)
+            if event["phrase"] in STOCK_STOP:
+                self._interrupt()
             return
         if event["event"] in {"interrupt_partial", "interrupt_final"}:
             key = "partial" if event["event"].endswith("partial") else "text"
             text = event["result"][key].replace("[unk]", " ")
             if self.realtime is not None and rv.stop_command(text):
-                self.realtime.emergency_stop()
+                self._interrupt()
             return
         if event["event"] == "ready":
             self._station_wake_audio_ms = self._station_activity_audio_ms = 0
@@ -360,8 +370,7 @@ class VoiceService:
         final = event["event"] == "final"
         text = event["result"]["text" if final else "partial"].strip()
         if rv.stop_command(text):
-            if self.realtime is not None:
-                self.realtime.emergency_stop()
+            self._interrupt()
             return
         keyword = text.casefold() == WORD or text.casefold().startswith(WORD + " ")
         if self.realtime is not None:

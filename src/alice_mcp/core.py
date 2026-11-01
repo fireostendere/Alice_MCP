@@ -184,6 +184,18 @@ def _check_ssh_file(path: Path, *, private: bool = False) -> None:
         raise ValueError("private identity permissions required")
 
 
+def _process_bindings(name: str) -> dict[str, str]:
+    raw = os.environ.get(name, "{}")
+    if len(raw) > 65536:
+        raise ValueError("process bindings too large")
+    bindings = json.loads(raw, object_pairs_hook=_unique)
+    if (type(bindings) is not dict or len(bindings) > 64
+            or any(type(k) is not str or type(v) is not str for k, v in bindings.items())):
+        raise ValueError("invalid process bindings")
+    result: dict[str, str] = bindings
+    return result
+
+
 def load_inventory(path: Path | None) -> dict[str, Station]:
     """Load operator-provided data; never return its paths or endpoints to MCP."""
     if path is None:
@@ -205,14 +217,10 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
         entries = data["stations"]
         if not isinstance(entries, list) or len(entries) > 64:
             raise ValueError("invalid stations")
-        bindings_raw = os.environ.get("ALICE_MCP_LIVE_CLIENTS", "{}")
-        if len(bindings_raw) > 65536:
-            raise ValueError("client bindings too large")
-        bindings = json.loads(bindings_raw, object_pairs_hook=_unique)
-        if (type(bindings) is not dict or len(bindings) > 64
-                or any(type(k) is not str or type(v) is not str for k, v in bindings.items())):
-            raise ValueError("invalid client bindings")
-        effective = raw + (json.dumps(bindings, sort_keys=True).encode() if bindings else b"")
+        bindings = _process_bindings("ALICE_MCP_LIVE_CLIENTS")
+        colours = _process_bindings("ALICE_MCP_INDICATOR_COLORS")
+        effective = raw + (json.dumps([bindings, colours], sort_keys=True).encode()
+                           if bindings or colours else b"")
         result: dict[str, Station] = {}
         required = {"id", "model"}
         ssh_fields = {"host", "port", "user", "identity_file", "known_hosts_file"}
@@ -285,6 +293,14 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
                     raise ValueError("client binding requires existing direct voice policy")
                 control_policy = validate_policy({**control_policy, "voice": {
                     **voice, "live_client": bindings[entry["id"]]}}, entry["model"])
+            if entry["id"] in colours:
+                voice = control_policy.get("voice", {})
+                indicator = voice.get("indicator", {})
+                if indicator.get("backend") != "ssh_led":
+                    raise ValueError("colour binding requires an enabled indicator")
+                control_policy = validate_policy({**control_policy, "voice": {
+                    **voice, "indicator": {**indicator, "color": colours[entry["id"]]}}},
+                    entry["model"])
             if ("local_tts" in control_policy or "local_media" in control_policy) and not native:
                 raise ValueError("Local speech requires the resident transport")
             from alice_mcp.owned_jobs import validate_policy as validate_jobs
@@ -311,8 +327,8 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
                 preauthorize_all_actions=preauthorized,
                 native_mcp=native, allow_reboot=reboot, jobs=jobs,
             )
-        if bindings.keys() - result.keys():
-            raise ValueError("client binding has unknown station alias")
+        if (bindings.keys() | colours.keys()) - result.keys():
+            raise ValueError("process binding has unknown station alias")
         return result
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         raise SafetyError(

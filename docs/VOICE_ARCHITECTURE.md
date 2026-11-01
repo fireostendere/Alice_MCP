@@ -1,5 +1,342 @@
 # Local wake and OpenAI voice routes
 
+## Current smart-speaker pilot (2026-11-01)
+
+### One question, one generated answer
+
+The active Mini 1 route is now `station_oneshot`, not automatic free conversation.
+The station still uses a direct audio connection, but the reviewed client stops
+microphone transmission at the first question endpoint, drains exactly one answer
+and closes that session. Later room speech is not sent until another wake word.
+Only an explicit request to talk may call `start_conversation`; that one-use host
+transition re-enables the microphone and installs conversation instructions/tools.
+Repeated transitions are harmless. Tool work and outputs are bound to their own
+session/cancel token, so a late search cannot affect a later turn. Silent wake-only
+responses preserve a question spoken while that response was pending.
+
+The short-answer model is `gpt-realtime-2.1-mini`, now with voice **coral** for
+wake-triggered one-shot sessions and their explicitly requested continuation.
+Chat-triggered literal speech retains its existing **marin** voice. It generates the answer afresh;
+there is no table of clock/weather/translation responses. Initial time questions
+use a fresh host-clock snapshot supplied when the question session is configured,
+not a network lookup. That snapshot can precede the question endpoint by the
+question's duration; it is not a continuously updated clock inside a long session.
+Free conversation has `get_time` for new clock readings.
+
+The short-question endpointer now defaults to **200 ms**, independently of the
+**350 ms** conversation default. Optional `voice.command_vad_silence_ms` and
+`voice.vad_silence_ms` accept integers from 200 to 1000 (not booleans). The explicit
+conversation transition restores its own configured timing in the live session;
+it does not inherit the shorter command pause. Long pauses within a question can
+still end it early: these defaults are tunable, not universal human-speech VAD.
+
+Default weather is **Belgrade, Serbia**. The idle worker prefetches validated
+[Open-Meteo](https://open-meteo.com/en/docs) model weather and
+[BBC Russian RSS](https://feeds.bbci.co.uk/russian/rss.xml) headlines. Only data are
+cached in RAM, for at most five minutes; spoken answers are never cached. Weather
+units, finite ranges, WMO codes and observation/date freshness are checked. News
+requires a publisher URL and a publication timestamp within the preceding day;
+undated/old items and XML DTDs are rejected. Expired data are not served on failure.
+Other cities, periods and topical news use actual web search and can take longer.
+The status exposes cache-ready booleans, never the private connection settings.
+Only compact city/current/forecast and publisher/headline data enter the initial
+voice prompt. Source URLs, duplicate source arrays and news publication/retrieval
+metadata remain in the validated caches, not the voice context. When a fresh
+snapshot is present, the corresponding fetch tool is omitted from that one-shot
+request to avoid an unnecessary second lookup. Missing snapshots retain those
+tools; explicit conversation restores the full tool list. No cached evidence is
+mutated or discarded by this optimization.
+
+One-shot input now disables the additional cloud noise-reduction filter because
+this route already receives Quasar's processed `vqe_0` PCM. Explicit conversation
+restores `far_field` along with its own VAD setting. Other voice routes retain
+their existing filter. This is not a bypass of the station echo cancellation.
+The weather observation's time-of-day is also omitted from the voice projection:
+one intermediate clock answer matched that observation time rather than the host
+clock. Source caches retain the timestamp and its freshness checks; the host-clock
+snapshot is now the only time-of-day in the short-answer prompt.
+
+The explicit preconnected text-only socket is reused for a question via `askwarm`;
+no microphone is sent during idle preparation. Older reviewed clients cannot
+silently fall back to an unbounded conversation for a one-shot request.
+Build: Zig 0.15.1, `arm-linux-gnueabihf.2.23`, `-O2 -Wall -Wextra -Werror -s`,
+`native/live_client.c -ldl`; two byte-identical 33,536-byte artifacts, SHA-256
+`c64164b24e1cff594426c81fc091cae68f6268e577bfc2893ff19871c75856d7`.
+
+#### Acoustic acceptance, not a universal speed guarantee
+
+Generated SAPI/Realtek phrases, one Mini 1 and the C922 microphone; no room
+recordings retained. A 10-ms reference-envelope alignment located the generated
+question's end; answer onset used a sustained RMS threshold. These are individual
+trials, not human-voice percentiles; sensor latency is uncalibrated and the
+separate video stream is not audio-synchronized.
+
+**Latest processed-input follow-up:** three alternating weather pairs measured
+1.56/1.41/1.54 s versus stock 1.62/1.64/1.54 s (medians **1.54/1.62 s**). After the
+weather timestamp projection fix, another weather trial measured 1.54 s. All
+recovered the default Belgrade current temperature/conditions. Three later clock
+pairs measured 1.64/1.38/1.59 s versus stock 1.37/1.63/1.22 s (medians
+**1.59/1.37 s**); clock values matched the host snapshot, including one equivalent
+12-hour rendering. Thus the latest clock median is about **220 ms slower** than
+stock, and the strict speed criterion remains **unmet**. A prior six-minute clock
+error is not counted as a successful time answer.
+
+The same final source produced “Goodnight” at about 1.39 s and no response to the
+later unwoken arithmetic question. Explicit conversation and recognized «хватит»
+both worked with verified native cleanup. One news trial was stopped before a
+measurable acoustic onset and is excluded from latency acceptance; a later one
+started at about 1.56 s and was interrupted. Its recovered Poland headline fragment
+was not a fully reliable verbatim transcription, so do not claim exact-news-wording
+qualification or a substantive-news speed comparison from it.
+
+The paired provider-only noise-filter trial measured first audio at
+1.200/1.083 s with the extra filter and 0.990/1.033 s without it (about 130 ms
+median difference). A roughly halved prompt byte count gave essentially identical
+medians (~1.084 s), so that prompt rewrite was not deployed. A 100-ms command VAD
+was also not deployed: it ended a synthetic request containing a 150-ms internal
+pause about 1.38 s before the command ended, producing an initial silent response;
+200 ms kept that request together. The native silent-response path can preserve
+later speech, but that experiment does not qualify the earlier endpoint as a
+complete-question endpoint or demonstrate an end-to-end gain. No native buffer
+reduction was made: review found no intentional first-audio accumulation delay in
+the queue/poll path, and the requested ALSA latency is not a proven audible bound.
+
+The following table is the **earlier** coral/far-field baseline, not the latest
+processed-input result above.
+
+These earlier trials used the 200-ms/compact-context/**coral** configuration; the
+previous 350-ms trials had clock/weather/news gaps of about 2.31/1.79/2.81 s.
+Several settings changed together, so the measured difference is not attributable
+to VAD alone. Some quality trials ran under host CPU contention; this is not a
+controlled load benchmark. A short-noise false onset was excluded: the final
+diagnostic requires at least 150 ms of above-threshold RMS within 300 ms and
+bounds answer detection before any subsequent generated question. This remains
+an onset heuristic, not speaker identification. Room PCM/video remain RAM-only.
+
+| Request | Question-end to audible onset | Result |
+| --- | --- | --- |
+| Translation of «спокойной ночи» | about 1.42 s | “Good night”; later arithmetic question without wake produced no answer through the capture end |
+| Belgrade weather, default city | about 1.78 s | Correct Russian temperature/conditions; fresh-source answer, no preamble |
+| Clock | about 1.40 s | Correct current time in Russian, no lookup/preamble |
+| Stock Alice clock, comparable phrase | about 1.45 s | Stock time answer |
+| Stock Alice weather | about 1.60 s | Stock temperature/conditions; faster than this coral trial |
+| General news | about 1.97 s | Independent ASR recovered the supplied Poland headline; recognized «хватит» and native cleanup; the rest was intentionally not auditioned |
+| Stock Alice news | about 1.83 s | This is its introductory promise, NOT a substantive headline; interrupted with «хватит» |
+| Fact: capital of Portugal | about 1.49 s | Lisbon recovered by independent ASR |
+| Explicit «давай поговорим» | mode transition observed | `start_conversation`, spoken greeting/question, recognized stop and verified cleanup |
+
+Intermediate marin trials reached clock 1.34/1.58 s, weather 1.53 s and news
+1.50–1.72 s, but news/fact transcripts were unreliable. A provider-only synthetic
+comparison then found correct Russian response text with poorly recovered audio
+for marin/cedar; coral's generated PCM was correctly transcribed for the same
+fact. This bypassed the station transport entirely. It supports a voice/rendering
+or ASR compatibility issue, not proof of a native transport defect. The coral
+device trials above were subsequently checked with independent `gpt-4o-transcribe`.
+These samples do not establish correctness for every headline or language. An
+earlier intermediate build also produced an English clock answer and a news
+preamble; instruction-following is not a hard guarantee.
+
+A separate RAM-only provider comparison of the same synthetic clock audio measured
+roughly 1.19 s to first audio for mini versus 1.24 s for full Realtime after commit;
+the full model did not improve that isolated trial. This is not a device benchmark.
+That earlier warm clock trial was comparable to stock; its 50-ms difference is below
+what these few uncalibrated trials can establish. Weather was about 180 ms slower.
+Strict stock-or-better speed for every simple question is **not demonstrated**.
+The earlier blanket claim that a faster backend was the only possible next step
+was premature: local context/tool/endpointer changes measurably improved the pilot.
+The stop-colour issue below also remains unresolved; a red wake indicator is not
+proof of a red native stop animation.
+
+Separate synthetic component measurements did not justify a new serial pipeline:
+streaming ASR final text took about 0.81–0.98 s after speech, stateless Luna JSON
+about 1.02–1.67 s, and cloud TTS first PCM about 0.82–0.95 s. Benchmark-only warm
+Piper synthesis took about 0.13–0.18 s (cold about 2.66 s); it is not implemented as
+a runtime cache, and the explicit OpenAI output binding was not bypassed. A
+provider-only VAD trial measured 350/200-ms server VAD first audio at about
+1.123/0.994 s after speech; semantic-high measured 1.360 s. These isolated samples
+are not end-to-end station acceptance or a universal lower bound.
+
+Earlier one-shot checks: **1,820 Python tests passed, 13 skipped**, one existing fork
+deprecation warning; 15 Node integration tests, ruff, mypy and MCP contract passed.
+These results include local fake-TLS native checks, not only Python mocks.
+
+Full publication checks repeated after the processed-input/clock-projection and
+prepared-hold verification-mode changes: **1,831 passed, 13 skipped**, with the
+existing fork deprecation warning; ruff, mypy, 15 Node tests and MCP contract
+passed. An intervening run under heavy host load showed failures and timed out;
+it is not counted as a pass. The completed rerun passed without relaxing tests.
+The active native artifact is unchanged by the Python-only optimization.
+
+Prepared LED holds are also bound to their verification mode: switching between
+resident-verified and SSH-only preparation recreates the helper. Fresh state stamps
+within the same mode can still renew it. A synthetic native→SSH→firmware-change
+regression verifies blocking before any first coloured frame, without station access.
+
+### Fast red wake feedback
+
+The owner requires **red**; changing to stock purple is not an acceptable fix.
+The earlier 1.2–2.3-second indicator startup was a cold path: the configured
+resident channel was unavailable, so idle preparation was skipped. The explicit
+SSH indicator can now prepare its FIFO-blocked stock player without that channel.
+Preparation never sends a coloured frame. Each activation still consumes a fresh
+preview, rechecks local policy/configuration and pinned SSH trust, and stays bound
+to the existing boot-scoped SSH process. This is not a general SSH fallback for
+native tools or a bypass of a resident policy rejection.
+
+SSH-only preparation first verifies the full firmware hash. The new reviewed
+client's fixed read-only `--firmware-state` command returns file identity including
+nanosecond mtime/ctime, excluding access time. The helper accepts no caller path,
+cannot write, and is reused only from a private listener directory after its exact
+binary hash is checked. The verified executable descriptor stays open to prevent
+pathname substitution. Metadata is checked before and after the initial full
+hash; unchanged identity permits a cheap activation check. Changed or unavailable
+identity requires the full firmware hash again. An absent/mismatched client pin
+retains the full-check path. Firmware mismatch blocks before the first frame;
+uncertain writes still latch off instead of retrying.
+
+Fast-client build: Zig 0.15.1, the ARM target/flags below, two byte-identical
+32,272-byte artifacts, SHA-256
+`5d84e74ba1c2703022a18fb38f66f8c96d9d8c931a6476b78fb65c404d7022b4`
+(`live_voice.FAST_LED_CLIENT_SHA256`). Older pinned clients remain accepted.
+
+Live wake-only tests used a single DirectShow audio/video input, in-memory NUT
+packets, 20-fps red-mask metadata and 10-ms RMS-envelope matching against the
+generated SAPI word. No recordings were retained. Two repeated trials measured
+approximately **350 / 360 ms from acoustic word end to the red optical rise**;
+reference-envelope correlations were 0.935 / 0.946. Player launch acknowledgement
+was 49 / 46 ms after recognition in inspected turns. These boundaries differ:
+recognition precedes the player acknowledgement, while the camera includes the
+recognizer and physical display delay. Video resolution is 50 ms; sensor latency
+is not separately calibrated. This is a few generated-voice trials, not a human
+latency percentile or a measured comparison against stock Alice.
+
+Final fast-feedback regression: 1,799 Python tests passed, 13 skipped; one existing
+fork-from-multithreaded-process deprecation warning. The 15 OpenCode integration
+tests, ruff, mypy, contract/catalog, package and publication/privacy checks passed.
+
+Stop acceptance remains separate: in a later far-field story test and a chat-speech
+test, the synthesized stop did not end playback. An independent bounded read-only
+stock spotter subscription returned `complete` with zero recognized phrases.
+The completed speech had verified native cleanup, but this is not successful
+interruption evidence. No large blue-colour rise was seen in the story capture;
+without a recognized stop it does not qualify the stock stop animation either.
+Do not infer stop reliability or colour-consistency acceptance from fast red wake
+feedback or from the earlier successful cancellation trials.
+
+#### Recognized stop-colour failure
+
+Subsequent trials did recognize «хватит» and showed the native purple/blue pulse
+for roughly 0.6 s. A bounded red acknowledgement using the existing player did
+not suppress it: whole-frame blue rose from about 550 to 2,186 pixels while red
+remained near 1,436. The reported 54-ms player acknowledgement was not red optical
+acceptance. That ineffective acknowledgement was removed and the running project
+refreshed with verified listener cleanup. Cancellation remains shared across the
+stock spotter and local stop routes, covering both standby/chat speech and Realtime.
+
+A fixed read-only `LedCapability` AddListener experiment on the known local IPC
+received three frames but no matching capability snapshot within five seconds.
+It exported only sanitized counts/flags and left Quasar running. This does not
+prove capability absence or handler access. Compiled `DrawAnimation` schemas and
+`Foreground`/`Substitution` enum names do not establish supported Mini 1 parameters,
+animation encoding or an authorized external route. No native animation directive
+was sent. Stop-colour acceptance is still blocked; do not fight the stock renderer,
+replace firmware assets or disable recognition as an implicit workaround.
+
+Post-rollback regression: **1,800 Python tests passed, 13 skipped**, one existing
+fork deprecation warning; 15 Node tests, lint/types, MCP contract and scoped source
+privacy checks passed. These are regression results, not a stop-colour PASS.
+
+### Answer routes and earlier measurements
+
+The selected Mini 1 route is `station_live`: the station's local wake detector opens
+direct Realtime speech-to-speech, not the older transcript/OpenCode command path
+described below. This does not change the default route on other installations.
+The project still uses one `alice` MCP connection and leaves Quasar enabled.
+
+`ask_station(station_id, question)` answers ordinary chat questions and invokes the
+existing guarded `speech.say` exactly once. Time uses the host clock and includes
+its UTC offset; greetings and missing-city weather clarification are local. Other
+facts use one Responses request with a required completed web search, `store=false`,
+no station-action tools, bounded spoken text and at most six separate source URLs.
+Search failure yields an explicit unavailable answer, not unsourced model facts.
+The speech permission is checked before lookup and dispatch gets a fresh one-use
+preview plus current policy/state/trust checks. An uncertain or cancelled utterance
+is never automatically replayed. Source links show the lookup's evidence, not an
+independent guarantee of each generated claim.
+
+The OpenCode plugin's optional `station` alias binds ordinary Alice questions to
+that speaker. Its final session-context hook preserves project/security sources
+and adds the speaker instructions even when a later config transform replaces the
+agent's base prompt. The two direct tool executors reject another station for
+Alice, without changing other agents. The pilot's ordinary chat also has durable
+station-dialogue instructions. A successful answer is already spoken: no second
+`speech.say` call. No permission is derived from spoken text or search results.
+
+Realtime has a host-clock `get_time` tool and shares the same verified-search
+implementation. `voice.vad_silence_ms` defaults to 350 ms (integer, 200–1000), rather
+than 500 ms. The reviewed native client enables TCP_NODELAY and reports
+`speech_stopped`; `command_endpoint` is that provider event, not the acoustic end
+of the owner's question. New client build: same Zig/target/flags as the warm build
+below, two byte-identical 31,220-byte artifacts, SHA-256
+`8c58160a7bb0b537d70d97071a59c1afa2d5d668e43c20fac894f1e080713364`
+(`live_voice.SMART_CLIENT_SHA256`). Older pinned clients remain supported.
+
+Stock «стоп»/«хватит» now cancels the standby's current speech as well as the voice
+turn. A verified interrupted playback returns `cancelled`; an unverified end stays
+`unknown`. The stock spotter and its volume handling are not disabled. The optional
+process binding `ALICE_MCP_INDICATOR_COLORS` maps an alias to a validated indicator
+colour; it cannot enable an off indicator, changes preview identity, and does not
+rewrite inventory/SSH permissions. The owner requires `red`; the pilot now
+recolours the stock listening pattern red. The earlier purple-palette experiment
+was rejected and is not a workaround for stock stop animations. The indicator
+does not suppress firmware animations or claim exclusive control of the ring.
+
+### Live evidence and limits
+
+One Mini 1, generated Russian SAPI phrases through Realtek, C922 microphone/camera.
+`scripts/voice/room_check.py` keeps bounded PCM/RGB only in RAM and returns 50-ms
+RMS intervals plus whole-frame colour counts. No room recordings were retained;
+audio/video synchronization and a ring-only colour region were not verified.
+
+| Test | Observed result |
+| --- | --- |
+| Baseline clock voice question, 500-ms endpoint | About 2.50 s acoustic question-end to response; 4,074 ms wake-to-first-audio data |
+| Arithmetic, 350-ms endpoint/new client | About 1.90 s acoustic gap; connected 1,519, endpoint 2,707, first audio 3,783 ms after wake |
+| Separate clock voice question after activation | About 1.65 s acoustic gap; playback continued beyond the 16-s capture |
+| Science-news voice question | About 1.45 s to the initial audible reaction; later speech after the search is not a two-second substantive-answer claim |
+| Natural weather question in bound chat | One `ask_station`, `applied`; approximately 24.1 s through the agent and complete speech |
+| Time question in a new ordinary Alice chat, without attached session instructions | One `ask_station`, local `host_clock`, `applied`; approximately 12.65 s through the agent and complete speech |
+| Technology news in bound chat, latest sources enabled | One `ask_station`, `applied`, six source URLs; first TTS data 897 ms after dispatch, full playback about 75.9 s, chat about 90.9 s |
+| Stock stop during long chat-triggered speech | `cancelled/stopped`, 139,184 frames, one flush, no underruns, verified cleanup; room activity ended at 3.75 s and stayed below threshold through the 12-s capture |
+
+The arithmetic player completed 192,000 frames with one flush, zero underruns and
+verified cleanup. Its provider-endpoint-to-first-audio-data interval was 1,076 ms;
+that is not the acoustic gap. Indicator launch acknowledgement in that earlier
+trial took 2,318 ms after wake; the fast red-feedback measurements above supersede
+that cold-start result.
+The whole-frame camera counts changed around stop but cannot establish an exact
+ring colour or prove absence of a brief firmware colour transition.
+
+The science-news turn reported a tool call and completed 1,656,000 frames with
+verified cleanup, one flush and one recovered underrun. Endpoint/first-audio/tool
+events were 2,615 / 3,149 / 3,951 ms after wake. The bounded room capture does not
+identify precisely which later syllable starts the substantive searched answer.
+
+During activation, saved agent/plugin changes were not reflected in the cached
+location. The operator used `DELETE /api/debug/location` scoped explicitly by
+`location[directory]` to this project, then verified the rebuilt Alice role and
+one MCP owner. This is not `/api/location/reload`, which rebuilds every location.
+Keep the current listener stopped with verified cleanup before disposing its
+services; do not blindly start a second listener if an older process owns it.
+
+One earlier independent clock speech attempt returned `unknown/response_failed`
+with zero frames and verified cleanup; it was not retried. Later distinct weather,
+news and stop tests succeeded. These trials do not establish reliability/latency
+percentiles, human-voice accuracy, other firmware, offline operation, or a general
+two-second guarantee. Search and long playback remain slower than simple answers.
+
+## Earlier recognition routes and implementation details
+
 The optional [`voice.source="station_asr"`](ON_STATION_ASR.md) runs Russian Vosk
 on the Mini 1. Microphone PCM stays on the speaker; local final text feeds the same
 Alice answer route or Realtime conversation. Dictation also stays local. The
@@ -236,8 +573,8 @@ alias to absolute client path (for example `{"desk":"/PRIVATE/reviewed-client"}`
 It only replaces an already configured `voice.live_client`; unknown aliases,
 invalid paths and stations without direct voice policy fail closed. This leaves
 the private inventory, SSH settings and permissions unchanged. Effective client
-bindings participate in station/preview identity; runtime still accepts only the
-two exact reviewed client hashes. Remove the variable to restore inventory
+bindings participate in station/preview identity; runtime accepts only the
+explicit reviewed client hashes. Remove the variable to restore inventory
 selection. `voice_status.speech_connection` exposes only support/readiness flags.
 
 Live activation evidence (one Mini 1, 2026-11-01): the project-local MCP selected

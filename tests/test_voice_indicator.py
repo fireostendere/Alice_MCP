@@ -38,6 +38,14 @@ LISTENING = ("gammacorrection\nloop\n"
              "000000 000000 000000 000000 000000 000000 80\n")
 
 
+@pytest.fixture(autouse=True)
+def no_resident_network(monkeypatch: Any) -> None:
+    def unavailable(*args: Any, **kwargs: Any) -> Any:
+        raise SafetyError("Synthetic resident unavailable")
+
+    monkeypatch.setattr(native_transport, "call", unavailable)
+
+
 def native_station(root: Path, *actions: str, **voice: Any) -> Station:
     key, hosts = root / "station-key", root / "known-hosts"
     key.write_text("synthetic key\n")
@@ -144,6 +152,7 @@ print()
     env = {**os.environ, "PATH": f"{shims}:{os.environ['PATH']}"}
     script = (vi.SCRIPT.replace("OWNER_UID=0", f"OWNER_UID={os.getuid()}")
               .replace("/system/", f"{root}/system/").replace("/proc/mounts", f"{root}/mounts")
+              .replace("/tmp/alice-mcp-live.", f"{root}/tmp/alice-mcp-live.")
               .replace("for t in /tmp /run /dev/shm /var/run", f"for t in {root}/tmp"))
     monkeypatch.setattr(vi, "SCRIPT", script)
 
@@ -214,6 +223,67 @@ def test_prepared_player_waits_for_activation_and_cleans_on_disconnect(
     assert hold.release() == {"outcome": "applied", "left_running": False}
     assert any(line.startswith("start ") for line in lines(station)) == activate
     assert not (station["root"] / "tmp/alice-mcp-indicator").exists() and not players(station)
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_full_check_preparation_rechecks_firmware_before_first_frame(
+        station: Any, changed: bool) -> None:
+    ssh = ssh_only(native_station(station["root"], "led.show"))
+    command = vi._command(ssh, "prepare", 90, vi.recolor(LISTENING, "red"))
+    hold = vi.Hold(station["spawn"](ssh, command), command.data)
+    try:
+        assert hold.wait_started(prepared=True)
+        assert not lines(station)
+        if changed:
+            (station["root"] / "system/vendor/quasar/maind").write_bytes(b"changed firmware")
+        assert hold.start() is not changed
+        result = hold.release()
+        assert result == ({"outcome": "blocked", "error_code": "firmware_mismatch"}
+                          if changed else {"outcome": "applied", "left_running": False})
+        assert any(line.startswith("start ") for line in lines(station)) is not changed
+        assert not players(station)
+    finally:
+        if hold.alive():
+            hold.release()
+
+
+@pytest.mark.parametrize(("changed", "pinned"), [(False, True), (True, True), (False, False)])
+def test_pinned_stat_client_avoids_rehash_only_for_identical_nanosecond_metadata(
+        station: Any, changed: bool, pinned: bool) -> None:
+    root = station["root"]
+    firmware = root / "system/vendor/quasar/maind"
+    parent = root / "tmp/alice-mcp-live.synthetic"
+    parent.mkdir(mode=0o700)
+    client = parent / "client"
+    client.write_text(f"""#!{sys.executable}
+import os
+s = os.stat({str(firmware)!r}, follow_symlinks=False)
+print(s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+""")
+    client.chmod(0o500)
+    pin = hashlib.sha256(client.read_bytes()).hexdigest() if pinned else "0" * 64
+    hashes = root / "hash-count"
+    real_sha = shutil.which("sha256sum")
+    shim = Path(station["env"]["PATH"].split(os.pathsep)[0]) / "sha256sum"
+    shim.write_text(f"#!/bin/sh\n[ \"$1\" != '{firmware}' ] || echo x >> '{hashes}'\n"
+                    f"exec '{real_sha}' \"$@\"\n")
+    shim.chmod(0o700)
+    ssh = ssh_only(native_station(root, "led.show"))
+    command = vi._command(ssh, "prepare", 90, vi.recolor(LISTENING, "red"), state_pin=pin)
+    hold = vi.Hold(station["spawn"](ssh, command), command.data)
+    try:
+        assert hold.wait_started(prepared=True) and not lines(station)
+        if changed:
+            stamp = firmware.stat()
+            firmware.write_bytes(b"different")  # Same size and mtime: ctime must still invalidate.
+            os.utime(firmware, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        assert hold.start() is not changed
+        result = hold.release()
+        assert result["outcome"] == ("blocked" if changed else "applied")
+        assert len(hashes.read_text().splitlines()) == (1 if pinned and not changed else 2)
+    finally:
+        if hold.alive():
+            hold.release()
 
 
 @pytest.mark.parametrize("term_delay", [0, 1])
@@ -387,7 +457,7 @@ def test_lit_while_busy_then_dark_when_the_agent_answers(
     time.sleep(3.5)  # Past the pickup window: busy keeps it lit.
     item.wake(6)  # A new command while lit extends; never a second player.
     agent(state, "busy", 6)
-    assert item.status()["state"] == "lit" and len(players(station)) == 1
+    assert item.status()["state"] == "lit" and len(players(station)) == 2
     agent(state, "idle", 6)
     wait(lambda: item.status()["state"] == "idle")
     assert [x.split()[0] for x in lines(station)] == ["start", "SIGTERM", "start", "SIGTERM"]
@@ -489,6 +559,40 @@ def test_fresh_state_rebinds_preview_without_restarting_unchanged_prepared_playe
         item.close()
 
 
+def test_native_to_ssh_fallback_rechecks_firmware_changed_after_idle_preparation(
+        station: Any, monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setattr(vi.Indicator, "_loop", lambda self: None)
+    native_available = [True]
+
+    def state(*args: Any) -> str:
+        if not native_available[0]:
+            raise SafetyError("Native preview state unavailable; no action dispatched")
+        return "a" * 64
+
+    monkeypatch.setattr(native_transport, "_state", state)
+    item, _, _ = indicator(station, monkeypatch, tmp_path)
+    active = None
+    try:
+        item._prepare()
+        native_hold = item.warm
+        assert native_hold is not None and item.prepared is not None
+        native_available[0] = False
+        item._prepare()  # Firmware still matches while the SSH preview is prepared.
+        ssh_hold = item.warm
+        assert ssh_hold is not None and item.prepared is not None
+        (station["root"] / "system/vendor/quasar/maind").write_bytes(b"changed firmware")
+        item.wake(48, managed=True)
+        active = item._start()
+        assert active is None and item.reason == "firmware_mismatch"
+        assert ssh_hold is not native_hold
+        assert not any(line.startswith("start ") for line in lines(station))
+        assert not players(station)
+    finally:
+        if active is not None:
+            item._finish(active)
+        item.close()
+
+
 def test_uncertain_preparation_never_falls_through_to_another_player(
         station: Any, monkeypatch: Any, tmp_path: Path) -> None:
     item, _, _ = indicator(station, monkeypatch, tmp_path)
@@ -517,6 +621,25 @@ def test_deferred_indicator_does_not_touch_station_before_source_is_ready(
         item.listen_ready()
         wait(lambda: item.prepared is not None)
         assert states and not lines(station)
+    finally:
+        item.close()
+
+
+def test_unavailable_resident_still_prepares_the_explicit_ssh_indicator(
+        station: Any, monkeypatch: Any, tmp_path: Path) -> None:
+    def unavailable(*args: Any) -> str:
+        raise SafetyError("Native preview state unavailable; no action dispatched")
+
+    monkeypatch.setattr(native_transport, "_state", unavailable)
+    item, _, _ = indicator(station, monkeypatch, tmp_path)
+    try:
+        wait(lambda: item.prepared is not None, seconds=3)
+        assert item.warm is not None and not lines(station)
+        monkeypatch.setattr(item, "spawn", lambda *args: pytest.fail("cold launch on wake"))
+        item.wake(47, managed=True)
+        wait(lambda: item.state == "lit")
+        assert item.prepared is None
+        item.complete(47)
     finally:
         item.close()
 
@@ -614,8 +737,9 @@ def test_error_or_timeout_darkens_first_then_plays_the_stock_phrase_once(
     audio = played[0][1]
     assert audio[:4] == b"RIFF" and audio[36:40] == b"data" and len(audio) == 44 + 600
     assert max(abs(s) for (s,) in struct.iter_unpack("<h", audio[44:])) <= 8191
-    assert item.status()["error_sound"] == "applied" and not players(station)
+    assert item.status()["error_sound"] == "applied"
     item.close()
+    assert not players(station)
 
 
 def test_error_sound_is_skipped_on_a_hash_mismatch(
@@ -638,7 +762,13 @@ def test_off_backend_does_nothing_and_unknown_is_never_retried(
     assert item.status()["state"] == "off" and not lines(station) and not played
     item.close()
     item, state, _ = indicator(station, monkeypatch, tmp_path)
-    monkeypatch.setattr(vi.Hold, "release", lambda self, timeout=20: {"outcome": "unknown"})
+    release = vi.Hold.release
+
+    def lost_receipt(self: Any, timeout: float = 20) -> dict[str, Any]:
+        release(self, timeout)  # Owned transport closes, but its result is unavailable.
+        return {"outcome": "unknown"}
+
+    monkeypatch.setattr(vi.Hold, "release", lost_receipt)
     item.wake(2)
     agent(state, "busy", 2)
     wait(lambda: item.status()["state"] == "lit" and lines(station))

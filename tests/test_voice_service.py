@@ -51,6 +51,20 @@ def test_policy_accepts_voice_with_defaults_and_refuses_anything_else(tmp_path: 
             rt.validate_policy({**FIRMWARE, "voice": bad}, model)
 
 
+@pytest.mark.parametrize("value", [True, 199, 1001, "200"])
+def test_command_endpointer_rejects_invalid_boundary_values(tmp_path: Path, value: Any) -> None:
+    with pytest.raises(ValueError):
+        rt.validate_policy({**FIRMWARE, "voice": voice(tmp_path, command_vad_silence_ms=value)},
+                           "station-mini")
+
+
+def test_command_endpointer_can_be_tuned_without_changing_conversation(tmp_path: Path) -> None:
+    result = rt.validate_policy({**FIRMWARE, "voice": voice(
+        tmp_path, command_vad_silence_ms=250, vad_silence_ms=500)}, "station-mini")
+    assert result["voice"]["command_vad_silence_ms"] == 250
+    assert result["voice"]["vad_silence_ms"] == 500
+
+
 def test_station_source_needs_no_host_models_and_never_uses_ssh(
     tmp_path: Path, monkeypatch: Any,
 ) -> None:
@@ -354,6 +368,8 @@ def test_realtime_uses_early_wake_and_never_emits_a_second_agent_command(
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             assert kwargs["answer"] is (answer if opencode else None)
+            assert kwargs["command_vad_silence_ms"] == 200
+            assert kwargs["vad_silence_ms"] == 350
             self.closed, self.frames, self.wakes = False, 0, []
             turns.append(self)
 
@@ -808,6 +824,7 @@ def test_station_live_listens_with_the_wake_detector_and_no_vosk(
             return {"outcome": "complete", "reason": "stopped"}
 
         def session(self, session: dict[str, Any], text: str, **options: Any) -> dict[str, Any]:
+            assert session["audio"]["input"]["turn_detection"]["silence_duration_ms"] == 250
             calls.append((session["model"], text, options["listen"]))
             return {"outcome": "complete", "reason": "idle", "player": {"outcome": "complete"}}
 
@@ -820,11 +837,12 @@ def test_station_live_listens_with_the_wake_detector_and_no_vosk(
         listen_ready=lambda: None, status=lambda: {"state": "idle"}))
     voice_service = service(tmp_path, monkeypatch, station(
         tmp_path, source="station_live",
+        command_vad_silence_ms=250, vad_silence_ms=500,
         asr_directory="/bkupgrade/data/opt/alice-local-asr-aaaaaaaaaaaa",
         live_client="/private/c", live_player="/private/p"))
     voice_service.start("mini1")
     wait(lambda: voice_service.state == "stopped")
-    assert calls == [(vs.rv.MODEL, "", True)]  # The model hears the command itself.
+    assert calls == [(vs.rv.TTS_MODEL, "", True)]  # One short question, not free conversation.
     assert voice_service.last_error is None and len(made) == 1
 
 
@@ -853,3 +871,18 @@ def test_status_exposes_only_preconnection_readiness(
     assert "PRIVATE_SENTINEL" not in json.dumps(voice.status())
     voice._standby.warm_until = 0
     assert voice.status()["speech_connection"]["ready"] is False
+
+
+@pytest.mark.parametrize("phrase", ["стоп", "хватит"])
+def test_stock_stop_cancels_chat_speech_even_when_no_voice_turn_is_active(
+    tmp_path: Path, monkeypatch: Any, phrase: str,
+) -> None:
+    voice = service(tmp_path, monkeypatch, station(tmp_path))
+    stopped: list[str] = []
+    voice._standby = SimpleNamespace(interrupt=lambda: stopped.append("chat_speech"))
+    voice.realtime = SimpleNamespace(emergency_stop=lambda: stopped.append("voice_turn"))
+    voice._station_event({"event": "spotter", "phrase": phrase, "trusted": False})
+    assert stopped == ["chat_speech", "voice_turn"]
+    stopped.clear()
+    voice._station_event({"event": "spotter", "phrase": "громче", "trusted": False})
+    assert stopped == []

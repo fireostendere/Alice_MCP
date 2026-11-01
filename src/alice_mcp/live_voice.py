@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from alice_mcp import io_channel_pilot as iop
-from alice_mcp import native_transport, quasar_client, station_asr
+from alice_mcp import native_transport, quasar_client, station_asr, station_assistant
 from alice_mcp import wake_pilot as wp
 from alice_mcp.core import Controller, SafetyError, SSHInput, ssh_argv
 from alice_mcp.vqe_experiment import _ssh
@@ -31,6 +31,9 @@ from alice_mcp.wake_simulate import read_pinned
 PLAYER_SHA256 = "6caee5b7e86478024c8c0f5c9e1e35d6acec3fa77d00e891a64f26867810fefe"
 CLIENT_SHA256 = "c05fa81b4f0cc6827288424db1cf803df6a31d7abad42560a55a159af0c6087d"
 WARM_CLIENT_SHA256 = "a8eca25455a65b9406c25716cd8bbcb7b458b6c429132b33ba394c512c7aa691"
+SMART_CLIENT_SHA256 = "8c58160a7bb0b537d70d97071a59c1afa2d5d668e43c20fac894f1e080713364"
+FAST_LED_CLIENT_SHA256 = "5d84e74ba1c2703022a18fb38f66f8c96d9d8c931a6476b78fb65c404d7022b4"
+ONESHOT_CLIENT_SHA256 = "c64164b24e1cff594426c81fc091cae68f6268e577bfc2893ff19871c75856d7"
 LIMIT = 64 * 1024
 SCRIPT = r"""set -u
 umask 077
@@ -70,12 +73,14 @@ CLOUD = frozenset({"api_error", "response_failed", "connect_failed", "tls_failed
 
 
 def load_client(path: Path) -> tuple[bytes, str]:
-    """Two exact reviewed builds; older deployments keep their existing cold-socket path."""
+    """Exact reviewed builds; older deployments retain their existing protocol."""
     try:
         with path.open("rb") as source:
             data = source.read(LIMIT + 1)
         pin = hashlib.sha256(data).hexdigest()
-        if len(data) > LIMIT or pin not in {CLIENT_SHA256, WARM_CLIENT_SHA256}:
+        if len(data) > LIMIT or pin not in {
+                CLIENT_SHA256, WARM_CLIENT_SHA256, SMART_CLIENT_SHA256, FAST_LED_CLIENT_SHA256,
+                ONESHOT_CLIENT_SHA256}:
             raise ValueError
         return data, pin
     except (ValueError, OSError):
@@ -303,10 +308,14 @@ class Standby:
         self.spare_used = threading.Event()
         self.connected = False
         self.warm_supported = False
+        self.command_supported = False
         self.warm_until = 0.0
         self.preparing_at: float | None = None
         self.warm_retry_at = 0.0
         self.launched_station: Any = None
+        self.session_cancel: threading.Event | None = None
+        self.weather_at = 0.0
+        self.news_at = 0.0
 
     def send(self, line: bytes) -> None:
         with self.lock, contextlib.suppress(OSError, ValueError, AttributeError):
@@ -320,7 +329,9 @@ class Standby:
         voice = station.controls["voice"]
         player = read_pinned(Path(voice["live_player"]), PLAYER_SHA256, LIMIT)
         client, client_pin = load_client(Path(voice["live_client"]))
-        self.warm_supported = client_pin == WARM_CLIENT_SHA256
+        self.warm_supported = client_pin in {
+            WARM_CLIENT_SHA256, SMART_CLIENT_SHA256, FAST_LED_CLIENT_SHA256, ONESHOT_CLIENT_SHA256}
+        self.command_supported = client_pin == ONESHOT_CLIENT_SHA256
         self.launched_station = station
         stamp = _stamp(self.controller, station)
         verified = stamp != "-" and quasar_client._verified.get(station.id) == stamp
@@ -404,17 +415,26 @@ class Standby:
     def session(self, session: dict[str, Any], text: str, *, listen: bool, deadline: float,
                 cancel: threading.Event,
                 on_event: Callable[[dict[str, Any]], None] = lambda _: None,
-                tool: Callable[[str, dict[str, Any]], str] | None = None) -> dict[str, Any]:
+                tool: Callable[[str, dict[str, Any]], str] | None = None,
+                one_shot: bool = False) -> dict[str, Any]:
         """RealtimeTurn's `direct`: the standby connects and hears the owner from the wake."""
-        if not listen:
+        if not listen or one_shot and not self.command_supported:
             raise SafetyError("live_unavailable")
-        return self._run_session("session", session, "", deadline, cancel, on_event, tool)
+        return self._run_session("ask" if one_shot else "session", session, "", deadline,
+                                 cancel, on_event, tool)
 
     def _keep_spare(self, process: Any) -> None:
         """One idle text-only connection, or a spare secret for the old pinned client."""
         from alice_mcp import realtime_voice as rv
 
         while self.process is process and not self.stop.is_set():
+            now = time.monotonic()
+            if self.command_supported and not self.busy.locked() and now >= self.weather_at:
+                result = station_assistant.weather(timeout=5, refresh=True)
+                self.weather_at = now + (300 if result["source"] == "open_meteo" else 30)
+            if self.command_supported and not self.busy.locked() and now >= self.news_at:
+                result = station_assistant.news(timeout=5, refresh=True)
+                self.news_at = now + (300 if result["source"] == "bbc_rss" else 30)
             if self.warm_supported:
                 self._prepare_speech()
                 self.stop.wait(0.5)
@@ -476,6 +496,12 @@ class Standby:
         return self._run_session("say", rv.speak_session(), " " + " ".join(text.split()),
                                  deadline, cancel, lambda _: None, None)
 
+    def interrupt(self) -> None:
+        """Stop only this process's active turn, including speech requested from chat."""
+        cancel = self.session_cancel
+        if cancel is not None:
+            cancel.set()
+
     def _run_session(self, verb: str, session: dict[str, Any], text: str, deadline: float,
                      cancel: threading.Event, on_event: Callable[[dict[str, Any]], None],
                      tool: Callable[[str, dict[str, Any]], str] | None) -> dict[str, Any]:
@@ -490,11 +516,40 @@ class Standby:
             raise SafetyError("deadline_exceeded")
         if not self.busy.acquire(blocking=False):
             raise SafetyError("live_busy")  # One station session at a time: never overlap.
+        self.session_cancel = cancel
         events: queue.Queue[dict[str, Any]] = queue.Queue()
         self.events = events
         end: dict[str, Any] = {"reason": "unknown"}
+        continued = False
+
+        def current() -> bool:
+            return (self.events is events and self.session_cancel is cancel
+                    and self.process is process and not cancel.is_set())
+
+        def send_current(line: bytes) -> None:
+            nonlocal continued
+            with self.lock:
+                continuing = line.startswith(b"continue ")
+                if not current() or continuing and continued:
+                    return
+                if continuing:
+                    continued = True  # A transition is sent once, never retried.
+                with contextlib.suppress(OSError, ValueError, AttributeError):
+                    process.stdin.write(line)
+                    process.stdin.flush()
+
+        def call_current(name: str, arguments: dict[str, Any]) -> str:
+            with self.lock:
+                if not current() or tool is None:
+                    raise SafetyError("live_unavailable")
+            output = tool(name, arguments)
+            if verb == "ask" and name == "start_conversation" and not arguments:
+                config = json.dumps(session, ensure_ascii=False, separators=(",", ":"))
+                send_current(b"continue " + config.encode() + b"\n")
+            return output
+
         try:
-            warm = verb == "say" and time.monotonic() < self.warm_until
+            warm = verb in {"say", "ask"} and time.monotonic() < self.warm_until
             self.warm_until, self.preparing_at = 0.0, None
             if (self.warm_supported
                     and self.controller.station(self.station_id) != self.launched_station):
@@ -513,8 +568,15 @@ class Standby:
                                          max(1.0, min(15.0, deadline - time.monotonic())))
             except Exception:
                 raise SafetyError("api_error") from None
-            self.send((f"speak {min(seconds, 180)}{text}\n" if warm else
-                       f"{verb} {session['model']} {seconds} {secret}{text}\n").encode())
+            if cancel.is_set():
+                return {"outcome": "blocked", "reason": "cancelled_before_dispatch",
+                        "player": {}, "interrupted": True}
+            if warm and verb == "ask":
+                config = json.dumps(session, ensure_ascii=False, separators=(",", ":"))
+                self.send(f"askwarm {min(seconds, 180)} {config}\n".encode())
+            else:
+                self.send((f"speak {min(seconds, 180)}{text}\n" if warm else
+                           f"{verb} {session['model']} {seconds} {secret}{text}\n").encode())
             del secret
             timing["dispatched"] = round((time.monotonic() - started) * 1000)
             cancelled = False
@@ -535,16 +597,22 @@ class Standby:
                 if event["event"] in {"connected", "first_audio"}:
                     timing.setdefault(event["event"], round((time.monotonic() - started) * 1000))
                 if event["event"] == "tool":
-                    threading.Thread(target=_answer, args=(self.send, event.get("message"), tool,
-                                                           b"cancel\n"),
+                    threading.Thread(target=_answer, args=(send_current, event.get("message"),
+                                                           call_current,
+                                                            b"cancel\n"),
                                      name="alice-live-tool", daemon=True).start()
                 on_event(event)
         finally:
-            self.events = None
+            with self.lock:
+                self.events = None
+                self.session_cancel = None
             self.busy.release()
         timing["total"] = round((time.monotonic() - started) * 1000)
-        return {**_outcome(end, cancel), "speech_runtime": {
-            "transport": "standby", "secret_source": secret_source, "timing_ms": timing}}
+        result = _outcome(end, cancel)
+        return {**result, "speech_runtime": {
+            "transport": "standby", "secret_source": secret_source, "timing_ms": timing},
+            "interrupted": result["outcome"] == "complete"
+            and cancel.is_set() and end.get("reason") == "stopped"}
 
 
 def invoke(controller: Controller, station: Any, request: dict[str, Any]) -> dict[str, Any]:
@@ -576,7 +644,7 @@ def invoke(controller: Controller, station: Any, request: dict[str, Any]) -> dic
     except SafetyError as error:  # Busy or gone before anything was sent: nothing spoken.
         return {"outcome": "blocked", "error_code": str(error)}
     # A cloud failure may follow partial speech, so only a clean end counts as applied.
-    return {"outcome": {"complete": "applied", "blocked": "blocked"}.get(result["outcome"],
-                                                                         "unknown"),
+    return {"outcome": "cancelled" if result.get("interrupted") else {
+        "complete": "applied", "blocked": "blocked"}.get(result["outcome"], "unknown"),
             "reason": result["reason"], "playback": result["player"],
             "speech_runtime": result.get("speech_runtime", {})}

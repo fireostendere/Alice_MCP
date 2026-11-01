@@ -4,6 +4,7 @@ import base64
 import ctypes.util
 import hashlib
 import json
+import os
 import shutil
 import socket
 import ssl
@@ -18,6 +19,31 @@ import pytest
 
 SOURCE = Path(__file__).parents[1] / "src/alice_mcp/native/live_client.c"
 SECRET = "synthetic_secret"
+
+
+def test_fixed_firmware_identity_tracks_nanoseconds_but_not_access_time(tmp_path: Path) -> None:
+    firmware = tmp_path / "maind"
+    firmware.write_bytes(b"synthetic firmware")
+    built = tmp_path / "identity-client"
+    subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror",
+                    f'-DLIVE_FIRMWARE_PATH="{firmware}"', str(SOURCE), "-ldl", "-o", str(built)],
+                   check=True, capture_output=True)
+
+    def identity() -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(built), "--firmware-state"], capture_output=True,
+                              text=True, timeout=5)
+
+    before = identity()
+    assert before.returncode == 0 and before.stdout.strip() and not before.stderr
+    firmware.read_bytes()  # An access-time update must not invalidate cached content.
+    assert identity().stdout == before.stdout
+    stamp = firmware.stat()
+    os.utime(firmware, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 1))
+    assert identity().stdout != before.stdout
+    firmware.unlink()
+    firmware.symlink_to(tmp_path / "missing")
+    denied = identity()
+    assert denied.returncode != 0 and not denied.stdout and not denied.stderr
 
 
 def _recv_exact(conn: ssl.SSLSocket, size: int) -> bytes:
@@ -43,7 +69,9 @@ def _read_frame(conn: ssl.SSLSocket) -> tuple[int, bytes]:
     return head[0] & 0x0F, payload
 
 
-def _send(conn: ssl.SSLSocket, event: dict[str, Any]) -> None:
+def _send(conn: ssl.SSLSocket, event: Any) -> None:
+    if callable(event):
+        event = event()
     if event == {"ping": True}:
         conn.sendall(b"\x89\x00")  # A server keepalive between turns.
         return
@@ -57,15 +85,18 @@ class Server:
     """One accepted session: scripted events after the opener, then idle."""
 
     def __init__(self, cert: Path, key: Path, script: list[dict[str, Any]],
-                 later: list[dict[str, Any]] | None = None, *,
-                 on_connect: list[dict[str, Any]] | None = None) -> None:
+                  later: list[dict[str, Any]] | None = None, *,
+                  on_connect: list[dict[str, Any]] | None = None,
+                  on_update: list[dict[str, Any]] | None = None) -> None:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert, key)
         self.listener = socket.create_server(("localhost", 0))
         self.port = self.listener.getsockname()[1]
         self.context, self.script, self.later = context, script, later or []
         self.on_connect = on_connect or []
+        self.on_update = on_update or []
         self.responses = 0
+        self.updates = 0
         self.request = b""
         self.received: list[dict[str, Any]] = []
         self.pongs = 0
@@ -96,6 +127,11 @@ class Server:
                         continue
                     event = json.loads(payload)
                     self.received.append(event)
+                    if event["type"] == "session.update":
+                        self.updates += 1
+                        _send(conn, {"type": "session.updated"})
+                        for item in self.on_update if self.updates == 1 else []:
+                            _send(conn, item)
                     if event["type"] == "response.create":
                         self.responses += 1
                         for item in self.script if self.responses == 1 else self.later:
@@ -211,6 +247,15 @@ def test_speak_only_session_plays_whole_reply_then_ends(built: Path) -> None:
     assert "F" not in [k for k, _ in frames]
 
 
+def test_voice_endpoint_is_reported_separately_from_first_audio(built: Path) -> None:
+    delta = base64.b64encode(b"\1\0" * 2400).decode()
+    _, events = _run(built, [{"type": "input_audio_buffer.speech_stopped"},
+                             {"type": "response.output_audio.delta", "delta": delta},
+                             {"type": "response.done", "response": {"status": "completed"}}])
+    kinds = [e["event"] for e in events]
+    assert kinds.index("speech_stopped") < kinds.index("first_audio")
+
+
 def test_api_error_or_failed_reply_ends_as_failure(built: Path) -> None:
     _, events = _run(built, [{"type": "error", "error": {"message": "PRIVATE"}}])
     assert events[-1]["reason"] == "api_error" and "PRIVATE" not in json.dumps(events)
@@ -309,14 +354,22 @@ def _until(process: subprocess.Popen[bytes], event: str) -> list[dict[str, Any]]
     return seen
 
 
-def _standby(built: Path, base: int) -> tuple[Server, list[dict[str, Any]]]:
+def _standby(built: Path, base: int, verb: str = "session", *,
+             silent_wake: bool = False) -> tuple[Server, list[dict[str, Any]]]:
     """A standby whose capture plays numbered blocks (base + 100 * block)."""
     (built / "detector").write_text(DETECTOR)
     (built / "numbered").write_text(NUMBERED_CAPTURE.replace("BASE", str(base)))
     (built / "detector").chmod(0o700)
     (built / "numbered").chmod(0o700)
     reply = base64.b64encode(b"\1\0" * 2400).decode()
+    def delayed_silence() -> dict[str, Any]:
+        time.sleep(0.5)  # The question starts while the server silently finishes the wake word.
+        return {"type": "response.done", "response": {"status": "completed"}}
+
+    wake = ([{"type": "input_audio_buffer.speech_stopped"}, delayed_silence]
+            if silent_wake else [])
     server = Server(built / "cert.pem", built / "key.pem", [], on_connect=[
+        *wake,
         {"type": "input_audio_buffer.speech_started"},
         {"type": "input_audio_buffer.speech_stopped"},
         {"type": "response.created"},
@@ -332,7 +385,7 @@ def _standby(built: Path, base: int) -> tuple[Server, list[dict[str, Any]]]:
     seen += _until(process, "detector")  # ready, then the wake line, both raw for the host.
     assert seen[-1]["line"]["event"] == "wake" and seen[-1]["line"]["t_ms"] == 500
     time.sleep(0.6)  # The owner keeps talking while this PC mints the secret.
-    process.stdin.write(f"session gpt-realtime-2.1 30 {SECRET}\n".encode())
+    process.stdin.write(f"{verb} gpt-realtime-2.1 30 {SECRET}\n".encode())
     process.stdin.flush()
     session = _until(process, "session_end")
     process.stdin.write(b"stop\n")
@@ -340,6 +393,23 @@ def _standby(built: Path, base: int) -> tuple[Server, list[dict[str, Any]]]:
     assert _until(process, "end")[-1]["reason"] == "stopped"  # Standby, not a session, ends.
     process.wait(10)
     return server, session
+
+
+def test_one_shot_stops_sending_microphone_at_endpoint_and_drains_reply(built: Path) -> None:
+    server, session = _standby(built, 9000, "ask")
+    assert session[-1]["reason"] == "idle"
+    assert session[-1]["player"]["outcome"] == "complete"
+    assert session[-1]["mic"]["sent_ms"] == session[-1]["mic"]["buffered_ms"]
+    assert any(e["event"] == "first_audio" for e in session)
+    assert not any(e["type"] == "conversation.item.create" for e in server.received)
+
+
+def test_question_during_silent_wake_response_is_not_discarded(built: Path) -> None:
+    server, session = _standby(built, 9000, "ask", silent_wake=True)
+    mic = session[-1]["mic"]
+    assert mic["sent_ms"] >= mic["buffered_ms"] + 200
+    assert any(e["event"] == "first_audio" for e in session)
+    assert server.received
 
 
 def test_standby_detects_then_sends_the_command_from_the_wake_word_and_waits_again(
@@ -403,17 +473,23 @@ def test_standby_speaks_text_without_the_microphone_then_keeps_waiting(built: Pa
     process.wait(10)
 
 
-@pytest.mark.parametrize("finish", ["speak", "expire", "cancel", "unsolicited", "disconnect"])
+@pytest.mark.parametrize("finish", ["speak", "ask", "ask_conversation", "expire", "cancel",
+                                   "unsolicited", "disconnect"])
 def test_prepared_speech_connects_without_player_or_mic_and_is_consumed_once(
         built: Path, finish: str) -> None:
     (built / "detector").write_text(DETECTOR)
     (built / "detector").chmod(0o700)
     reply = base64.b64encode(b"\1\0" * 2400).decode()
-    server = Server(built / "cert.pem", built / "key.pem", [
+    answer = [
         {"type": "response.output_audio.delta", "delta": reply},
-        {"type": "response.done", "response": {"status": "completed"}}],
+        {"type": "response.done", "response": {"status": "completed"}}]
+    tool = {"type": "response.function_call_arguments.done", "call_id": "call_chat",
+            "name": "start_conversation", "arguments": "{}"}
+    server = Server(built / "cert.pem", built / "key.pem", answer,
         on_connect=([{"type": "response.output_audio.delta", "delta": reply}]
-                    if finish == "unsolicited" else []))
+                    if finish == "unsolicited" else []),
+        on_update=[{"type": "input_audio_buffer.speech_stopped"},
+                   *([tool, answer[-1]] if finish == "ask_conversation" else answer)])
     process = subprocess.Popen([str(_client(built, server.port)), "--player", str(built / "player"),
                                 "--ca", str(built / "cert.pem"), "--idle-ms", "200",
                                 "--wake-detector", str(built / "detector"),
@@ -431,7 +507,27 @@ def test_prepared_speech_connects_without_player_or_mic_and_is_consumed_once(
         prepared = _until(process, "prepared")
         assert prepared[-1]["event"] == "prepared"
         assert not (built / "played.bin").exists() and not server.received
-        if finish == "speak":
+        if finish.startswith("ask"):
+            send('askwarm 10 {"type":"realtime","model":"gpt-realtime-2.1-mini"}')
+            if finish == "ask_conversation":
+                assert _until(process, "tool")[-1]["message"]["name"] == "start_conversation"
+                time.sleep(0.5)  # A pending tool must outlive the fast one-shot drain window.
+                assert process.poll() is None
+                send('continue {"type":"realtime","model":"gpt-realtime-2.1-mini"}')
+                send("continue")  # A repeated request is idempotent, never kills the listener.
+                send('tool {"type":"conversation.item.create","item":'
+                     '{"type":"function_call_output","call_id":"call_chat","output":"ok"}}')
+            ended = _until(process, "session_end")
+            assert ended[-1]["reason"] == "idle"
+            assert server.received[0]["type"] == "session.update"
+            assert "connected" not in [e["event"] for e in ended]
+            assert ended[-1]["player"]["outcome"] == "complete"
+            if finish == "ask":
+                mic = ended[-1]["mic"]
+                assert mic["sent_ms"] == mic["buffered_ms"]
+            else:
+                assert len([e for e in server.received if e["type"] == "session.update"]) == 2
+        elif finish == "speak":
             send("speak 10 Привет, мир!")
             ended = _until(process, "session_end")
             assert ended[-1]["reason"] == "idle"

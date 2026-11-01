@@ -9,7 +9,9 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -18,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -36,6 +39,29 @@
 #define QUEUE_MAX (8u << 20) /* about 87 s of queued 48 kHz reply */
 #define OPENING_MAX 16384
 #define PLAY_FRAME 9600u /* 100 ms at 48 kHz mono S16 */
+
+#ifndef LIVE_FIRMWARE_PATH
+#define LIVE_FIRMWARE_PATH "/system/vendor/quasar/maind"
+#endif
+
+/* Fixed read-only identity for an already hash-verified file. Never a caller path,
+ * permission token or replacement for its first full hash. Ignore access time only. */
+static int firmware_state(void) {
+    int fd = open(LIVE_FIRMWARE_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return 1;
+    struct stat s;
+    int ok = fstat(fd, &s) == 0;
+    close(fd);
+    if (!ok || !S_ISREG(s.st_mode) || s.st_uid != geteuid() || (s.st_mode & 0022) ||
+        s.st_size <= 0 || s.st_size > (64 << 20)) return 1;
+    printf("%ju:%ju:%ju:%ju:%ju:%ju:%ju:%jd:%jd:%jd:%jd.%09ld:%jd.%09ld\n",
+           (uintmax_t)s.st_dev, (uintmax_t)s.st_ino, (uintmax_t)s.st_mode,
+           (uintmax_t)s.st_nlink, (uintmax_t)s.st_uid, (uintmax_t)s.st_gid,
+           (uintmax_t)s.st_rdev, (intmax_t)s.st_size, (intmax_t)s.st_blocks,
+           (intmax_t)s.st_blksize, (intmax_t)s.st_mtim.tv_sec, (long)s.st_mtim.tv_nsec,
+           (intmax_t)s.st_ctim.tv_sec, (long)s.st_ctim.tv_nsec);
+    return fflush(stdout) == 0 ? 0 : 1;
+}
 
 static const double HALFBAND[8] = {0.628849, -0.189990, 0.093178, -0.048502, 0.023978,
                                    -0.010417, 0.003535, -0.000631};
@@ -200,6 +226,8 @@ static int tcp_connect(void) {
         struct timeval timeout = {10, 0};
         if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
         if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
+        int one = 1;
+        if (fd >= 0) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         if (fd >= 0 && connect(fd, a->ai_addr, a->ai_addrlen)) { close(fd); fd = -1; }
     }
     freeaddrinfo(list);
@@ -440,6 +468,7 @@ static char opening[OPENING_MAX];
 static int16_t samples_out[MESSAGE_MAX / 4 * 3 + 64];  /* 2 per decoded 24 kHz sample */
 static bool standby, speaking;  /* speaking: a "say" session, text in, no microphone */
 static bool preparing;  /* Connected text-only socket; no player or response until "speak". */
+static bool ask_mode, input_closed, answered;
 
 static void stamp(const char *event) {
     char line[128];
@@ -449,6 +478,7 @@ static void stamp(const char *event) {
 }
 
 static bool send_mic(void) {  /* Everything captured since mic_sent, oldest first. */
+    if (input_closed) return true;  /* One question: subsequent room speech stays local. */
     if (fed - mic_sent > RING) mic_sent = fed - RING;
     while (mic_sent + 2 <= fed) {
         unsigned char block[3200];
@@ -492,6 +522,13 @@ static bool send_opening(void) {
     return true;
 }
 
+static bool update_session(const char *config) {
+    if (*config != '{' || strlen(config) > 16000) return false;
+    char update[16100];
+    snprintf(update, sizeof update, "{\"type\":\"session.update\",\"session\":%s}", config);
+    return ws_text(update);
+}
+
 static const char *handle(const char *message) {
     const char *type, *value; size_t type_size, value_size;
     if (!field(message, "type", &type, &type_size)) return "failed";
@@ -505,7 +542,8 @@ static const char *handle(const char *message) {
         if (is(type, type_size, "rate_limits.updated")) return NULL;
         return "unexpected_warm_event";  /* Never play unsolicited audio or forward tools. */
     }
-    if (is(type, type_size, "session.created") && !ready) {
+    if ((is(type, type_size, "session.created") ||
+         (ask_mode && is(type, type_size, "session.updated"))) && !ready) {
         ready = true;
         /* Standby: the owner is already speaking; send it from the wake word on. */
         mic_sent = standby ? (wake_offset > fed ? fed : wake_offset) : fed;
@@ -547,15 +585,25 @@ static const char *handle(const char *message) {
             create_after_done = false;
             if (!ws_text("{\"type\":\"response.create\"}")) return "failed";
             responding = true;
+        } else if (ask_mode && !tools_pending) {
+            answered = first_audio;
+            if (!answered) { /* Wake alone: no answer; keep the bounded command window open. */
+                input_closed = false;
+                if (!send_mic()) return "failed"; /* Preserve a question spoken during silence. */
+            }
         }
     } else if (is(type, type_size, "input_audio_buffer.speech_started")) {
+        if (ask_mode && input_closed) return NULL;
         queue_clear(); upsample_reset();                 /* Barge-in: forget queued reply, */
         if (!player_frame(player_in, 'F', NULL, 0)) return "player_failed";
         playing_until = now_ms();                        /* and drop the board's buffer now. */
         barge_ins++; last_activity = now_ms(); talking = true;
         stamp("speech_started");
     } else if (is(type, type_size, "input_audio_buffer.speech_stopped")) {
+        if (ask_mode && input_closed) return NULL;
+        if (ask_mode) { input_closed = true; responding = true; }
         last_activity = now_ms(); talking = false;
+        stamp("speech_stopped");
     }
     return NULL;
 }
@@ -570,6 +618,7 @@ static void start_player(void) {
 
 static void session_begin(long seconds, bool warm) {
     ready = responding = talking = first_audio = create_after_done = false;
+    ask_mode = input_closed = answered = false;
     barge_ins = tools_pending = 0;
     queue_clear(); upsample_reset(); playing_until = 0;
     mic_bytes = mic_buffered = 0; mic_peak = mic_sent_peak = 0; mic_sumsq = 0;
@@ -638,6 +687,36 @@ static const char *command(char *line) {
         return standby ? "stopped" : "exit";
     }
     if (!strcmp(line, "cancel")) { if (in_session) session_end("stopped"); return NULL; }
+    if (!strcmp(line, "continue") || !strncmp(line, "continue ", 9)) {
+        if (!in_session || tools_pending <= 0) return "invalid_control";
+        if (!ask_mode) return NULL;
+        if (line[8] && !update_session(line + 9)) {
+            session_end("failed"); return NULL;
+        }
+        ask_mode = input_closed = false;
+        mic_sent = fed;  /* Never replay the question or speech received while answering. */
+        return NULL;
+    }
+    if (standby && !strncmp(line, "askwarm ", 8)) {
+        char *config;
+        long seconds = strtol(line + 8, &config, 10);
+        if (*config++ != ' ' || *config != '{' || strlen(config) > 16000 ||
+            seconds < 1 || seconds > 180) return "invalid_control";
+        if (!preparing || !ready || now_ms() >= session_deadline) {
+            if (preparing) session_end("deadline");
+            emit("{\"event\":\"session_end\",\"reason\":\"not_prepared\",\"player\":null}");
+            return NULL;
+        }
+        preparing = speaking = ready = false;
+        ask_mode = true;
+        session_deadline = now_ms() + seconds * 1000;
+        last_activity = now_ms();
+        opening[0] = 0;
+        start_player();
+        if (player < 0) session_end("player_unavailable");
+        else if (!update_session(config)) session_end("failed");
+        return NULL;
+    }
     if (standby && !strncmp(line, "speak ", 6)) {
         char *text;
         long seconds = strtol(line + 6, &text, 10);
@@ -657,10 +736,11 @@ static const char *command(char *line) {
         return NULL;
     }
     bool say = standby && !strncmp(line, "say ", 4);
+    bool ask = standby && !strncmp(line, "ask ", 4);
     bool warm = standby && !strncmp(line, "prepare ", 8);
-    if (standby && (say || warm || !strncmp(line, "session ", 8)) && (!in_session || preparing)) {
+    if (standby && (say || ask || warm || !strncmp(line, "session ", 8)) && (!in_session || preparing)) {
         if (preparing) session_end("replaced");
-        char *model = line + (say ? 4 : 8), *seconds = strchr(model, ' '), *ephemeral, *text = NULL;
+        char *model = line + (say || ask ? 4 : 8), *seconds = strchr(model, ' '), *ephemeral, *text = NULL;
         if (!seconds) return "invalid_control";
         *seconds++ = 0;
         ephemeral = strchr(seconds, ' ');
@@ -685,6 +765,7 @@ static const char *command(char *line) {
         }
         session_open(model, bound, ephemeral);
         speaking = say && in_session;
+        ask_mode = ask && in_session;
         return NULL;
     }
     if (strncmp(line, prefix, sizeof prefix - 1) || !in_session || tools_pending <= 0)
@@ -702,6 +783,7 @@ static const char *command(char *line) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--firmware-state") == 0) return firmware_state();
     const char *capture = NULL, *detector_path = NULL, *model = "gpt-realtime-2.1";
     long max_seconds = 600;
     for (int i = 1; i + 1 < argc; i += 2) {
@@ -744,7 +826,8 @@ int main(int argc, char **argv) {
         if (in_session) {
             if (now >= session_deadline) { session_end("deadline"); continue; }
             if (!preparing && ready && !responding && !talking && !tools_pending && !queued() &&
-                now >= playing_until && now - last_activity >= (speaking ? 200 : idle_ms)) {
+                now >= playing_until && now - last_activity >=
+                    (speaking || (ask_mode && answered) ? 200 : ask_mode ? 3000 : idle_ms)) {
                 session_end("idle"); continue;
             }
             if (!preparing && !pump(player_in)) { session_end("player_failed"); continue; }

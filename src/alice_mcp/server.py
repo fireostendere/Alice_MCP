@@ -14,7 +14,15 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from alice_mcp import __version__, controls, device_runtime, knowledge, owned_jobs, voice_service
+from alice_mcp import (
+    __version__,
+    controls,
+    device_runtime,
+    knowledge,
+    owned_jobs,
+    station_assistant,
+    voice_service,
+)
 from alice_mcp.core import PROBES, Controller, SafetyError, load_inventory
 
 mcp = FastMCP(
@@ -302,6 +310,29 @@ async def run_station_action(
     )
     timing["apply"] = round((time.monotonic() - applying) * 1000)
     return report(result)
+
+
+@mcp.tool(annotations=WRITE, description=(
+    "Answer and speak once on this station: clock locally, fresh facts via search. No commands.\n\n"
+    "On success the text is already spoken; do not call speech.say again. Normal speech "
+    "previews, live permissions and approval still apply. Unknown playback is never retried."
+))
+async def ask_station(station_id: str, question: str,
+                      ctx: Context[Any, Any, Any]) -> dict[str, Any]:
+    """Answer once through the existing guarded speech dispatcher."""
+    try:
+        station = controller.station(station_id)
+        action = controls.bound_action(station, "speech.say")
+        controls._check_permission(controller, station, action)
+        reply = await asyncio.to_thread(station_assistant.answer, question)
+        if action == "speech.say" and len(reply["text"]) > 256:
+            raise SafetyError("Answer exceeds this speech backend limit; no speech dispatched")
+        if controller.station(station_id) != station:
+            raise SafetyError("Station policy changed while answering; no speech dispatched")
+        result = await run_station_action(station_id, "speech.say", {"text": reply["text"]}, ctx)
+        return {**result, **reply, "do_not_retry": True}
+    except SafetyError as error:
+        return {"outcome": "blocked", "error": str(error)}
 
 
 @mcp.tool(annotations=READ)

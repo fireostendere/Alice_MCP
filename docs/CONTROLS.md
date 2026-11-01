@@ -101,6 +101,21 @@ and unapproved aliases are not valid parameters. Aliases match
 | `sound.replace` | `asset`: approved media alias; `slot`: `spotter_start`, `spotter_cancel`, `volume_sound` or `notification_sound` | Backs up and replaces only that fixed system-sound slot. Reload and audible effect remain unverified. |
 | `config.select` | `binding`: approved config alias; `option`: one of that binding's approved option aliases | Changes an existing known JSON leaf to its private operator-approved value. No supplied URL/value, new field, backend installation or automatic reload. |
 | `quasar.volume` | `level`: integer 0–10 (×10 %, within `max_volume`), or `step`: `louder`/`quieter` | Mini 1 with private `quasar_client`. Asks stock Alice locally (fixed text, Quasar's IPC) so Quasar sets its own level, ring, click and app/VQE state; verified by its saved level. Uses the Alice text path (Yandex cloud). |
+| `speech.openai` | `text`: 1–1000 characters of literal text, line breaks allowed | Mini 1 with private `voice.live_client`/`voice.live_player`. Speaks once with OpenAI's `gpt-realtime-2.1-mini` voice: the station streams it directly (see [direct station Realtime](VOICE_ARCHITECTURE.md)), and this PC only mints a one-session secret. Works without the resident agent. No microphone, no retry; only a clean end counts as `applied`. Measured 2026-10-31: 4.6 s of speech with no underrun and a verified player cleanup. |
+
+With the private `voice.say_backend: "openai"` (allowed only together with the live builds),
+every `speech.say` for that station runs as `speech.openai`. This is an explicit owner
+binding for every call, not a fallback after a failure, so agents that pick `speech.say`
+for «скажи …» get the OpenAI voice without the resident agent. On 2026-11-01 «Привет!»
+through `run_station_action(speech.say)` was `applied` with a verified player cleanup.
+
+While the `station_live` listener runs, speech goes through its warm station process (a `say`
+session without the microphone). There is no SSH launch, binary upload, firmware hash or
+resident call. One spare speech secret (600 s) stays on this PC, is used once and is
+re-minted in the background; it reaches the station only when speech starts. Measured
+2026-11-01, call to end of speech for «Привет!» including the phrase: 9.0 s (SSH per call)
+→ 3.5 s (warm standby) → 2.6 s (with the spare secret). When the listener is off,
+`speech.openai` falls back to its own SSH session.
 | `alice.activation` | `enabled`: boolean | Mini 1 with private `quasar_client`. Stops or starts only the stock «Алиса» wake word; Quasar keeps running and a restart/reboot re-enables it. Verified by Quasar's spotter log. |
 | `restore` | `backup_id`: 32 lowercase hexadecimal characters | Rechecks the recorded post-edit state before restoring one exact runtime backup. Optimistic check, not atomic CAS. Not factory recovery or a broad reset. |
 

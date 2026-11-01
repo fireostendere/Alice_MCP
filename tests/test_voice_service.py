@@ -788,3 +788,55 @@ def test_only_one_mcp_process_per_pc_may_own_the_voice_listener(
     first._release_owner()
     second._claim_owner()  # Free again once the owner stops (or its process exits).
     second._release_owner()
+
+
+def test_station_live_listens_with_the_wake_detector_and_no_vosk(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    made: list[Any] = []
+
+    class Standby:
+        def __init__(self, controller: Any, station_id: str, key: str, sink: Any,
+                     stop: threading.Event) -> None:
+            self.sink, self.stop = sink, stop
+            made.append(self)
+
+        def run(self) -> dict[str, Any]:
+            self.sink({"event": "ready", "wake_source": "station_mww"})
+            self.sink({"event": "wake", "audio_ms": 1500, "trusted": False})
+            wait(lambda: bool(calls))
+            self.stop.set()
+            return {"outcome": "complete", "reason": "stopped"}
+
+        def session(self, session: dict[str, Any], text: str, **options: Any) -> dict[str, Any]:
+            calls.append((session["model"], text, options["listen"]))
+            return {"outcome": "complete", "reason": "idle", "player": {"outcome": "complete"}}
+
+    calls: list[Any] = []
+    monkeypatch.setattr(vs.lv, "Standby", Standby)
+    monkeypatch.setattr(vs.station_asr, "listen", lambda *a, **k: pytest.fail("Vosk started"))
+    monkeypatch.setattr(vs.rv, "api_key", lambda: "sk-synthetic")
+    monkeypatch.setattr(vs.vi, "Indicator", lambda *a, **k: SimpleNamespace(
+        wake=lambda *a, **k: None, complete=lambda *a, **k: None, max_s=30, close=lambda: None,
+        listen_ready=lambda: None, status=lambda: {"state": "idle"}))
+    voice_service = service(tmp_path, monkeypatch, station(
+        tmp_path, source="station_live",
+        asr_directory="/bkupgrade/data/opt/alice-local-asr-aaaaaaaaaaaa",
+        live_client="/private/c", live_player="/private/p"))
+    voice_service.start("mini1")
+    wait(lambda: voice_service.state == "stopped")
+    assert calls == [(vs.rv.MODEL, "", True)]  # The model hears the command itself.
+    assert voice_service.last_error is None and len(made) == 1
+
+
+def test_stock_step_after_the_wake_is_not_repeated_by_a_late_model_call(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice = service(tmp_path, monkeypatch, native(tmp_path))
+    voice.station = "mini1"
+    sent = quasar_actions(voice, monkeypatch)
+    voice.realtime = SimpleNamespace(active=True, started_at=time.monotonic() - 10)
+    voice._station_event({'event': 'spotter', 'phrase': 'громче', 'trusted': False})
+    voice._spotted["громче"] -= 6  # Quasar acted 6 s ago, after this wake.
+    louder = {"action": "quasar.volume", "parameters": {"step": "louder"}}
+    assert voice._action(louder) == {"outcome": "applied", "source": "quasar_spotter"}
+    assert not sent

@@ -165,6 +165,109 @@ does not discard its queued tail. Explicit stop, the deadline and unverified nat
 playback still stop the queue without replaying a fragment. A disconnect before a
 complete response can still cut speech short.
 
+### Direct station Realtime
+
+With the private `voice.live_client` and `voice.live_player` host paths configured
+(`station_asr` only; both or neither), spoken replies and conversations no longer pass
+through this PC. The station opens the Realtime session itself, like a browser:
+
+1. The host mints a one-session client secret (`POST /v1/realtime/client_secrets`,
+   60 s to connect). Model, voice, instructions and VAD are bound into it server-side.
+   The API key never leaves the host.
+2. One pinned SSH script receives `native/pcm_player.c --stream` and
+   `native/live_client.c` on stdin, checks both pins (`live_voice.PLAYER_SHA256`,
+   `CLIENT_SHA256`), the ASR directory's pinned `capture` and the firmware hash.
+   Both builds run from a private `/tmp` directory that is removed on exit; nothing
+   is written to flash. A full hash runs once per resident firmware/boot/Quasar stamp,
+   as for `quasar.volume`. The secret follows on stdin and stays in process memory.
+3. The client connects with the station's OpenSSL 1.1 and CA bundle and streams the
+   echo-cancelled `vqe_0` microphone (conversation only). It upsamples 24 kHz output
+   to 48 kHz with a half-band filter, flat to 10 kHz. Audio goes through one continuous
+   ALSA stream, at most 300 ms ahead of real time.
+4. In a conversation, server VAD with `interrupt_response` lets the owner talk over the
+   model. `speech_started` drops queued audio and the ALSA buffer at once (the player's
+   `F` frame). The session ends seven seconds after the last reply and speech. Spoken
+   answers use the same path, without the microphone or VAD.
+
+Realtime sessions accept only `function` and `mcp` tools; a built-in `web_search` is
+rejected. A direct conversation therefore offers one function, `web_search(query)`.
+Before calling it, the model briefly says that it is looking. The station client
+forwards the call as a `tool` event. This PC runs it through the Responses API with
+its built-in web search (`gpt-5.4-mini`, `store=false`, about 2–4 s). The result
+(at most 2,000 characters, citation links removed) goes back as the call's
+`function_call_output`. Results are untrusted data for the model, not instructions,
+and grant no tools. Every call gets an answer, including a failure text. While a call
+is pending the session does not end on silence. A result that arrives during a reply
+is answered after that reply. Spoken command answers have no tools.
+
+The resident serves one call at a time, and the ring's wake check may hold it. The
+read-only stamp query is retried for up to 1.5 s. Otherwise the station hashes the
+firmware fully.
+
+While a direct conversation runs, Vosk on the station only listens for stop phrases.
+«стоп»/«хватит» (Vosk or Quasar's spotter) stop it immediately. The ring stays lit
+through the whole session, and `voice_status().realtime.transport` is `station_direct`.
+Outcomes map to the existing codes. Failed prechecks are `live_blocked`. Cloud
+failures are `api_error`. A session that may have played without a clean end is
+`playback_unverified`, which latches without retry.
+
+Measured on one Mini 1, 2026-10-31, with Realtek clips and a C922 microphone/camera:
+
+- Spoken answer with a verified stamp: first audio 2.5 s after the session starts
+  (SSH and pins 0.7 s, TLS/WebSocket 1.1 s).
+- Conversation: first audio 4.1 s after the wake, measured on the second session.
+- A barge-in cut the reply. The new answer and 15.4 s of reply audio played with
+  one flush, no underrun and a verified player cleanup.
+- The conversation ended by itself on silence. The camera showed the ring lit during
+  both sessions and dark after them.
+- The first session after a listener start pays about 2.2 s for the full firmware hash.
+- «Какая сейчас погода в Москве?» asked in a conversation: the model said it would look,
+  called `web_search` 1.6 s after the question ended, the search took 2.0 s, and it
+  spoke the current Moscow weather. The session then ended by itself.
+
+### Station listener without Vosk (`station_live`)
+
+`voice.source="station_live"` needs `asr_directory` for the pinned `capture` and
+`wake-detector`, plus `live_client`/`live_player`. It runs no Vosk recognizer and needs no
+zram swap, so it also works after a station reboot. One station process (the live client
+in standby) captures `vqe_0` once. It feeds the microWakeWord `komp` detector and keeps
+the last eight seconds in RAM.
+
+1. On «компьютер» the detector's raw line reaches this PC. It is validated as before and
+   is never command authority. The ring lights, and this PC mints a one-session secret
+   with model, prompt, VAD and tools and sends it to the standby.
+2. The standby connects and sends the audio from the detector's wake time onward. The
+   command spoken during the connection is not lost. Nothing leaves the station before a
+   wake is answered this way.
+3. The model hears the command itself and answers by voice, with `web_search` and
+   `set_volume` (`quasar.volume` through the usual host guard). The session continues as
+   a conversation until seven seconds of silence, then the standby waits for the next wake.
+
+On 2026-10-31 the owner's voice in `vqe_0` peaked near 1,000 (about −30 dBFS), with an
+RMS near 55. That is too quiet for the server VAD: two real sessions ended on silence
+although the wake word had been detected. Audio sent to the model therefore passes an
+AGC: fast attack and slow release toward an 8,000 speech peak. The gain is at most 16×,
+and at most 4× while the reply plays, so its echo residue cannot interrupt it. The wake
+detector still gets the raw level. A synthetic phrase scaled to that level then
+triggered the VAD and an answer through the real API.
+Each session also records sanitized numbers in a `turn` event: buffered and sent
+milliseconds, raw and sent peaks, and the mean square. These contain no audio.
+
+Only one reader of Quasar's 9850 stream gets real audio. A second concurrent `capture`
+read all zeros for 60 s while the standby ran, so a station process must own the
+microphone alone.
+
+Quasar's stock spotter still handles «громче»/«тише»/«стоп»/«хватит» locally. A step
+Quasar took after this wake is not repeated by a later `set_volume` call. «стоп»/«хватит»
+cancel the session. A listener runs at most 59 minutes and then restarts, which keeps the
+detector's one-hour audio bound. Dictation and the OpenCode answer agent are not used in
+this mode.
+
+The personalized `komp` model did not react to generated (Piper) phrases on 2026-10-31,
+either through the standby or a direct `capture | wake-detector` run. Live checks of this
+mode therefore need the owner's voice. The direct Realtime half was validated separately
+(above).
+
 ## Setup
 
 Install `.[realtime]`. Copy the root `.env_example` to `.env` and set
@@ -199,8 +302,8 @@ until this listener stops; its speech input goes through stdin, not shell argume
 
 ## Current limits and evidence
 
-This implementation requires the host PC. It does not install an ARM cloud
-client or compose the separate resident-wake PR into an on-station runtime.
+Without the direct station keys, this implementation relays audio through the
+host PC (with them, see "Direct station Realtime" above).
 Playback sends available PCM immediately and coalesces already queued half-second
 chunks into guarded WAV requests of up to four seconds. Gaps between requests
 can remain. Realtime's 24-kHz output is interpolated to 48 kHz on the host:

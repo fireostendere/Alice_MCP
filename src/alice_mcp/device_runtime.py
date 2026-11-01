@@ -28,7 +28,8 @@ ACTIONS = frozenset({"led.effect", "led.capture", "led.replay", "led.pulse", "le
                      "led.show",
                      "speech.listen", "speech.say",
                      "audio.volume", "audio.play", "media.upload", "sound.replace",
-                     "config.select", "restore", "quasar.volume", "alice.activation"})
+                     "config.select", "restore", "quasar.volume", "alice.activation",
+                     "speech.openai"})
 PREAUTHORIZED_ACTIONS = frozenset({"led.effect", "audio.volume", "audio.play"})
 ALL = "all"
 ANIMATION_MODES = frozenset({"blink", "rainbow", "rainbow_swirl"})
@@ -209,17 +210,28 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
                 voice = {"mww_model": "ft", "mode": "either", **voice}
             pc_fields = {"client", "mww", "libvosk", "vosk_zip", "mww_model", "mode"}
             fields = {"source", "autostart"} | (pc_fields if source == "PC" else set())
-            if source == "station_asr":
+            if source in ("station_asr", "station_live"):
                 fields.add("asr_directory")
                 _require(_match(re.compile(r"/bkupgrade/data/opt/alice-local-asr-[a-f0-9]{12}"),
                                 voice.get("asr_directory")))
-            _require(model == "station-mini" and source in ("PC", "station", "station_asr")
-                     and _keys(voice, fields, pc_fields | {"indicator", "conversation_prompt"})
+                if source == "station_live" or "live_client" in voice or "live_player" in voice:
+                    # Host paths of the pinned direct-Realtime builds (live_voice.*_SHA256).
+                    fields |= {"live_client", "live_player"}
+                    _require(_safe_path(voice.get("live_client"))
+                             and _safe_path(voice.get("live_player")))
+            # station_live: wake detector on the station, then direct Realtime (no Vosk).
+            _require(model == "station-mini"
+                     and source in ("PC", "station", "station_asr", "station_live")
+                     and _keys(voice, fields,
+                               pc_fields | {"indicator", "conversation_prompt", "say_backend"})
                      and type(voice["autostart"]) is bool)
             _require(all(_safe_path(voice[k]) for k in ("client", "mww", "libvosk", "vosk_zip")
                          if k in voice)
                      and voice.get("mww_model", "ft") in ("ft", "old")
                      and voice.get("mode", "either") in ("vosk", "mww", "either", "both"))
+            # Owner choice: speech.say speaks through speech.openai (needs the live builds).
+            _require(voice.get("say_backend", "openai") == "openai"
+                     and ("say_backend" not in voice or "live_client" in voice))
             prompt = voice.get("conversation_prompt", "ok")
             # Private owner text appended to the Realtime conversation instructions only.
             _require(isinstance(prompt, str) and 1 <= len(prompt) <= 1000 and not any(
@@ -431,6 +443,7 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
             "media.upload": {"asset", "content_base64"}, "sound.replace": {"asset", "slot"},
             "config.select": {"binding", "option"}, "restore": {"backup_id"},
             "alice.activation": {"enabled"},
+            "speech.openai": {"text"},
         }
         if action == "quasar.volume":
             # Quasar's own level 0-10 (×10 %), or one stock step; never a supplied text.
@@ -451,6 +464,14 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
         elif action == "speech.listen":
             _require(model == "station-mini" and "speech_client" in policy
                      and _integer(params["duration_seconds"], 5, 60))
+        elif action == "speech.openai":
+            # OpenAI's Realtime voice streamed by the station itself (live_voice); literal text.
+            text, voice = params["text"], policy.get("voice")
+            _require(model == "station-mini" and type(voice) is dict
+                     and "live_client" in voice and "live_player" in voice
+                     and isinstance(text, str) and 1 <= len(text) <= 1000 and bool(text.strip())
+                     and not any(ord(c) < 32 and c != "\n" or 127 <= ord(c) <= 159
+                                 for c in text))
         elif action == "alice.activation":
             # Only the stock wake word; Quasar itself keeps running.
             _require(model == "station-mini" and "quasar_client" in policy

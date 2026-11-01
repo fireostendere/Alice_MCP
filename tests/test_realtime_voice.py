@@ -778,3 +778,23 @@ def test_private_conversation_prompt_reaches_only_the_realtime_conversation(
         pass
     session = next(e["session"] for e in socket.sent if e["type"] == "session.update")
     assert ("Начни первым с длинной истории." in session["instructions"]) is continuous
+
+
+def test_windows_acl_check_is_reused_until_the_dotenv_changes(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    # PowerShell's ACL check costs about a second; every station action used to pay it 3x.
+    path = tmp_path / ".env"
+    path.write_text("REAL_TIME_API_KEY=sk-synthetic\n")
+    path.chmod(0o644)  # Looks open, as on DrvFS without metadata.
+    monkeypatch.delenv("REAL_TIME_API_KEY", raising=False)
+    monkeypatch.setenv("ALICE_MCP_REALTIME_ENV", str(path))
+    checks: list[Path] = []
+    monkeypatch.setattr(rv, "_windows_private", lambda p: checks.append(p) or True)
+    rv._private_checked.clear()
+    assert rv.api_key() == rv.api_key() == "sk-synthetic"
+    assert len(checks) == 1
+    path.write_text("REAL_TIME_API_KEY=sk-other\n")
+    assert rv.api_key() == "sk-other" and len(checks) == 2  # Changed file: checked again.
+    monkeypatch.setattr(rv.time, "monotonic", lambda: 10 ** 9)
+    rv.api_key()
+    assert len(checks) == 3  # And never trusted for more than five minutes.

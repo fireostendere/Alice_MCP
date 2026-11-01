@@ -1,4 +1,6 @@
 /* Bounded playback only; stdin is canonical mono S16 WAV, never a path or URL.
+ * --stream: stdin is framed 48 kHz mono S16 for one live conversation: 'A'+len+PCM
+ * (at most one second), 'F' drops queued audio now (barge-in), 'E' or EOF drains.
  * ALSA public ABI: alsa-project/alsa-lib v1.2.13 include/pcm.h.
  * Mini 1 candidate: kernel playback 0 (TDM-B), still needs audible qualification.
  * Generic /etc dmixer device 2 is capture-only on this board; do not copy it.
@@ -18,6 +20,10 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifndef PCM_STREAM_WATCHDOG
+#define PCM_STREAM_WATCHDOG 30 /* seconds a stuck ALSA call may block */
+#endif
 
 #ifndef PCM_ALSA_LIBRARY
 #define PCM_ALSA_LIBRARY "/system/vendor/quasar/libs/libasound.so.2"
@@ -42,6 +48,16 @@ static uint32_t le32(const unsigned char *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 static unsigned le16(const unsigned char *p) { return p[0] | (unsigned)p[1] << 8; }
+static size_t read_full(unsigned char *data, size_t size) {
+    size_t got = 0;
+    while (got < size && !interrupted) {
+        ssize_t count = read(STDIN_FILENO, data + got, size - got);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        got += (size_t)count;
+    }
+    return got;
+}
 static int64_t now_ms(void) {
     struct timespec t;
     if (clock_gettime(CLOCK_MONOTONIC, &t)) return -1;
@@ -81,6 +97,9 @@ int main(int argc, char **argv) {
     /* Keep the typed channel separate from vendor constructor/destructor stdout. */
     bool attempted = false, complete = false, clean = true;
     bool diagnostic = argc == 2 && strcmp(argv[1], "--check") == 0;
+    bool streaming = argc == 2 && strcmp(argv[1], "--stream") == 0;
+    unsigned long flushes = 0, underruns = 0;
+    int (*prepare)(snd_pcm_t *) = NULL;
     bool configuration_parsed = false;
     bool hardware_verified = false;
     int64_t start = -1, elapsed = -1;
@@ -107,11 +126,12 @@ int main(int argc, char **argv) {
     struct sigaction action = {0};
     action.sa_handler = stop;
     sigemptyset(&action.sa_mask);
-    if (argc != 2 || (!diagnostic && strcmp(argv[1], "--play")) ||
+    if (argc != 2 || (!diagnostic && !streaming && strcmp(argv[1], "--play")) ||
         sigaction(SIGALRM, &action, NULL) ||
         sigaction(SIGTERM, &action, NULL) || sigaction(SIGINT, &action, NULL)) goto done;
-    alarm(diagnostic ? 5 : 25);
-    if (diagnostic) goto load_library;
+    alarm(diagnostic ? 5 : streaming ? PCM_STREAM_WATCHDOG : 25);  /* Streaming: per frame. */
+    if (streaming) rate = 48000;
+    if (diagnostic || streaming) goto load_library;
     wav = malloc(WAV_MAX + 1);
     if (!wav) goto done;
     while (!interrupted && size <= WAV_MAX) {
@@ -148,6 +168,7 @@ load_library:
     LOAD(writei, "snd_pcm_writei"); LOAD(pcm_wait, "snd_pcm_wait");
     LOAD(pcm_nonblock, "snd_pcm_nonblock");
     LOAD(drain, "snd_pcm_drain"); LOAD(drop, "snd_pcm_drop"); LOAD(pcm_close, "snd_pcm_close");
+    if (streaming) LOAD(prepare, "snd_pcm_prepare");
     stage = "configuration";
     alsa_status = config_top(&config);
     if (alsa_status < 0) goto done;
@@ -168,6 +189,54 @@ load_library:
     stage = "clock";
     start = now_ms();
     if (start < 0) goto done;
+    if (streaming) {
+        static unsigned char block[96000];  /* One second per frame. */
+        unsigned char header[5];
+        stage = "blocking";
+        if ((alsa_status = pcm_nonblock(pcm, 0)) < 0) goto done;
+        for (;;) {
+            stage = "read";
+            alarm(0);  /* Waiting for the host's next reply is a turn, not a hang: EOF ends it. */
+            size_t got = read_full(header, sizeof(header));
+            alarm(PCM_STREAM_WATCHDOG);  /* The frame body and ALSA calls stay bounded. */
+            if (got == 0 && !interrupted) break;  /* The host closed: drain what it sent. */
+            if (got != sizeof(header) || interrupted) goto done;
+            uint32_t length = le32(header + 1);
+            if (header[0] == 'E' && length == 0) break;
+            if (header[0] == 'F' && length == 0) {
+                stage = "flush";
+                if ((alsa_status = drop(pcm)) < 0 || (alsa_status = prepare(pcm)) < 0) goto done;
+                flushes++;
+                continue;
+            }
+            if (header[0] != 'A' || length == 0 || length % 2 || length > sizeof(block) ||
+                read_full(block, length) != length) goto done;
+            unsigned long count = length / 2, offset = 0;
+            for (unsigned long i = 0; i < count; ++i) {
+                int sample = (int)le16(block + i * 2);
+                if (sample >= 32768) sample -= 65536;
+                if (sample < -8191 || sample > 8191) goto done;
+            }
+            if (written + count > 48000ul * 900) goto done;  /* Fifteen minutes at most. */
+            while (offset < count) {
+                stage = "write";
+                attempted = true;
+                long result = writei(pcm, block + offset * 2, count - offset);
+                alsa_status = (int)result;
+                if (result == -EPIPE) {  /* Quiet gap between replies: start again. */
+                    if ((alsa_status = prepare(pcm)) < 0) goto done;
+                    underruns++;
+                } else if (result == -EAGAIN || result == 0) {
+                    if ((alsa_status = pcm_wait(pcm, 100)) < 0) goto done;
+                } else if (result < 0 || (unsigned long)result > count - offset) goto done;
+                else { offset += (unsigned long)result; written += (unsigned long)result; }
+            }
+        }
+        stage = "drain";
+        if ((alsa_status = drain(pcm)) < 0 || interrupted) goto done;
+        complete = true;
+        goto done;
+    }
     while (written < frames && !interrupted) {
         stage = "clock";
         int64_t now = now_ms();
@@ -194,7 +263,10 @@ load_library:
 done:
     if (start >= 0) {
         int64_t end = now_ms();
-        if (end < start || end - start > 25000) { complete = false; stage = "clock"; }
+        if (end < start || (!streaming && end - start > 25000)) {
+            complete = false;
+            stage = "clock";
+        }
         else elapsed = end - start;
     }
     if (pcm) {
@@ -216,6 +288,17 @@ done:
                complete ? "ready" : clean ? "blocked" : "unknown",
                complete ? "ready" : clean ? stage : "cleanup", library ? "true" : "false",
                configuration_parsed ? "true" : "false", alsa_status);
+        close(output);
+        return emitted < 0 ? 2 : complete ? 0 : 1;
+    }
+    if (streaming) {
+        int emitted = dprintf(output, "{\"outcome\":\"%s\",\"frames_written\":%lu,"
+               "\"flushes\":%lu,\"underruns_recovered\":%lu,\"stage\":\"%s\","
+               "\"alsa_return_code\":%d,\"hardware_parameters_verified\":%s,"
+               "\"cleanup_verified\":%s}\n",
+               complete ? "complete" : attempted || !clean ? "unknown" : "blocked", written,
+               flushes, underruns, complete ? "complete" : stage, alsa_status,
+               hardware_verified ? "true" : "false", clean ? "true" : "false");
         close(output);
         return emitted < 0 ? 2 : complete ? 0 : 1;
     }

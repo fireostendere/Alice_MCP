@@ -10,6 +10,7 @@ works on a command, voice_indicator plays the ring (private voice.indicator, def
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import stat
@@ -23,6 +24,7 @@ from typing import Any
 
 from alice_mcp import controls, native_transport, quasar_client, station_asr, station_wake
 from alice_mcp import io_channel_pilot as iop
+from alice_mcp import live_voice as lv
 from alice_mcp import opencode_voice as ov
 from alice_mcp import realtime_voice as rv
 from alice_mcp import voice_indicator as vi
@@ -108,6 +110,7 @@ class VoiceService:
         self._spotter_seen = threading.Condition()
         self._spotter_running = False
         self.realtime: rv.RealtimeTurn | None = None
+        self._standby: Any = None  # station_live: the running lv.Standby
         self._local_pending_until = 0.0
         self._local_keyword_seen = False
         self._station_fast_wake = False
@@ -142,7 +145,10 @@ class VoiceService:
         iop._permitted(self.controller, station)
         if voice.get("source") == "station" and not station.native_mcp:
             raise SafetyError("Station wake source requires the resident TLS transport")
-        key = rv.api_key() if voice.get("source", "PC") in {"PC", "station_asr"} else None
+        key = (rv.api_key() if voice.get("source", "PC") in {"PC", "station_asr", "station_live"}
+               else None)
+        if voice.get("source") == "station_live" and not key:
+            raise SafetyError("Direct station voice requires REAL_TIME_API_KEY")
         with self.lock:
             if self.state != "stopped" or self.thread is not None and self.thread.is_alive():
                 raise SafetyError("Voice listener already running; stop it first")
@@ -159,7 +165,8 @@ class VoiceService:
         self.station, self.live, self.last_error, self.result = station.id, {}, None, None
         self.source = voice.get("source", "PC")
         self.indicator = vi.Indicator(self.controller, station.id,
-                                      defer_preparation=self.source == "station_asr")
+                                      defer_preparation=self.source in {
+                                          "station_asr", "station_live"})
         executable = os.environ.get("ALICE_MCP_OPENCODE")
         agent = ov.Agent(executable, station.id, Path.cwd()) if executable and key else None
         self.realtime = rv.RealtimeTurn(
@@ -171,6 +178,13 @@ class VoiceService:
             answer=agent.answer if agent else None,
             local_transcripts=self.source == "station_asr",
             conversation_prompt=voice.get("conversation_prompt", ""),
+            direct=(lambda *args, **kwargs: self._standby.session(*args, **kwargs))
+            if self.source == "station_live" else (
+                functools.partial(lv.run, self.controller, station.id, key)
+                if "live_client" in voice else None),
+            listen_on_wake=self.source == "station_live",
+            done=lambda summary: self._record({"kind": "turn", "station": station.id,
+                                               **summary}),
             emit=lambda event: self._record({**event, "kind": "dictation",
                                               "station": station.id, "trusted": False},
                                              persist=False)) if key else None
@@ -192,7 +206,8 @@ class VoiceService:
                                                  interrupt_only=lambda: bool(self.realtime
                                                      and self.realtime.active
                                                      and self.realtime.state in {"reasoning",
-                                                         "responding", "synthesizing", "speaking"}))
+                                                         "responding", "synthesizing", "speaking",
+                                                         "live"}))
                     self.result = {k: summary[k] for k in RESULT_KEYS if k in summary}
                     if summary["outcome"] != "complete":
                         self.last_error = "Station ASR stopped: " + str(
@@ -201,6 +216,18 @@ class VoiceService:
                 return
             if voice.get("source") == "station":
                 self._run_station(station_id, stop)
+                return
+            if voice.get("source") == "station_live":
+                # Wake detector on the station; each wake opens a direct Realtime session.
+                while not stop.is_set():
+                    assert self.realtime is not None  # start() requires the key.
+                    self._standby = lv.Standby(self.controller, station_id, self.realtime._key,
+                                               self._station_event, stop)
+                    summary = self._standby.run()
+                    self.result = summary
+                    if summary["outcome"] != "complete":
+                        self.last_error = "Station listener stopped: " + summary["reason"]
+                        return
                 return
             client = read_pinned(Path(voice["client"]), iop.HELPER_SHA256, 64 * 1024)
             with self.engines(Path(voice["libvosk"]), Path(voice["vosk_zip"]),
@@ -392,8 +419,10 @@ class VoiceService:
                 raise SafetyError("Standing station authorization required")
             action, params = arguments["action"], arguments["parameters"]
             step = params.get("step") if action in {"audio.volume", "quasar.volume"} else None
+            turn = self.realtime
+            since = turn.started_at if turn is not None and turn.active else None
             if step in ("louder", "quieter") and self._stock_stepped(
-                    "громче" if step == "louder" else "тише"):
+                    "громче" if step == "louder" else "тише", since):
                 return {"outcome": "applied", "source": "quasar_spotter"}
             if station.native_mcp and action not in controls.QUASAR_ACTIONS:
                 result = native_transport.run_action(self.controller, station, action, params)
@@ -405,16 +434,18 @@ class VoiceService:
             return {"outcome": "blocked", "error": "Station policy or runtime blocked action"}
         return result
 
-    def _stock_stepped(self, phrase: str) -> bool:
+    def _stock_stepped(self, phrase: str, since: float | None = None) -> bool:
         """Quasar's own spotter already stepped its volume for this phrase (consumed once).
 
-        Its event normally precedes our final transcript; allow a short grace for lag.
+        Its event normally precedes our final transcript; allow a short grace for lag. A
+        model's call may come seconds later: any stock step since this wake counts.
         """
         deadline = time.monotonic() + (0.3 if self._spotter_running else 0)
         with self._spotter_seen:
             while True:
                 seen = self._spotted.pop(phrase, None)
-                if seen is not None and time.monotonic() - seen < 4:
+                if seen is not None and (time.monotonic() - seen < 4
+                                         or since is not None and seen >= since):
                     return True
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

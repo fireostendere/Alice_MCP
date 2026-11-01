@@ -145,6 +145,7 @@ def source_allowed(path: str) -> bool:
     if parts[:2] == ["src", "alice_mcp"] and len(parts) > 2:
         if path in {"src/alice_mcp/native/asr_once.c", "src/alice_mcp/native/vqe_audit.c",
                     "src/alice_mcp/native/pcm_player.c",
+                    "src/alice_mcp/native/live_client.c",
                     "src/alice_mcp/native/io_channel_levels.c",
                     "src/alice_mcp/native/station_asr.c",
                     "src/alice_mcp/native/mww/mww_detect.cc"}:

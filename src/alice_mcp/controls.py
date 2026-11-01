@@ -36,6 +36,9 @@ RESULT_KEYS = {
 OUTCOMES = {"ready", "applied", "blocked", "conflict", "unknown", "capturing", "complete"}
 # The installed Mini 1 resident has no LED adapter: these use explicit pinned SSH on request.
 SSH_LED_ACTIONS = frozenset({"led.capture", "led.animate", "led.pulse", "led.show"})
+# Quasar's own level and wake word through its local IPC (quasar_client.py), pinned SSH only.
+QUASAR_ACTIONS = frozenset({"quasar.volume", "alice.activation"})
+LIVE_ACTIONS = frozenset({"speech.openai"})  # The station streams OpenAI itself (live_voice).
 
 
 def parse_response(text: str) -> dict[str, Any]:
@@ -101,6 +104,14 @@ def parse_response(text: str) -> dict[str, Any]:
 
 
 def invoke(controller: Controller, station: Station, request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("action") in QUASAR_ACTIONS:
+        from alice_mcp import quasar_client
+
+        return quasar_client.invoke(controller, station, request)
+    if request.get("action") in LIVE_ACTIONS:
+        from alice_mcp import live_voice
+
+        return live_voice.invoke(controller, station, request)
     if request.get("action") in {"speech.listen", "speech.say"}:
         from alice_mcp import speech_capture
 
@@ -184,13 +195,25 @@ def capabilities(controller: Controller, station_id: str) -> dict[str, Any]:
     }
 
 
+def bound_action(station: Station, action: str) -> str:
+    """Private `voice.say_backend="openai"`: speech.say always speaks via speech.openai.
+
+    An explicit owner binding for every call, never a fallback after a failure.
+    """
+    voice = getattr(station, "controls", {}).get("voice")
+    if action == "speech.say" and type(voice) is dict and voice.get("say_backend") == "openai":
+        return "speech.openai"
+    return action
+
+
 def _station(controller: Controller, station_id: str, action: str, ssh: bool) -> Station:
     """With `ssh`, a native Mini 1 is reached over its pinned SSH entry: never a fallback."""
     station = controller.station(station_id)
     if not ssh:
         return station
-    if station.model != "station-mini" or action not in SSH_LED_ACTIONS:
-        raise SafetyError("Explicit SSH is only for Mini 1 LED capture, pulses, shows and presets")
+    if (station.model != "station-mini"
+            or action not in SSH_LED_ACTIONS | QUASAR_ACTIONS | LIVE_ACTIONS):
+        raise SafetyError("Explicit SSH is only for Mini 1 LED, Quasar IPC and live voice")
     if not station.native_mcp:
         return station
     from alice_mcp.vqe_experiment import _ssh
@@ -209,6 +232,23 @@ def _check_permission(controller: Controller, station: Station, action: str) -> 
 
 def describe(request: dict[str, Any]) -> str:
     action, params = request["action"], request["params"]
+    if action == "quasar.volume":
+        what = (f"set Quasar's own volume level to {params['level']} of 10" if "level" in params
+                else f"one stock step {params['step']}")
+        return (f"Ask stock Alice locally to {what} through Quasar's IPC text path (the pinned "
+                "client is sent over SSH and removed). Quasar sets the level, ring, click and "
+                "app state itself; verified by its saved level. No other text, no retry.")
+    if action == "speech.openai":
+        return ("Speak this literal text once with OpenAI's Realtime voice ("
+                "gpt-realtime-2.1-mini), streamed by the station itself over pinned SSH: "
+                + json.dumps(params["text"], ensure_ascii=False) + ". This PC mints a "
+                "one-session secret; the API key stays here. The pinned live client and player "
+                "run from station RAM and are removed. No microphone, no volume change, no retry; "
+                "the resident agent is not needed. Permission includes sound in the room.")
+    if action == "alice.activation":
+        return (("Re-enable" if params["enabled"] else "Disable") + " the stock «Алиса» wake "
+                "word through Quasar's spotter capability. Quasar keeps running; a Quasar "
+                "restart or reboot re-enables it. Verified by its spotter log. No retry.")
     if action == "speech.say":
         from alice_mcp.speech_capture import TTS_CLIENT_SHA256
 
@@ -314,7 +354,9 @@ def _digest(station: Station, request: dict[str, Any], state: str) -> str:
 
 def preview(controller: Controller, station_id: str, action: str,
             parameters: dict[str, Any], *, ssh: bool = False) -> dict[str, Any]:
-    station = _station(controller, station_id, action, ssh)
+    action = bound_action(controller.station(station_id), action)
+    station = _station(controller, station_id, action,
+                       ssh or action in QUASAR_ACTIONS | LIVE_ACTIONS)
     if station.native_mcp:
         raise SafetyError("Use run_station_action for native MCP atomic preview/application")
     _check_permission(controller, station, action)

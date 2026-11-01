@@ -370,7 +370,10 @@ Read state and preview a policy-bound action; no device files changed during pre
           "media.upload",
           "sound.replace",
           "config.select",
-          "restore"
+          "restore",
+          "quasar.volume",
+          "alice.activation",
+          "speech.openai"
         ],
         "title": "Action",
         "type": "string"
@@ -460,7 +463,10 @@ Do one device action now: fresh one-use preview, then apply; no form if preautho
           "media.upload",
           "sound.replace",
           "config.select",
-          "restore"
+          "restore",
+          "quasar.volume",
+          "alice.activation",
+          "speech.openai"
         ],
         "title": "Action",
         "type": "string"

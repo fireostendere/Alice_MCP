@@ -28,13 +28,29 @@
 #if defined(ASR_ONCE_TTS) && defined(ASR_ONCE_MUTE)
 #error "Speech and mute metadata are separate production binaries"
 #endif
+#if defined(ASR_ONCE_SPOTTER) && (defined(ASR_ONCE_TTS) || defined(ASR_ONCE_MUTE))
+#error "Stock command-spotter events are a separate production binary"
+#endif
 #ifdef ASR_ONCE_TEST
 #define SETUP_SECONDS 5u
 #else
 #define SETUP_SECONDS 180u
 #endif
 
-#ifdef ASR_ONCE_MUTE
+#if defined(ASR_ONCE_SPOTTER)
+/* Read-only AddListener(CommandSpotterCapability); never START/STOP/DISABLE, which would
+ * also affect the stock wake word. Verified live on Mini 1 (aliced 9875), 2026-10-31. */
+static const unsigned char SUBSCRIBE[] =
+    "\x3e\x00\x00\x00\xe2\x0f\x37\x3a\x18" "CommandSpotterCapability"
+    "\xa2\x01\x1a\x0a\x18" "CommandSpotterCapability" "\xe8\x0f\xd2\x01";
+/* The stock ru-RU-quasar-commands model phrases; anything else is never printed. */
+static const char *const PHRASES[] = {
+    "дальше", "назад", "выше", "ниже", "вправо", "влево", "вверх", "вниз", "домой",
+    "продолжи", "играй", "стоп", "хватит", "пауза", "следующий", "громче", "тише",
+    "включи свет", "включи телевизор", "выключи свет", "выключи телевизор",
+    "включи блютуз", "выключи блютуз", "лайк", "дизлайк",
+};
+#elif defined(ASR_ONCE_MUTE)
 /* Read-only AddListener(DeviceStateCapability); never a microphone setting. */
 static const unsigned char SUBSCRIBE[] =
     "\x38\x00\x00\x00\xe2\x0f\x31\x3a\x15" "DeviceStateCapability"
@@ -56,7 +72,9 @@ typedef struct {
 
 static const char *failure = "protocol_error";
 static volatile sig_atomic_t interrupted = 0;
-#if !defined(ASR_ONCE_TTS) && !defined(ASR_ONCE_MUTE)
+#if defined(ASR_ONCE_SPOTTER)
+static unsigned int spotted_count = 0;
+#elif !defined(ASR_ONCE_TTS) && !defined(ASR_ONCE_MUTE)
 static unsigned int frames_received = 0, direct_states = 0, listener_states = 0;
 static int64_t started_at = 0;
 #elif defined(ASR_ONCE_TTS)
@@ -85,6 +103,9 @@ static int blocked(const char *code) {
     (void)fputs(",\"tts_started\":", stdout);
     (void)fputs(tts_started ? "true" : "false", stdout);
     (void)fputs(",\"tts_completed\":false}\n", stdout);
+#elif defined(ASR_ONCE_SPOTTER)
+    (void)printf("{\"event\":\"end\",\"outcome\":\"unknown\",\"error_code\":\"%s\","
+                 "\"spotted\":%u}\n", code, spotted_count);
 #elif defined(ASR_ONCE_MUTE)
     (void)printf("{\"outcome\":\"unknown\",\"mute_state\":\"unknown\","
                  "\"audio_captured\":false,\"error_code\":\"%s\",\"diagnostics\":{"
@@ -141,7 +162,7 @@ static bool get(Slice message, unsigned int wanted, unsigned int expected, Field
     return true;
 }
 
-#ifndef ASR_ONCE_MUTE
+#if !defined(ASR_ONCE_MUTE) && !defined(ASR_ONCE_SPOTTER)
 static bool valid_id(Slice id) {
     if (id.size > ID_MAX) return false;
     for (size_t i = 0; i < id.size; ++i)
@@ -178,7 +199,7 @@ static bool valid_text(Slice text) {
 }
 #endif
 
-#if !defined(ASR_ONCE_TTS) && !defined(ASR_ONCE_MUTE)
+#if !defined(ASR_ONCE_TTS) && !defined(ASR_ONCE_MUTE) && !defined(ASR_ONCE_SPOTTER)
 static bool emit_text(Slice text) {
     if (fputs("{\"outcome\":\"complete\",\"capture_ready\":false,\"text\":\"", stdout) < 0)
         return false;
@@ -302,7 +323,7 @@ static bool read_exact(int fd, unsigned char *data, size_t size, int64_t deadlin
     return true;
 }
 
-static int connect_ipc(int64_t deadline) {
+static int open_ipc(int64_t deadline) {
     failure = "ipc_unavailable";
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -317,18 +338,32 @@ static int connect_ipc(int64_t deadline) {
         socklen_t length = sizeof(error);
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) != 0 || error != 0) goto bad;
     }
-    size_t offset = 0;
-    while (offset < sizeof(SUBSCRIBE) - 1) {
-        if (!wait_fd(fd, POLLOUT, deadline)) goto bad;
-        ssize_t n = write(fd, SUBSCRIBE + offset, sizeof(SUBSCRIBE) - 1 - offset);
-        if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
-        if (n <= 0) goto bad;
-        offset += (size_t)n;
-    }
     return fd;
 bad:
     (void)close(fd);
     return -1;
+}
+
+static bool send_all(int fd, const unsigned char *data, size_t size, int64_t deadline) {
+    size_t offset = 0;
+    while (offset < size) {
+        if (!wait_fd(fd, POLLOUT, deadline)) return false;
+        ssize_t n = write(fd, data + offset, size - offset);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        if (n <= 0) { failure = "ipc_io_error"; return false; }
+        offset += (size_t)n;
+    }
+    return true;
+}
+
+static int connect_ipc(int64_t deadline) {
+    int fd = open_ipc(deadline);
+    if (fd < 0) return -1;
+    if (!send_all(fd, SUBSCRIBE, sizeof(SUBSCRIBE) - 1, deadline)) {
+        (void)close(fd);
+        return -1;
+    }
+    return fd;
 }
 
 #if defined(ASR_ONCE_MUTE)
@@ -431,6 +466,246 @@ int main(int argc, char **argv) {
         return 0;
     }
     return blocked(failure);
+}
+#elif defined(ASR_ONCE_SPOTTER)
+/* Returns 0 for unrelated frames, -1 for malformed ones, else 1 + allowlist index. */
+static int spotter_event(Slice message) {
+    Field kind, payload, plain_remote, object, listener, method, phrase;
+    if (!get(message, 253, 0, &kind) || !get(message, 252, 2, &payload) ||
+        !get(message, 210, 2, &plain_remote)) return -1;
+    if (!kind.present && !payload.present) {
+        if (!plain_remote.present) return 0;
+        kind.number = 210; payload = plain_remote;
+    } else if (!kind.present || !payload.present || plain_remote.present) return -1;
+    if (kind.number != 210) return 0;
+    if (!get(payload.bytes, 7, 2, &object) || !get(payload.bytes, 15, 2, &listener)) return -1;
+    if (!object.present || object.bytes.size != 24 ||
+        memcmp(object.bytes.data, "CommandSpotterCapability", 24) != 0 || !listener.present)
+        return 0;
+    if (!get(listener.bytes, 1, 0, &method) || !get(listener.bytes, 3, 2, &phrase)) return -1;
+    if (!method.present || method.number != 2 || !phrase.present) return 0;  /* ON_PHRASE_SPOTTED */
+    for (size_t i = 0; i < sizeof(PHRASES) / sizeof(PHRASES[0]); ++i) {
+        size_t size = strlen(PHRASES[i]);
+        if (phrase.bytes.size == size && memcmp(phrase.bytes.data, PHRASES[i], size) == 0)
+            return (int)i + 1;
+    }
+    return 0;
+}
+
+/* Fixed stock requests only, sent like Quasar's own clients (full QuasarMessage{210}).
+ * Volume goes through Alice's normal text path, so Quasar itself sets its level, ring and
+ * state; activation toggles only the stock wake word, never Quasar. No caller text. */
+typedef struct { unsigned char data[1024]; size_t size; } Out;
+static const char *const LEVEL_WORDS[11] = {
+    "ноль", "один", "два", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять", "десять",
+};
+
+static bool out_var(Out *o, uint64_t value) {
+    do {
+        if (o->size >= sizeof(o->data)) return false;
+        unsigned char byte = (unsigned char)(value & 127u);
+        value >>= 7;
+        o->data[o->size++] = (unsigned char)(byte | (value ? 128u : 0u));
+    } while (value);
+    return true;
+}
+
+static bool out_int(Out *o, unsigned int number, uint64_t value) {
+    return out_var(o, (uint64_t)number << 3) && out_var(o, value);
+}
+
+static bool out_bytes(Out *o, unsigned int number, const void *data, size_t size) {
+    if (!out_var(o, (uint64_t)number << 3 | 2u) || !out_var(o, size) ||
+        size > sizeof(o->data) - o->size) return false;
+    memcpy(o->data + o->size, data, size);
+    o->size += size;
+    return true;
+}
+
+static bool out_frame(Out *frames, const char *object, unsigned int method_field, const Out *method) {
+    Out remote = {0}, message = {0};
+    if (!out_bytes(&remote, 7, object, strlen(object)) ||
+        !out_bytes(&remote, method_field, method->data, method->size) ||
+        !out_bytes(&message, 210, remote.data, remote.size) ||
+        frames->size + 4 + message.size > sizeof(frames->data)) return false;
+    for (unsigned int i = 0; i < 4; ++i)
+        frames->data[frames->size++] = (unsigned char)(message.size >> (8 * i));
+    memcpy(frames->data + frames->size, message.data, message.size);
+    frames->size += message.size;
+    return true;
+}
+
+static bool text_frame(Out *frames, const char *text, const char *id) {
+    char event[128];
+    int length = snprintf(event, sizeof event, "{\"type\":\"text_input\",\"text\":\"%s\"}", text);
+    Out vins = {0}, method = {0};
+    return length > 0 && (size_t)length < sizeof event &&
+           out_bytes(&vins, 1, id, strlen(id)) && out_bytes(&vins, 2, event, (size_t)length) &&
+           out_int(&vins, 18, 1) &&                               /* TEXT_INPUT */
+           out_int(&method, 1, 0) && out_bytes(&method, 2, vins.data, vins.size) &&  /* START_REQUEST */
+           out_frame(frames, "AliceCapability", 8, &method);
+}
+
+static bool activation_frame(Out *frames, unsigned int value) {
+    Out method = {0};
+    return out_int(&method, 1, value) &&
+           out_frame(frames, "ActivationSpotterCapability", 14, &method);
+}
+
+/* Returns false for anything outside the fixed table. */
+static bool control_frames(const char *command, const char *arg, const char *id, Out *frames) {
+    if (strcmp(command, "--send-volume-level") == 0) {
+        if (strlen(arg) == 0 || strlen(arg) > 2) return false;
+        unsigned int level = 0;
+        for (const char *p = arg; *p; ++p) {
+            if (*p < '0' || *p > '9') return false;
+            level = level * 10u + (unsigned int)(*p - '0');
+        }
+        if (level > 10) return false;
+        char text[64];
+        (void)snprintf(text, sizeof text, "громкость %s", LEVEL_WORDS[level]);
+        return text_frame(frames, text, id);
+    }
+    if (strcmp(command, "--send-volume-step") == 0) {
+        if (strcmp(arg, "louder") == 0) return text_frame(frames, "громче", id);
+        if (strcmp(arg, "quieter") == 0) return text_frame(frames, "тише", id);
+        return false;
+    }
+    if (strcmp(command, "--send-activation") == 0) {
+        if (strcmp(arg, "off") == 0) return activation_frame(frames, 5);              /* DISABLE */
+        if (strcmp(arg, "on") == 0)                                   /* ENABLE, then START */
+            return activation_frame(frames, 4) && activation_frame(frames, 2);
+    }
+    return false;
+}
+
+static bool request_id(char out[37]) {
+    unsigned char r[16];
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    bool ok = read(fd, r, sizeof r) == (ssize_t)sizeof r;
+    (void)close(fd);
+    r[6] = (unsigned char)((r[6] & 15u) | 64u);
+    r[8] = (unsigned char)((r[8] & 63u) | 128u);
+    (void)snprintf(out, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                   r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11],
+                   r[12], r[13], r[14], r[15]);
+    return ok;
+}
+
+static int send_control(const char *command, const char *arg) {
+    char id[37];
+    Out frames = {0};
+    if (!request_id(id)) return blocked("clock_error");
+    if (!control_frames(command, arg, id, &frames)) return 2;
+    int64_t start = now_ms();
+    if (start < 0) return blocked("clock_error");
+    int fd = open_ipc(start + 5000);
+    if (fd < 0) return blocked(failure);
+    bool sent = send_all(fd, frames.data, frames.size, start + 5000);
+    struct timespec pause = {0, 300000000L};  /* Let aliced read before the socket closes. */
+    (void)nanosleep(&pause, NULL);
+    (void)close(fd);
+    if (!sent) return blocked(failure);
+    (void)printf("{\"event\":\"sent\",\"outcome\":\"sent\"}\n");
+    return 0;
+}
+
+/* Waits for IPC data; any byte or EOF on stdin (the SSH control channel) means stop. */
+static int wait_spotter(int fd, bool control, int64_t deadline) {
+    while (!interrupted) {
+        int64_t current = now_ms();
+        if (current < 0) { failure = "clock_error"; return -1; }
+        if (current >= deadline) return 0;
+        struct pollfd p[2] = {{fd, POLLIN, 0}, {STDIN_FILENO, POLLIN, 0}};
+        int64_t remaining = deadline - current;
+        int result = poll(p, control ? 2u : 1u, remaining > INT_MAX ? INT_MAX : (int)remaining);
+        if (result < 0 && errno == EINTR) continue;
+        if (result < 0) { failure = "ipc_io_error"; return -1; }
+        if (control && p[1].revents) return 0;
+        if (p[0].revents) return 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    bool test = false;
+#ifdef ASR_ONCE_TEST
+    if (argc == 2 && strcmp(argv[1], "--test-subscription") == 0) {
+        for (size_t i = 0; i < sizeof(SUBSCRIBE) - 1; ++i) (void)printf("%02x", SUBSCRIBE[i]);
+        (void)putchar('\n'); return 0;
+    }
+    test = argc == 2 && strcmp(argv[1], "--test-spotter-stream") == 0;
+    if (argc == 4 && strcmp(argv[1], "--test-frame") == 0) {
+        Out frames = {0};
+        if (!control_frames(argv[2], argv[3], "00000000-0000-4000-8000-000000000000", &frames))
+            return 2;
+        for (size_t i = 0; i < frames.size; ++i) (void)printf("%02x", frames.data[i]);
+        (void)putchar('\n');
+        return 0;
+    }
+#endif
+    if (argc == 3 && strncmp(argv[1], "--send-", 7) == 0) {
+        struct sigaction ignore = {0};
+        ignore.sa_handler = SIG_IGN;
+        if (sigaction(SIGPIPE, &ignore, NULL)) return blocked("signal_error");
+        return send_control(argv[1], argv[2]);
+    }
+    unsigned int seconds = 3660;
+    if (!test) {
+        if (argc != 3 || strcmp(argv[1], "--watch-spotter") != 0 || strlen(argv[2]) > 4 ||
+            argv[2][0] == '\0') goto usage;
+        seconds = 0;
+        for (const char *p = argv[2]; *p; ++p) {
+            if (*p < '0' || *p > '9') goto usage;
+            seconds = seconds * 10u + (unsigned int)(*p - '0');
+        }
+        if (seconds < 1 || seconds > 3660) goto usage;
+    }
+    struct sigaction action = {0};
+    action.sa_handler = stop;
+    (void)sigemptyset(&action.sa_mask);
+    if (sigaction(SIGINT, &action, NULL) || sigaction(SIGTERM, &action, NULL) ||
+        sigaction(SIGHUP, &action, NULL) || signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+        return blocked("signal_error");
+    int64_t start = now_ms();
+    if (start < 0) return blocked("clock_error");
+    int64_t deadline = start + (int64_t)seconds * 1000;
+    int fd = test ? STDIN_FILENO : connect_ipc(start + 5000);
+    if (fd < 0) return blocked(failure);
+    unsigned char header[4], bytes[FRAME_MAX];
+    const char *reason = "deadline";
+    for (;;) {
+        int ready = wait_spotter(fd, !test, deadline);
+        if (ready < 0) { (void)close(fd); return blocked(failure); }
+        if (ready == 0) { reason = "stopped"; break; }
+        if (!read_exact(fd, header, sizeof(header), now_ms() + 5000)) {
+            if (test && strcmp(failure, "ipc_closed") == 0) { reason = "stopped"; break; }
+            (void)close(fd); return blocked(failure);
+        }
+        uint32_t size = (uint32_t)header[0] | (uint32_t)header[1] << 8 |
+                        (uint32_t)header[2] << 16 | (uint32_t)header[3] << 24;
+        if (size == 0 || size > FRAME_MAX) { (void)close(fd); return blocked("frame_limit"); }
+        if (!read_exact(fd, bytes, size, now_ms() + 5000)) { (void)close(fd); return blocked(failure); }
+        int found = spotter_event((Slice){bytes, size});
+        if (found < 0) { (void)close(fd); return blocked("protocol_error"); }
+        if (found > 0) {
+            spotted_count++;
+            if (printf("{\"event\":\"spotter\",\"phrase\":\"%s\",\"trusted\":false}\n",
+                       PHRASES[found - 1]) < 0 || fflush(stdout) != 0) {
+                (void)close(fd); return blocked("output_closed");
+            }
+        }
+    }
+    if (now_ms() >= deadline) reason = "deadline";
+    (void)close(fd);
+    (void)printf("{\"event\":\"end\",\"outcome\":\"complete\",\"reason\":\"%s\","
+                 "\"spotted\":%u}\n", reason, spotted_count);
+    return 0;
+usage:
+    (void)fputs("Usage: quasar-client --watch-spotter SECONDS (1..3660) | --send-volume-level 0..10"
+                " | --send-volume-step louder|quieter | --send-activation on|off\n", stderr);
+    return 2;
 }
 #elif !defined(ASR_ONCE_TTS)
 static int capture_once(int fd, int64_t deadline, unsigned int seconds) {

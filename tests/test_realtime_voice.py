@@ -463,9 +463,63 @@ def test_incomplete_response_reports_its_cause_without_speaking_or_peer_details(
     ("включи музыку давай поговорим", "command"),
     ("включи музыку давай попиздим", "command"),
     ("давай попиздимся", "command"),
+    ("Компьютер, громче!", "volume"),
+    ("тише", "volume"),
+    ("громче музыку", "command"),
+    ("компьютер громкость пять", "volume"),
 ])
 def test_routes_are_explicit_prefixes(text: str, route: str) -> None:
     assert rv.route(text) == route
+
+
+@pytest.mark.parametrize("text,parameters", [
+    ("компьютер громкость 5", {"level": 5}),
+    ("Громкость пять", {"level": 5}),
+    ("громкость на десять", {"level": 10}),
+    ("громкость ноль", {"level": 0}),
+    ("поставь громкость три", {"level": 3}),
+    ("сделай громкость 7", {"level": 7}),
+    ("громкость пятьдесят процентов", {"level": 5}),
+    ("громкость двадцать пять процентов", {"level": 3}),
+    ("громкость 35 процентов", {"level": 4}),
+    ("погромче", {"step": "louder"}),
+    ("Компьютер, громче!", {"step": "louder"}),
+    ("сделай потише", {"step": "quieter"}),
+    ("ещё тише", {"step": "quieter"}),
+    ("громкость одиннадцать", None),
+    ("громкость", None),
+    ("громкость сто пятьдесят процентов", None),
+    ("включи громкость", None),
+    ("громче музыку", None),
+])
+def test_volume_phrases_parse_locally(text: str, parameters: Any) -> None:
+    assert rv.volume_command(text) == parameters
+
+
+@pytest.mark.parametrize("outcome,error,latched", [("applied", None, False),
+                                                   ("blocked", "realtime_failed", False),
+                                                   ("unknown", "action_unverified", True)])
+def test_volume_phrase_runs_one_action_without_answer_or_speech(
+    monkeypatch: Any, outcome: str, error: str | None, latched: bool,
+) -> None:
+    actions: list[dict[str, Any]] = []
+    ring = Ring()
+
+    def action(arguments: dict[str, Any]) -> dict[str, Any]:
+        # Our ring is already dark, so Quasar's own volume ring is not covered.
+        assert ring.calls[-1] == ("complete", 1, False)
+        actions.append(arguments)
+        return {"outcome": outcome}
+
+    turn = rv.RealtimeTurn("synthetic", ring, lambda _: pytest.fail("played audio"),
+                           connect=lambda *a: pytest.fail("opened Realtime"),
+                           action=action, local_transcripts=True)
+    monkeypatch.setattr(turn, "_reason", lambda *a: pytest.fail("asked the answer agent"))
+    assert turn.wake(1)
+    assert turn.transcript("громкость пять")
+    wait(lambda: not turn.active)
+    assert actions == [{"action": "quasar.volume", "parameters": {"level": 5}}]
+    assert turn.mode == "volume" and turn.error == error and turn.latched is latched
 
 
 def test_command_transcription_commits_and_live_transcription_has_no_server_vad() -> None:
@@ -548,7 +602,7 @@ def test_agent_action_uses_host_guard_once_and_only_confirms_verified_success(
                            answer=lambda *args: {"mode": "action", "text": "Сделал тише.",
                                                  "action": "audio.volume",
                                                  "parameters": {"step": "quieter"}})
-    monkeypatch.setattr(turn, "_transcribe", lambda *args: "сделай потише")
+    monkeypatch.setattr(turn, "_transcribe", lambda *args: "убавь звук немного")
     monkeypatch.setattr(turn, "_stream", lambda model, text, *args: spoken.append(text))
     turn.wake(1)
     wait(lambda: not turn.active)
@@ -705,3 +759,42 @@ def test_local_conversation_sends_text_turns_and_stops_locally() -> None:
                                    "попиздим"])
 def test_local_conversation_phrasings_take_the_fast_realtime_route(text: str) -> None:
     assert rv.route(text) == "conversation"
+
+
+@pytest.mark.parametrize("continuous", [True, False])
+def test_private_conversation_prompt_reaches_only_the_realtime_conversation(
+        continuous: bool) -> None:
+    socket = Socket([{"type": "session.updated"},
+                     {"type": "response.done", "response": {"status": "completed"}}])
+    turn = rv.RealtimeTurn("synthetic", Ring(), lambda _: {"outcome": "applied"},
+                           connect=lambda *a: socket, local_transcripts=True,
+                           conversation_prompt="Начни первым с длинной истории.")
+    turn.active = True
+    turn.text_stopped.set() if not continuous else None
+    try:
+        turn._stream(rv.MODEL if continuous else rv.TTS_MODEL, "давай поговорим",
+                     time.monotonic() + 2, continuous)
+    except Exception:
+        pass
+    session = next(e["session"] for e in socket.sent if e["type"] == "session.update")
+    assert ("Начни первым с длинной истории." in session["instructions"]) is continuous
+
+
+def test_windows_acl_check_is_reused_until_the_dotenv_changes(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    # PowerShell's ACL check costs about a second; every station action used to pay it 3x.
+    path = tmp_path / ".env"
+    path.write_text("REAL_TIME_API_KEY=sk-synthetic\n")
+    path.chmod(0o644)  # Looks open, as on DrvFS without metadata.
+    monkeypatch.delenv("REAL_TIME_API_KEY", raising=False)
+    monkeypatch.setenv("ALICE_MCP_REALTIME_ENV", str(path))
+    checks: list[Path] = []
+    monkeypatch.setattr(rv, "_windows_private", lambda p: checks.append(p) or True)
+    rv._private_checked.clear()
+    assert rv.api_key() == rv.api_key() == "sk-synthetic"
+    assert len(checks) == 1
+    path.write_text("REAL_TIME_API_KEY=sk-other\n")
+    assert rv.api_key() == "sk-other" and len(checks) == 2  # Changed file: checked again.
+    monkeypatch.setattr(rv.time, "monotonic", lambda: 10 ** 9)
+    rv.api_key()
+    assert len(checks) == 3  # And never trusted for more than five minutes.

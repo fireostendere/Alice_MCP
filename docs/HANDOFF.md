@@ -4,6 +4,51 @@ Updated 2026-11-01. Start with [AGENTS.md](../AGENTS.md) and
 [CONTRIBUTING.md](../CONTRIBUTING.md). This is a tested Mini 1 pilot, not general
 Station/firmware qualification or a fully offline conversational assistant.
 
+## Final publication checkpoint (2026-11-01)
+
+- The implementation is merged in [PR #12](https://github.com/fireostendere/Alice_MCP/pull/12),
+  source commit `82e98a9758f5d51b5736ee20d141f88a06e92cb5`, merge
+  `1588f30afef4f41f6241d5305c49e590aee7c6f1`.
+- The test-only TLS follow-up is merged in
+  [PR #13](https://github.com/fireostendere/Alice_MCP/pull/13), source commit
+  `6c2f8dbcc888277bf57f2707a34083364c5aed99`, merge
+  `dbdf3b595a98e7ea88955413dc1a4907945dc3c7`. The synthetic cancellation peer now
+  accepts explicit EOF/reset disconnects. A deterministic EOF-to-BrokenPipe case
+  reproduces the old fixture failure; cancellation deadlines and the exact
+  single-request/no-resend assertion remain unchanged. No production change was
+  needed for that CI failure.
+- Final local source gate: **1,832 Python tests passed, 13 skipped**, 15 Node tests,
+  Ruff, mypy (including the session bridge), MCP contract, wheel/sdist, source/index/
+  archive privacy and redacted gitleaks on staged files, history and payloads passed.
+  The full run reported the fork deprecation and an unrelated synthetic socket
+  teardown thread warning; neither was suppressed. Both PRs passed GitHub Python
+  3.11/3.12 and native checks before merge. CI run results remain authoritative.
+  The post-merge [main CI](https://github.com/fireostendere/Alice_MCP/actions/runs/41349578534)
+  at `dbdf3b595a98e7ea88955413dc1a4907945dc3c7` also passed all three jobs.
+- The feature is usable, not fully accepted against every original target:
+  clock median **1.59 s versus 1.37 s** stock is still slower; weather median
+  **1.54 s versus 1.62 s** stock is from only three generated-voice pairs.
+  Native stop-only red colour and reliable verbatim news audition remain open.
+  Do not claim universal stock-speed parity or that red stop is implemented.
+- The last clock-fields experiment was rejected (no latency gain); it was not
+  deployed. Runtime remains one generated answer per wake, Belgrade default,
+  `coral`, 200-ms command VAD, explicit conversation transition with 350-ms VAD.
+  See [the architecture/evidence](VOICE_ARCHITECTURE.md#one-question-one-generated-answer)
+  for the processed-input policy, cache validation, native build pin and caveats.
+- Private inventories, SSH settings, `.env`, project-local OpenCode bindings,
+  reviewed binaries, diagnostic experiments and local goal records were deliberately
+  excluded from Git. A clone is not a configured station deployment. Preserve the
+  existing private configuration; never copy these files into a publication.
+- `goal_update` was unavailable in the offered tools. CLI/schema and current-session
+  metadata checks did not expose an authoritative alternative. The local blocked
+  record is **not** a goal-service update; no session metadata was fabricated.
+- Owner's final instruction: leave the checkpoint/documentation, commit and merge,
+  then **stop engineering work**. Leave the working voice setup and Quasar enabled;
+  do not restart/reconfigure devices, run more room trials, or automatically resume
+  the earlier speed goal without a new explicit owner request. Source publication
+  does not prove a running MCP process reloaded every Python change; if deployment
+  is requested later, use only the scoped project refresh and verify one owner.
+
 ## Current smart-speaker work
 
 The active Mini 1 route is now `station_oneshot`: one generated answer per wake,

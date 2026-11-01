@@ -110,7 +110,12 @@ def native(tmp_path: Path) -> Any:
                         started, closed = result["_await_disconnect"]
                         started.set()
                         self.connection.settimeout(3)
-                        if self.connection.recv(1) == b"":
+                        try:
+                            disconnected = self.connection.recv(1) == b""
+                        except (BrokenPipeError, ConnectionResetError):
+                            # TLS may report a peer close while writing records.
+                            disconnected = True
+                        if disconnected:
                             closed.set()
                         return
                     data = copy.deepcopy(result)
@@ -164,7 +169,19 @@ def test_native_only_inventory_does_not_need_or_use_ssh(native: Any) -> None:
     assert calls == ["station_probe"]
 
 
-def test_cancelled_native_request_closes_the_connection_without_resending(native: Any) -> None:
+@pytest.mark.parametrize("tls_close_error", [False, True])
+def test_cancelled_native_request_closes_the_connection_without_resending(
+        native: Any, monkeypatch: Any, tls_close_error: bool) -> None:
+    if tls_close_error:
+        receive = ssl.SSLSocket.recv
+
+        def reset_after_eof(channel: Any, *args: Any, **kwargs: Any) -> bytes:
+            data = receive(channel, *args, **kwargs)
+            if data == b"":
+                raise BrokenPipeError("Synthetic TLS peer already closed")
+            return data
+
+        monkeypatch.setattr(ssl.SSLSocket, "recv", reset_after_eof)
     controller, calls, result, _, _ = native
     started, closed, cancel = threading.Event(), threading.Event(), threading.Event()
     result["_await_disconnect"] = (started, closed)

@@ -23,3 +23,26 @@ node --test integrations/opencode/alice-voice/lib.test.js
 
 The TUI JSX runs in OpenCode's plugin runtime; these unit tests do not establish
 compatibility with every OpenCode version or physically verify LEDs/sound.
+
+## Compact Alice profile
+
+The server plugin now applies a runtime-only compact system prompt to the existing
+`alice` agent and denies development/file/skill/delegation tools for that profile.
+It preserves station-action permissions, model selection, project/security
+instructions, other agents and the single private MCP configuration. The runtime
+transform replaces Alice's base system prompt; unload the plugin to restore it.
+The existing `alice_run_station_action` executor is kept and exposed natively
+(`codemode: false`); no duplicate tool or connection is registered. Other tools
+keep their existing transport options. It asks for the action directly, without
+an introductory message, and never reports unverified sound as audible success.
+
+Copy the updated `index.js` and `lib.js` together to the existing plugin directory.
+OpenCode reloads plugins/configuration after changes; do not start another MCP
+alias or listener. Its private MCP `cwd` and `PYTHONPATH` must select this checkout
+and its `src` directory, not an old worktree.
+
+Some custom OpenCode builds still defer native tools behind `mcp_discover`.
+`codemode: false` does not guarantee preloading in those builds; removing that
+round-trip requires their tool-selection implementation, outside this repository.
+The literal-speech bypass and timing fields are documented in
+[voice architecture](../../../docs/VOICE_ARCHITECTURE.md#literal-speech-fast-path-and-latency-measurements).

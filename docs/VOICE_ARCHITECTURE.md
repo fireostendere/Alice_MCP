@@ -165,6 +165,117 @@ does not discard its queued tail. Explicit stop, the deadline and unverified nat
 playback still stop the queue without replaying a fragment. A disconnect before a
 complete response can still cut speech short.
 
+### Literal speech fast path and latency measurements
+
+In the transcript-based voice routes, `скажи привет` / `произнеси привет` and an
+exactly quoted phrase such as `скажи «Привет, мир!»` bypass the answer model.
+Only one unquoted word is accepted: questions and compound requests still go to
+the answer agent. Text retains its punctuation/case and passes the shared speech
+bounds (256 characters / 512 UTF-8 bytes, no controls). The host performs one
+`speech.say` under the same live private policy, backend binding, fresh one-use
+preview and state/trust checks. There is no second spoken confirmation or retry.
+An unknown result latches the voice route as before. This shortcut does not
+intercept typed OpenCode prompts or the audio-only `station_live` route.
+
+`run_station_action` returns host durations in `timing_ms`: `preview`, `apply`
+(including approval/revalidation/execution) and `total`, in milliseconds. The
+native path measures the same phases; a blocked preview can omit `apply`.
+These measurements exclude OpenCode discovery, model and network time before
+the tool invocation. Voice turns additionally mark `answer_started` / `answer`
+or `literal_speech` / `action_completed` in their existing wake-relative timings.
+
+Direct OpenAI speech returns `speech_runtime`: `transport` (`cold` or `standby`),
+`secret_source` (`minted` or `spare`) and call-relative `timing_ms` checkpoints
+(`prepared` on cold starts, `dispatched`, optional `connected` / `first_audio`,
+and `total`). These are host observations, not station-provided durations or
+proof of acoustic onset. Missing first-audio events remain missing, not zero.
+Literal voice turns expose this bounded metadata under `last_playback` and the
+turn summary. No text, audio, secret or raw provider event is added to diagnostics.
+
+The existing standby and single-use spare secret are reused, not duplicated.
+An unavailable/busy standby never triggers a retry through the cold path. These
+changes have synthetic coverage; no new end-to-end latency or device acceptance
+is claimed. OpenCode discovery/model durations need measurement in that runtime.
+
+#### Preconnected text-only speech
+
+An owner-authorized direct MCP measurement on 2026-11-01 used the existing
+standby with a spare credential. Preview took 24 ms, WebSocket connection was observed at
+1,309 ms, first audio data at 1,987 ms, and complete tool return at 2,843 ms.
+This is one sample, excludes chat/model/discovery time, and is not an acoustic
+measurement. It motivated moving the connection setup off the speech path.
+
+The new reviewed ARM client adds `prepare` / `speak` to the standby protocol.
+Preparation opens a session using the fixed text-only mini-TTS settings, for at
+most 120 seconds. It creates no player, sends no input text or microphone audio,
+and requests no response. Only `session.created` acknowledges readiness;
+unsolicited audio/tools close preparation without playing or executing anything.
+The wake detector still operates locally. This is a pre-wake cloud connection
+for **text-only TTS**, not permission to export pre-wake microphone audio.
+
+One explicit speech action consumes the prepared connection, starts the player
+and sends its text once. The host conservatively stops using readiness after
+100 seconds; native expiry closes the unused socket. Stop, stdin disconnect,
+cloud failure or replacement by a normal conversation also closes preparation.
+An idle host prepares the next connection after completion; failed preparation
+backs off for 30 seconds. Foreground commands win over background preparation.
+If a selected warm socket has expired/closed, the action returns blocked or
+unknown, never silently reconnects and repeats the text. A cold path is selected
+only **before** dispatch when no acknowledged warm socket is available.
+
+`speech_runtime.secret_source="preconnected"` identifies actual reuse; `spare`
+still means a new socket using the legacy client's cached secret. Old pinned
+clients remain supported and receive no new protocol commands. Host code alone
+therefore does not enable preconnection: the separately reviewed ARM artifact
+must be selected as `voice.live_client`, then the owned listener restarted.
+Private station settings and artifacts are not changed by this source patch.
+
+Alternatively the existing MCP process can select a host artifact using its
+private `ALICE_MCP_LIVE_CLIENTS` environment variable: a JSON map from station
+alias to absolute client path (for example `{"desk":"/PRIVATE/reviewed-client"}`).
+It only replaces an already configured `voice.live_client`; unknown aliases,
+invalid paths and stations without direct voice policy fail closed. This leaves
+the private inventory, SSH settings and permissions unchanged. Effective client
+bindings participate in station/preview identity; runtime still accepts only the
+two exact reviewed client hashes. Remove the variable to restore inventory
+selection. `voice_status.speech_connection` exposes only support/readiness flags.
+
+Live activation evidence (one Mini 1, 2026-11-01): the project-local MCP selected
+the reviewed warm client through that process binding, without editing private
+inventory or SSH settings. After restarting only the owned listener, status
+reported `supported=true, ready=true`. One explicit `speech.say` returned
+`secret_source="preconnected"`, first audio data at 780 ms, speech-runtime total
+1,301 ms, preview 35 ms and complete MCP return at 1,366 ms. The player reported
+24,000 frames, no underrun and verified cleanup. Quasar was not stopped and no
+station reboot was performed. These are host observations of one short request,
+not an acoustic measurement, percentile, or chat-input-to-sound latency claim.
+
+Build evidence: Zig 0.15.1, `arm-linux-gnueabihf.2.23`, `-O2 -Wall -Wextra -Werror -s`,
+`src/alice_mcp/native/live_client.c -ldl`. Two local builds were byte-identical:
+31,156 bytes, SHA-256
+`a8eca25455a65b9406c25716cd8bbcb7b458b6c429132b33ba394c512c7aa691`
+(`live_voice.WARM_CLIENT_SHA256`). ELF inspection found ARM EABI5 hard-float,
+the ARMhf loader, a non-executable stack and required GLIBC symbol versions no
+newer than 2.17. This is build evidence, not execution on the station. The local
+artifact is `build/live-client-warm-armhf`; it is excluded from distribution.
+
+Synthetic tests use a real local TLS server and cover silence/no microphone
+upload before dispatch, one-use speech, expiry, cancellation, disconnect and
+unsolicited audio. They do not establish live API compatibility or sub-two-second
+physical playback. The typed-chat no-model shortcut still needs OpenCode's
+exactly-once execution boundary; a prompt-admission hook is not that boundary.
+
+For the OpenCode change, dispatch only an explicit, literal user speech request
+after durable admission, using its unique execution ID. Resolve the station from
+the session's explicit target; ambiguous targets still need clarification. Call
+the existing MCP action once through the normal session permissions, leaving
+preview/state/trust/approval checks inside Alice MCP. Persist dispatch intent
+before sending; interrupted or unknown writes must not replay after restart.
+Quoted speech, tool output and voice transcripts cannot change permissions or
+select a different station. Unsupported sentences retain the normal model route.
+Record admission-to-dispatch and tool timings separately; first audio data is
+not evidence of physical sound. No such chat-runtime change is included here.
+
 ### Direct station Realtime
 
 With the private `voice.live_client` and `voice.live_player` host paths configured

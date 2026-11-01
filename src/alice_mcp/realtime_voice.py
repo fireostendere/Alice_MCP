@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from alice_mcp import device_runtime as rt
 from alice_mcp.core import SafetyError
 from alice_mcp.opencode_voice import MODEL as OPENCODE_MODEL
 
@@ -209,6 +210,21 @@ def volume_command(text: str) -> dict[str, Any] | None:
     if number is None or number > (100 if percent else 10):
         return None
     return {"level": (number + 5) // 10 if percent else number}
+
+
+def literal_speech(text: str) -> str | None:
+    """Only one word or an exactly quoted literal; questions/compound requests use the agent."""
+    match = re.fullmatch(
+        r'\s*(?:компьютер[, ]+)?(?:скажи|произнеси) +'
+        r'(?:«([^«»]+)»|"([^"\n]+)"|“([^“”]+)”|([\w-]+[.!]?)) *', text, re.IGNORECASE)
+    if match is None:
+        return None
+    literal = next(part for part in match.groups() if part is not None)
+    try:
+        rt.validate_parameters("speech.say", {"text": literal}, {"tts_client": {}}, "station-mini")
+    except ValueError:
+        return None
+    return literal
 
 
 def route(text: str) -> str:
@@ -521,6 +537,24 @@ class RealtimeTurn:
             else:
                 text = self._transcribe(STT_MODEL, deadline)
             self._timing("transcript")
+            literal = literal_speech(text)
+            if literal is not None and self.action is not None:
+                self.mode, self.state = "literal_speech", "speaking"
+                self.input_done.set()
+                self._timing("literal_speech")
+                self._remaining(deadline)
+                result = self.action({"action": "speech.say", "parameters": {"text": literal}})
+                self._timing("action_completed")
+                self.last_playback = {k: result[k] for k in (
+                    "speech_runtime", "playback_elapsed_ms", "playback_started",
+                    "playback_completed") if k in result}
+                if result.get("outcome") == "unknown":
+                    self.latched = True
+                    raise SafetyError("action_unverified")
+                if result.get("outcome") != "applied":
+                    raise SafetyError("action_blocked")
+                failed = False
+                return
             self.mode = route(text)
             if self.mode == "volume":
                 # Parsed on this PC: no answer agent, no speech; the ring shows the level.
@@ -543,6 +577,7 @@ class RealtimeTurn:
             answer = text
             if self.mode == "command":
                 self.input_done.set()
+                self._timing("answer_started")
                 answer = self._reason(text, deadline)
                 self._timing("answer")
             if self.mode == "conversation":

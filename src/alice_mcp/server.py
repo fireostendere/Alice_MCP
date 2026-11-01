@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -273,24 +274,34 @@ async def run_station_action(
     ctx: Context[Any, Any, Any],
 ) -> dict[str, Any]:
     """Do one device action now: fresh one-use preview, then apply; no form if preauthorized."""
+    started = time.monotonic()
+    timing: dict[str, int] = {}
+
+    def report(result: dict[str, Any]) -> dict[str, Any]:
+        return {**result, "timing_ms": {**timing, **result.get("timing_ms", {}),
+                                       "total": round((time.monotonic() - started) * 1000)}}
+
     try:
         station = controller.station(station_id)
         action = controls.bound_action(station, action)  # type: ignore[assignment]
         if station.native_mcp and action not in controls.QUASAR_ACTIONS | controls.LIVE_ACTIONS:
             from alice_mcp import native_transport
 
-            return await asyncio.to_thread(
+            return report(await asyncio.to_thread(
                 _safe, native_transport.run_action, controller, station, action, parameters,
-            )
+            ))
     except SafetyError as error:
-        return {"outcome": "blocked", "error": str(error)}
+        return report({"outcome": "blocked", "error": str(error)})
     preview: dict[str, Any] = await preview_station_action(station_id, action, parameters)
+    timing["preview"] = round((time.monotonic() - started) * 1000)
     if "plan_id" not in preview:
-        return preview
+        return report(preview)
+    applying = time.monotonic()
     result: dict[str, Any] = await apply_station_action(
         preview["plan_id"], preview["expected_sha256"], ctx,
     )
-    return result
+    timing["apply"] = round((time.monotonic() - applying) * 1000)
+    return report(result)
 
 
 @mcp.tool(annotations=READ)

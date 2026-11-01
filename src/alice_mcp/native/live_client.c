@@ -199,6 +199,7 @@ static int tcp_connect(void) {
         fd = socket(a->ai_family, a->ai_socktype | SOCK_CLOEXEC, a->ai_protocol);
         struct timeval timeout = {10, 0};
         if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
+        if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
         if (fd >= 0 && connect(fd, a->ai_addr, a->ai_addrlen)) { close(fd); fd = -1; }
     }
     freeaddrinfo(list);
@@ -438,6 +439,7 @@ static int64_t last_activity, session_deadline;
 static char opening[OPENING_MAX];
 static int16_t samples_out[MESSAGE_MAX / 4 * 3 + 64];  /* 2 per decoded 24 kHz sample */
 static bool standby, speaking;  /* speaking: a "say" session, text in, no microphone */
+static bool preparing;  /* Connected text-only socket; no player or response until "speak". */
 
 static void stamp(const char *event) {
     char line[128];
@@ -473,31 +475,43 @@ static bool send_mic(void) {  /* Everything captured since mic_sent, oldest firs
 }
 
 /* One server event; NULL to go on, or the reason this session ends. */
+static bool send_opening(void) {
+    static char text[OPENING_MAX * 6 + 256], escaped[OPENING_MAX * 6];
+    size_t e = 0;
+    for (const char *c = opening; *c && e < sizeof escaped - 7; ++c) {
+        if (*c == '"' || *c == '\\') { escaped[e++] = '\\'; escaped[e++] = *c; }
+        else if ((unsigned char)*c < 0x20) e += (size_t)snprintf(escaped + e, 7, "\\u%04x", *c);
+        else escaped[e++] = *c;
+    }
+    escaped[e] = 0;
+    snprintf(text, sizeof text, "{\"type\":\"conversation.item.create\",\"item\":{\"type\":"
+             "\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\","
+             "\"text\":\"%s\"}]}}", escaped);
+    if (!ws_text(text) || !ws_text("{\"type\":\"response.create\"}")) return false;
+    responding = true;
+    return true;
+}
+
 static const char *handle(const char *message) {
     const char *type, *value; size_t type_size, value_size;
     if (!field(message, "type", &type, &type_size)) return "failed";
     if (is(type, type_size, "error")) return "api_error";
+    if (preparing) {
+        if (is(type, type_size, "session.created") && !ready) {
+            ready = true;
+            stamp("prepared");
+            return NULL;
+        }
+        if (is(type, type_size, "rate_limits.updated")) return NULL;
+        return "unexpected_warm_event";  /* Never play unsolicited audio or forward tools. */
+    }
     if (is(type, type_size, "session.created") && !ready) {
         ready = true;
         /* Standby: the owner is already speaking; send it from the wake word on. */
         mic_sent = standby ? (wake_offset > fed ? fed : wake_offset) : fed;
         mic_buffered = speaking ? 0 : fed - mic_sent;
         mic_tail = 0; mic_have = false; mic_phase = 0;
-        if (opening[0]) {
-            static char text[OPENING_MAX * 6 + 256], escaped[OPENING_MAX * 6];
-            size_t e = 0;
-            for (const char *c = opening; *c && e < sizeof escaped - 7; ++c) {
-                if (*c == '"' || *c == '\\') { escaped[e++] = '\\'; escaped[e++] = *c; }
-                else if ((unsigned char)*c < 0x20) e += (size_t)snprintf(escaped + e, 7, "\\u%04x", *c);
-                else escaped[e++] = *c;
-            }
-            escaped[e] = 0;
-            snprintf(text, sizeof text, "{\"type\":\"conversation.item.create\",\"item\":{\"type\":"
-                     "\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\","
-                     "\"text\":\"%s\"}]}}", escaped);
-            if (!ws_text(text) || !ws_text("{\"type\":\"response.create\"}")) return "failed";
-            responding = true;
-        }
+        if (opening[0] && !send_opening()) return "failed";
         stamp("ready");
         if (!speaking && !send_mic()) return "failed";
     } else if (is(type, type_size, "response.created")) {
@@ -549,7 +563,12 @@ static const char *handle(const char *message) {
 static const char *ca_path = "/system/vendor/quasar/ca-certificates.crt", *player_path;
 static long idle_ms = 7000;
 
-static void session_begin(long seconds) {
+static void start_player(void) {
+    char *player_argv[] = {(char *)player_path, "--stream", NULL};
+    player = spawn(player_path, player_argv, &player_in, &player_out);
+}
+
+static void session_begin(long seconds, bool warm) {
     ready = responding = talking = first_audio = create_after_done = false;
     barge_ins = tools_pending = 0;
     queue_clear(); upsample_reset(); playing_until = 0;
@@ -557,14 +576,19 @@ static void session_begin(long seconds) {
     agc_envelope = agc_gain = 0;
     in_start = in_end = 0; free(partial); partial = NULL; partial_size = 0;
     in_session = true;
+    preparing = warm;
+    if (warm) speaking = true;
     last_activity = now_ms(); session_deadline = now_ms() + seconds * 1000;
-    char *player_argv[] = {(char *)player_path, "--stream", NULL};
-    player = spawn(player_path, player_argv, &player_in, &player_out);
+    if (!warm) start_player();
 }
 
 /* Ends the session: drop or drain the reply, report the player, close the socket. */
 static void session_end(const char *reason) {
-    if (player > 0) {
+    if (preparing) {
+        char end[160];
+        snprintf(end, sizeof end, "{\"event\":\"prepare_end\",\"reason\":\"%s\"}", reason);
+        emit(end);
+    } else if (player > 0) {
         if (!strcmp(reason, "idle")) while (queued() && pump(player_in)) usleep(20000);
         else if (queued() || !strcmp(reason, "stopped")) player_frame(player_in, 'F', NULL, 0);
         player_frame(player_in, 'E', NULL, 0);
@@ -594,11 +618,11 @@ static void session_end(const char *reason) {
     player = -1; player_in = player_out = -1;
     close_session();
     queue_clear();
-    in_session = speaking = false;
+    in_session = speaking = preparing = false;
 }
 
 static void session_open(const char *model, long seconds, char *secret) {
-    session_begin(seconds);
+    session_begin(seconds, false);
     const char *failed = player < 0 ? "player_unavailable" : open_session(ca_path, model, secret);
     memset(secret, 0, strlen(secret));
     if (failed) { session_end(failed); return; }
@@ -614,8 +638,28 @@ static const char *command(char *line) {
         return standby ? "stopped" : "exit";
     }
     if (!strcmp(line, "cancel")) { if (in_session) session_end("stopped"); return NULL; }
+    if (standby && !strncmp(line, "speak ", 6)) {
+        char *text;
+        long seconds = strtol(line + 6, &text, 10);
+        if (*text != ' ' || !text[1] || seconds < 1 || seconds > 180 ||
+            strlen(text + 1) >= sizeof opening) return "invalid_control";
+        if (!preparing || !ready || now_ms() >= session_deadline) {
+            if (preparing) session_end("deadline");
+            emit("{\"event\":\"session_end\",\"reason\":\"not_prepared\",\"player\":null}");
+            return NULL;
+        }
+        preparing = false;  /* Consume once; failure from here is never retried. */
+        session_deadline = now_ms() + seconds * 1000;
+        strcpy(opening, text + 1);
+        start_player();
+        if (player < 0) session_end("player_unavailable");
+        else if (!send_opening()) session_end("failed");
+        return NULL;
+    }
     bool say = standby && !strncmp(line, "say ", 4);
-    if (standby && (say || !strncmp(line, "session ", 8)) && !in_session) {
+    bool warm = standby && !strncmp(line, "prepare ", 8);
+    if (standby && (say || warm || !strncmp(line, "session ", 8)) && (!in_session || preparing)) {
+        if (preparing) session_end("replaced");
         char *model = line + (say ? 4 : 8), *seconds = strchr(model, ' '), *ephemeral, *text = NULL;
         if (!seconds) return "invalid_control";
         *seconds++ = 0;
@@ -631,6 +675,14 @@ static const char *command(char *line) {
         if (bound < 1 || bound > 900 || !*ephemeral || strlen(ephemeral) > 4096) return "invalid_control";
         for (const char *c = ephemeral; *c; ++c) if (*c <= ' ' || *c > '~') return "invalid_control";
         strcpy(opening, text ? text : "");  /* Wake sessions listen; they have no opening. */
+        if (warm) {
+            if (strcmp(model, "gpt-realtime-2.1-mini") || bound > 120) return "invalid_control";
+            session_begin(bound, true);
+            const char *failed = open_session(ca_path, model, ephemeral);
+            memset(ephemeral, 0, strlen(ephemeral));
+            if (failed) session_end(failed);
+            return NULL;
+        }
         session_open(model, bound, ephemeral);
         speaking = say && in_session;
         return NULL;
@@ -691,11 +743,11 @@ int main(int argc, char **argv) {
         if (now >= deadline) { reason = "deadline"; break; }
         if (in_session) {
             if (now >= session_deadline) { session_end("deadline"); continue; }
-            if (ready && !responding && !talking && !tools_pending && !queued() &&
+            if (!preparing && ready && !responding && !talking && !tools_pending && !queued() &&
                 now >= playing_until && now - last_activity >= (speaking ? 200 : idle_ms)) {
                 session_end("idle"); continue;
             }
-            if (!pump(player_in)) { session_end("player_failed"); continue; }
+            if (!preparing && !pump(player_in)) { session_end("player_failed"); continue; }
         }
         if (capture && mic < 0 && (standby || ready) && windows < max_seconds / 60 + 1) {
             char *mic_argv[] = {(char *)capture, "--stream", "9850", "60", NULL};

@@ -245,9 +245,12 @@ def test_run_station_action_does_a_preauthorized_task_in_one_call(monkeypatch: A
     monkeypatch.setattr(server, "controller", controller)
     preview = Mock(return_value={"plan_id": "fresh", "expected_sha256": "a" * 64})
     monkeypatch.setattr(server.controls, "preview", preview)
-    assert asyncio.run(server.run_station_action(
+    result = asyncio.run(server.run_station_action(
         "desk", "speech.say", {"text": "hi"}, object(),
-    )) == {"outcome": "applied"}
+    ))
+    assert result["outcome"] == "applied"
+    assert set(result["timing_ms"]) == {"preview", "apply", "total"}
+    assert all(0 <= n <= result["timing_ms"]["total"] for n in result["timing_ms"].values())
     preview.assert_called_once_with(controller, "desk", "speech.say", {"text": "hi"})
     controller.take_plan.assert_called_once_with("fresh", "a" * 64)
     controller.execute_plan.assert_called_once_with(plan)

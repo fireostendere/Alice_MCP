@@ -417,14 +417,15 @@ class VoiceService:
             station = self.controller.station(self.station)
             if not station.preauthorize_all_actions:
                 raise SafetyError("Standing station authorization required")
-            action, params = arguments["action"], arguments["parameters"]
+            action = controls.bound_action(station, arguments["action"])
+            params = arguments["parameters"]
             step = params.get("step") if action in {"audio.volume", "quasar.volume"} else None
             turn = self.realtime
             since = turn.started_at if turn is not None and turn.active else None
             if step in ("louder", "quieter") and self._stock_stepped(
                     "громче" if step == "louder" else "тише", since):
                 return {"outcome": "applied", "source": "quasar_spotter"}
-            if station.native_mcp and action not in controls.QUASAR_ACTIONS:
+            if station.native_mcp and action not in controls.QUASAR_ACTIONS | controls.LIVE_ACTIONS:
                 result = native_transport.run_action(self.controller, station, action, params)
             else:
                 plan = controls.preview(self.controller, station.id, action, params)
@@ -545,8 +546,12 @@ class VoiceService:
                    if self.source == "station_asr" else {}),
                 "utterances": self.utterances, "recent_events": len(self.events),
                 "last_event_id": self.events[-1]["id"] if self.events else 0,
-                "last_error": self.last_error, "last_session": self.result,
-                "realtime": self.realtime.status() if self.realtime else None,
+                 "last_error": self.last_error, "last_session": self.result,
+                 "speech_connection": {
+                     "supported": bool(getattr(self._standby, "warm_supported", False)),
+                     "ready": time.monotonic() < getattr(self._standby, "warm_until", 0),
+                     "preparing": getattr(self._standby, "preparing_at", None) is not None},
+                 "realtime": self.realtime.status() if self.realtime else None,
                 "indicator": self.indicator.status() if self.indicator else {
                     "backend": "off", "state": "off", "reason": "listener_not_started"},
                 "audio_saved": False, "events_trusted": False}

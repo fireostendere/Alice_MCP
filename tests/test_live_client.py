@@ -401,3 +401,63 @@ def test_standby_speaks_text_without_the_microphone_then_keeps_waiting(built: Pa
     process.stdin.flush()
     assert _until(process, "end")[-1]["reason"] == "stopped"
     process.wait(10)
+
+
+@pytest.mark.parametrize("finish", ["speak", "expire", "cancel", "unsolicited", "disconnect"])
+def test_prepared_speech_connects_without_player_or_mic_and_is_consumed_once(
+        built: Path, finish: str) -> None:
+    (built / "detector").write_text(DETECTOR)
+    (built / "detector").chmod(0o700)
+    reply = base64.b64encode(b"\1\0" * 2400).decode()
+    server = Server(built / "cert.pem", built / "key.pem", [
+        {"type": "response.output_audio.delta", "delta": reply},
+        {"type": "response.done", "response": {"status": "completed"}}],
+        on_connect=([{"type": "response.output_audio.delta", "delta": reply}]
+                    if finish == "unsolicited" else []))
+    process = subprocess.Popen([str(_client(built, server.port)), "--player", str(built / "player"),
+                                "--ca", str(built / "cert.pem"), "--idle-ms", "200",
+                                "--wake-detector", str(built / "detector"),
+                                "--capture", str(built / "capture"), "--max-seconds", "30"],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    assert process.stdin is not None
+
+    def send(line: str) -> None:
+        process.stdin.write((line + "\n").encode())
+        process.stdin.flush()
+
+    try:
+        _until(process, "detector")
+        send(f"prepare gpt-realtime-2.1-mini {1 if finish == 'expire' else 10} {SECRET}")
+        prepared = _until(process, "prepared")
+        assert prepared[-1]["event"] == "prepared"
+        assert not (built / "played.bin").exists() and not server.received
+        if finish == "speak":
+            send("speak 10 Привет, мир!")
+            ended = _until(process, "session_end")
+            assert ended[-1]["reason"] == "idle"
+            assert [e["type"] for e in server.received] == ["conversation.item.create",
+                                                           "response.create"]
+            assert server.received[0]["item"]["content"][0]["text"] == "Привет, мир!"
+            assert "connected" not in [e["event"] for e in ended]
+            assert any(k == "A" for k, _ in _frames((built / "played.bin").read_bytes()))
+        else:
+            if finish == "cancel":
+                send("cancel")
+            if finish == "disconnect":
+                process.stdin.close()
+            ended = _until(process, "prepare_end")
+            assert ended[-1]["reason"] in {"deadline", "stopped", "unexpected_warm_event"}
+            assert not (built / "played.bin").exists() and not server.received
+        if finish == "disconnect":
+            assert _until(process, "end")[-1]["reason"] == "stopped"
+            return
+        send("speak 10 НЕ ПОВТОРЯТЬ")
+        rejected = _until(process, "session_end")[-1]
+        assert rejected["reason"] == "not_prepared" and server.responses <= 1
+        send("stop")
+        assert _until(process, "end")[-1]["reason"] == "stopped"
+    finally:
+        if not process.stdin.closed:
+            process.stdin.close()
+        process.wait(10)
+        server.thread.join(5)

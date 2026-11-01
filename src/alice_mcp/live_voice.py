@@ -30,6 +30,7 @@ from alice_mcp.wake_simulate import read_pinned
 # ARM32 glibc 2.23 builds; host paths are private policy (`voice.live_player/live_client`).
 PLAYER_SHA256 = "6caee5b7e86478024c8c0f5c9e1e35d6acec3fa77d00e891a64f26867810fefe"
 CLIENT_SHA256 = "c05fa81b4f0cc6827288424db1cf803df6a31d7abad42560a55a159af0c6087d"
+WARM_CLIENT_SHA256 = "a8eca25455a65b9406c25716cd8bbcb7b458b6c429132b33ba394c512c7aa691"
 LIMIT = 64 * 1024
 SCRIPT = r"""set -u
 umask 077
@@ -62,9 +63,23 @@ set -- --player "$DIR/player" --model "$model" --max-seconds "$seconds" --idle-m
 LD_LIBRARY_PATH=/system/vendor/quasar/libs "$DIR/client" "$@"
 """
 BLOCKED = frozenset({"not_owner", "invalid_request", "tmp_unavailable", "pin_mismatch",
-                     "firmware_mismatch", "quasar_not_running", "player_unavailable"})
+                     "firmware_mismatch", "quasar_not_running", "player_unavailable",
+                     "not_prepared"})
 CLOUD = frozenset({"api_error", "response_failed", "connect_failed", "tls_failed",
-                   "tls_unavailable", "ca_unavailable", "handshake_rejected"})
+                    "tls_unavailable", "ca_unavailable", "handshake_rejected"})
+
+
+def load_client(path: Path) -> tuple[bytes, str]:
+    """Two exact reviewed builds; older deployments keep their existing cold-socket path."""
+    try:
+        with path.open("rb") as source:
+            data = source.read(LIMIT + 1)
+        pin = hashlib.sha256(data).hexdigest()
+        if len(data) > LIMIT or pin not in {CLIENT_SHA256, WARM_CLIENT_SHA256}:
+            raise ValueError
+        return data, pin
+    except (ValueError, OSError):
+        raise SafetyError("Live client is not a reviewed pinned build") from None
 
 
 def _stamp(controller: Controller, station: Any) -> str:
@@ -109,19 +124,22 @@ def run(controller: Controller, station_id: str, key: str, session: dict[str, An
     The model's function calls arrive as `tool` events; `tool(name, arguments)` runs them
     on this PC and its text goes back as the call's output. Every call gets an answer.
     """
+    started = time.monotonic()
+    timing: dict[str, int] = {}
     station = controller.station(station_id)
     iop._permitted(controller, station)
     voice = station.controls["voice"]
     player = read_pinned(Path(voice["live_player"]), PLAYER_SHA256, LIMIT)
-    client = read_pinned(Path(voice["live_client"]), CLIENT_SHA256, LIMIT)
+    client, client_pin = load_client(Path(voice["live_client"]))
     stamp = _stamp(controller, station)
     verified = stamp != "-" and quasar_client._verified.get(station.id) == stamp
+    timing["prepared"] = round((time.monotonic() - started) * 1000)
     seconds = min(900, int(deadline - time.monotonic()))
     if seconds < 1:
         raise SafetyError("deadline_exceeded")
     command, source = quasar_client._loader(SCRIPT, (
         "verified" if verified else "full", station.controls["firmware_sha256"],
-        str(len(player)), PLAYER_SHA256, str(len(client)), CLIENT_SHA256,
+        str(len(player)), PLAYER_SHA256, str(len(client)), client_pin,
         voice["asr_directory"] if listen else "-", station_asr.MANIFEST["capture"],
         session["model"], str(seconds), "7000" if listen else "200"))
     launch = SSHInput(command, source + player + client)
@@ -141,6 +159,7 @@ def run(controller: Controller, station_id: str, key: str, session: dict[str, An
                                 + b"\n")
             process.stdin.flush()
             del secret
+            timing["dispatched"] = round((time.monotonic() - started) * 1000)
             lock = threading.Lock()
 
             def send(line: bytes) -> None:
@@ -166,6 +185,8 @@ def run(controller: Controller, station_id: str, key: str, session: dict[str, An
                     end = event
                     break
                 connected = connected or event["event"] == "connected"
+                if event["event"] in {"connected", "first_audio"}:
+                    timing.setdefault(event["event"], round((time.monotonic() - started) * 1000))
                 if event["event"] == "tool":
                     threading.Thread(target=_answer, args=(send, event.get("message"), tool,
                                                            b"stop\n"),
@@ -180,7 +201,9 @@ def run(controller: Controller, station_id: str, key: str, session: dict[str, An
                 process.kill()
     if connected and stamp != "-":
         quasar_client._verified[station.id] = stamp  # The station's full check passed.
-    return _outcome(end, cancel)
+    timing["total"] = round((time.monotonic() - started) * 1000)
+    return {**_outcome(end, cancel), "speech_runtime": {
+        "transport": "cold", "secret_source": "minted", "timing_ms": timing}}
 
 
 def _answer(send: Callable[[bytes], None], message: Any,
@@ -261,8 +284,8 @@ class Standby:
 
     One station process captures `vqe_0` once, feeds the pinned wake detector and keeps
     eight seconds in RAM, so the command said right after «компьютер» reaches the model
-    from the wake word on while the session connects. Nothing leaves the station before
-    this PC answers a wake with a fresh one-session secret. Detector lines stay untrusted.
+    from the wake word on while the session connects. Microphone audio stays local before
+    this PC answers a wake. Idle TTS preparation is text-only. Detector lines stay untrusted.
     """
 
     def __init__(self, controller: Controller, station_id: str, key: str,
@@ -275,10 +298,15 @@ class Standby:
         self.events: queue.Queue[dict[str, Any]] | None = None
         self.lock = threading.Lock()
         self.busy = threading.Lock()  # Held for the one session the standby runs at a time.
-        # One spare speech secret kept on this PC (10 min), so a say needs no mint first.
+        # Legacy clients keep a spare secret; the new pinned build prepares the socket itself.
         self.spare: tuple[str, float] | None = None
         self.spare_used = threading.Event()
         self.connected = False
+        self.warm_supported = False
+        self.warm_until = 0.0
+        self.preparing_at: float | None = None
+        self.warm_retry_at = 0.0
+        self.launched_station: Any = None
 
     def send(self, line: bytes) -> None:
         with self.lock, contextlib.suppress(OSError, ValueError, AttributeError):
@@ -291,12 +319,14 @@ class Standby:
         iop._permitted(self.controller, station)
         voice = station.controls["voice"]
         player = read_pinned(Path(voice["live_player"]), PLAYER_SHA256, LIMIT)
-        client = read_pinned(Path(voice["live_client"]), CLIENT_SHA256, LIMIT)
+        client, client_pin = load_client(Path(voice["live_client"]))
+        self.warm_supported = client_pin == WARM_CLIENT_SHA256
+        self.launched_station = station
         stamp = _stamp(self.controller, station)
         verified = stamp != "-" and quasar_client._verified.get(station.id) == stamp
         command, source = quasar_client._loader(STANDBY_SCRIPT, (
             "verified" if verified else "full", station.controls["firmware_sha256"],
-            str(len(player)), PLAYER_SHA256, str(len(client)), CLIENT_SHA256,
+            str(len(player)), PLAYER_SHA256, str(len(client)), client_pin,
             voice["asr_directory"], station_asr.MANIFEST["capture"], wp.FT_DETECTOR_SHA256,
             "3540"))  # The detector's one-hour audio bound includes capture restarts.
         launch = SSHInput(command, source + player + client)
@@ -328,6 +358,16 @@ class Standby:
                     if event["event"] == "end":
                         end = event
                         break
+                    if event["event"] == "prepared":
+                        if self.preparing_at is not None:
+                            self.warm_until = self.preparing_at + 100  # Native bound is 120 s.
+                            self.preparing_at = None
+                        continue
+                    if event["event"] == "prepare_end":
+                        self.warm_until, self.preparing_at = 0.0, None
+                        self.warm_retry_at = time.monotonic() + (
+                            0 if event.get("reason") in {"deadline", "replaced"} else 30)
+                        continue
                     if event["event"] == "detector":
                         try:
                             wake = wakes.accept(json.dumps(event.get("line")).encode())
@@ -345,6 +385,7 @@ class Standby:
                         events.put(event)
             finally:
                 self.process = None
+                self.warm_until, self.preparing_at = 0.0, None
                 if ACTIVE.get(station.id) is self:
                     del ACTIVE[station.id]
                 with contextlib.suppress(OSError, ValueError):
@@ -370,10 +411,14 @@ class Standby:
         return self._run_session("session", session, "", deadline, cancel, on_event, tool)
 
     def _keep_spare(self, process: Any) -> None:
-        """Keep one fresh speech secret while this standby runs; it stays on this PC until used."""
+        """One idle text-only connection, or a spare secret for the old pinned client."""
         from alice_mcp import realtime_voice as rv
 
         while self.process is process and not self.stop.is_set():
+            if self.warm_supported:
+                self._prepare_speech()
+                self.stop.wait(0.5)
+                continue
             spare = self.spare
             if spare is None or time.monotonic() - spare[1] > 480:
                 try:
@@ -386,6 +431,44 @@ class Standby:
             self.spare_used.wait(5)
             self.spare_used.clear()
 
+    def _prepare_speech(self) -> None:
+        """Prepare at most one text-only socket; no text, player or microphone is dispatched."""
+        from alice_mcp import controls
+        from alice_mcp import realtime_voice as rv
+
+        now = time.monotonic()
+        if self.warm_until or now < self.warm_retry_at or self.busy.locked():
+            return
+        if self.preparing_at is not None:
+            if now - self.preparing_at > 15 and self.busy.acquire(blocking=False):
+                try:
+                    if self.preparing_at is not None:
+                        self.send(b"cancel\n")
+                        self.preparing_at = None
+                        self.warm_retry_at = now + 30
+                finally:
+                    self.busy.release()
+            return
+        try:
+            station = self.controller.station(self.station_id)
+            controls._check_permission(self.controller, station, "speech.openai")
+            if station != self.launched_station or not station.preauthorize_all_actions:
+                raise SafetyError("Speech preparation policy changed")
+            secret = self.minter(self.key, rv.speak_session(), 10)
+            if not self.busy.acquire(blocking=False):
+                return  # A foreground command wins; this unused secret is never sent.
+            try:
+                fresh = self.controller.station(self.station_id)
+                controls._check_permission(self.controller, fresh, "speech.openai")
+                if fresh != station or self.stop.is_set() or self.process is None:
+                    return
+                self.preparing_at = time.monotonic()
+                self.send(f"prepare {rv.TTS_MODEL} 120 {secret}\n".encode())
+            finally:
+                self.busy.release()
+        except Exception:
+            self.warm_retry_at = time.monotonic() + 30
+
     def say(self, text: str, *, deadline: float, cancel: threading.Event) -> dict[str, Any]:
         """speech.openai through the running standby: no SSH launch, firmware hash or mic."""
         from alice_mcp import realtime_voice as rv
@@ -396,6 +479,9 @@ class Standby:
     def _run_session(self, verb: str, session: dict[str, Any], text: str, deadline: float,
                      cancel: threading.Event, on_event: Callable[[dict[str, Any]], None],
                      tool: Callable[[str, dict[str, Any]], str] | None) -> dict[str, Any]:
+        started = time.monotonic()
+        timing: dict[str, int] = {}
+        secret_source = "minted"
         process = self.process
         seconds = min(900, int(deadline - time.monotonic()))
         if process is None or process.poll() is not None:
@@ -408,18 +494,29 @@ class Standby:
         self.events = events
         end: dict[str, Any] = {"reason": "unknown"}
         try:
+            warm = verb == "say" and time.monotonic() < self.warm_until
+            self.warm_until, self.preparing_at = 0.0, None
+            if (self.warm_supported
+                    and self.controller.station(self.station_id) != self.launched_station):
+                raise SafetyError("live_unavailable")
             try:
                 spare, self.spare = (self.spare, None) if verb == "say" else (None, self.spare)
-                if spare is not None and time.monotonic() - spare[1] < 540:
+                if warm:
+                    secret_source = "preconnected"
+                    secret = ""
+                elif spare is not None and time.monotonic() - spare[1] < 540:
                     secret = spare[0]
+                    secret_source = "spare"
                     self.spare_used.set()  # Mint the next one in the background.
                 else:
                     secret = self.minter(self.key, session,
                                          max(1.0, min(15.0, deadline - time.monotonic())))
             except Exception:
                 raise SafetyError("api_error") from None
-            self.send(f"{verb} {session['model']} {seconds} {secret}{text}\n".encode())
+            self.send((f"speak {min(seconds, 180)}{text}\n" if warm else
+                       f"{verb} {session['model']} {seconds} {secret}{text}\n").encode())
             del secret
+            timing["dispatched"] = round((time.monotonic() - started) * 1000)
             cancelled = False
             while True:
                 if cancel.is_set() and not cancelled:
@@ -435,6 +532,8 @@ class Standby:
                     end = event
                     break
                 self.connected = self.connected or event["event"] == "connected"
+                if event["event"] in {"connected", "first_audio"}:
+                    timing.setdefault(event["event"], round((time.monotonic() - started) * 1000))
                 if event["event"] == "tool":
                     threading.Thread(target=_answer, args=(self.send, event.get("message"), tool,
                                                            b"cancel\n"),
@@ -443,7 +542,9 @@ class Standby:
         finally:
             self.events = None
             self.busy.release()
-        return _outcome(end, cancel)
+        timing["total"] = round((time.monotonic() - started) * 1000)
+        return {**_outcome(end, cancel), "speech_runtime": {
+            "transport": "standby", "secret_source": secret_source, "timing_ms": timing}}
 
 
 def invoke(controller: Controller, station: Any, request: dict[str, Any]) -> dict[str, Any]:
@@ -456,11 +557,11 @@ def invoke(controller: Controller, station: Any, request: dict[str, Any]) -> dic
         if not key:
             raise ValueError
         read_pinned(Path(voice["live_player"]), PLAYER_SHA256, LIMIT)
-        read_pinned(Path(voice["live_client"]), CLIENT_SHA256, LIMIT)
+        _, client_pin = load_client(Path(voice["live_client"]))
     except (ValueError, OSError, KeyError):
         raise SafetyError("Live voice key or pinned builds unavailable") from None
     state = hashlib.sha256(repr((station.controls["firmware_sha256"], voice["live_player"],
-                                 voice["live_client"], PLAYER_SHA256, CLIENT_SHA256)).encode())
+                                  voice["live_client"], PLAYER_SHA256, client_pin)).encode())
     if request["mode"] == "inspect":
         return {"outcome": "ready", "state_sha256": state.hexdigest()}
     if request.get("expected_sha256") != state.hexdigest():
@@ -477,4 +578,5 @@ def invoke(controller: Controller, station: Any, request: dict[str, Any]) -> dic
     # A cloud failure may follow partial speech, so only a clean end counts as applied.
     return {"outcome": {"complete": "applied", "blocked": "blocked"}.get(result["outcome"],
                                                                          "unknown"),
-            "reason": result["reason"], "playback": result["player"]}
+            "reason": result["reason"], "playback": result["player"],
+            "speech_runtime": result.get("speech_runtime", {})}

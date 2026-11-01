@@ -23,6 +23,28 @@ export const MAX_AGE_MS = 60_000 // An older command is never sent: no replays a
 // busy on its newest command (src/alice_mcp/voice_indicator.py). Older than 15 s = no opencode.
 export const AGENT_STATE = "voice-agent-state.json"
 export const HEARTBEAT_MS = 5_000
+
+/** Runtime-only profile: never rewrites private config or creates a second MCP connection. */
+export async function optimizeAlice(ctx) {
+  await ctx.agent.transform((editor) => editor.update(AGENT, (agent) => {
+    agent.system = "Ты управляешь колонками владельца. Отвечай кратко по-русски. " +
+      "Для явной просьбы произнести текст сразу вызывай alice_run_station_action " +
+      "с action speech.say и parameters {text: буквальный текст}; одна просьба — один вызов. " +
+      "Не добавляй предварительные объяснения. Уточняй только неоднозначную колонку или действие. " +
+      "Разрешения, свежие одноразовые preview и проверки состояния выполняет MCP; не обходи их. " +
+      "Не повторяй unknown/do_not_retry. Сохраняй Quasar включённым. Перезагрузка только по " +
+      "прямой просьбе. Не раскрывай адреса, ключи и сырые логи. Не утверждай, что звук слышен, " +
+      "если результат подтверждает только отправку. Для актуальных фактов используй веб-поиск."
+    agent.permissions = [...agent.permissions,
+      ...["shell", "edit", "patch", "read", "glob", "grep", "skill", "subagent", "decisions"].map((action) => (
+        { action, resource: "*", effect: "deny" }
+      ))]
+  }))
+  await ctx.tool.transform((editor) => editor.update("alice_run_station_action", (tool) => {
+    tool.options = { ...tool.options, codemode: false }
+  }))
+}
+
 const READ_LIMIT = 1024 * 1024
 const ENDED = { "session.execution.succeeded": "idle", "session.execution.interrupted": "idle", "session.execution.failed": "error" }
 

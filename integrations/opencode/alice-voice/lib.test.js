@@ -5,7 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises"
 import { appendFileSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { AGENT_STATE, EMPTY_VIEW, Tail, claim, fold, message, sessionStatus, stateDir, writeAgentState } from "./lib.js"
+import { AGENT_STATE, EMPTY_VIEW, Tail, claim, fold, message, optimizeAlice, sessionStatus, stateDir, writeAgentState } from "./lib.js"
 
 const now = Date.parse("2026-10-29T20:00:30Z")
 const wake = (id, command, extra = {}) => ({
@@ -13,6 +13,27 @@ const wake = (id, command, extra = {}) => ({
   word: "компьютер", command, sources: ["mww"], trusted: false, ...extra,
 })
 const line = (value) => JSON.stringify(value) + "\n"
+
+test("compact Alice keeps device permissions and pins only the existing action tool", async () => {
+  const agent = { system: "coding prompt", permissions: [{ action: "alice_*", resource: "*", effect: "allow" }] }
+  const other = { system: "unchanged" }
+  const tool = { options: { codemode: true, other: true }, execute: () => "existing executor" }
+  const ctx = {
+    agent: { transform: async (f) => f({ update: (id, edit) => edit(id === "alice" ? agent : other) }) },
+    tool: { transform: async (f) => f({ update: (id, edit) => {
+      assert.equal(id, "alice_run_station_action")
+      edit(tool)
+    } }) },
+  }
+  await optimizeAlice(ctx)
+  assert.ok(agent.system.length < 1600 && agent.system.includes("Quasar"))
+  assert.ok(agent.system.includes("alice_run_station_action"))
+  assert.equal(agent.permissions[0].action, "alice_*")
+  assert.ok(agent.permissions.some((p) => p.action === "skill" && p.effect === "deny"))
+  assert.equal(other.system, "unchanged")
+  assert.deepEqual(tool.options, { codemode: false, other: true })
+  assert.equal(tool.execute(), "existing executor")
+})
 
 test("tail reads whole new lines, skips history and follows rotation", () => {
   const dir = mkdtempSync(join(tmpdir(), "voice-"))
@@ -137,8 +158,11 @@ test("server plugin sends each command once to one reused «Голос» alice s
   const { default: plugin } = await import("./index.js")
   const event = bus()
   const agent = () => JSON.parse(readFileSync(join(dir, AGENT_STATE), "utf8"))
-  const stopA = plugin.setup({ session, event, location: { directory: "/project" } })
-  const stopB = plugin.setup({ session, event, location: { directory: "/project" } }) // A second server.
+  const transforms = {
+    agent: { transform: async () => {} }, tool: { transform: async () => {} },
+  }
+  const stopA = await plugin.setup({ ...transforms, session, event, location: { directory: "/project" } })
+  const stopB = await plugin.setup({ ...transforms, session, event, location: { directory: "/project" } }) // A second server.
   const ts = new Date().toISOString()
   appendFileSync(path, line(wake(2, "включи свет", { ts })) + line(wake(3, "", { ts })) + line(wake(4, "который час", { ts })))
   await sleep(1300)

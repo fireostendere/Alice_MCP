@@ -207,6 +207,8 @@ def test_run_sends_pinned_builds_then_the_secret_and_reports_the_end(
     process = FakeProcess([b'{"event":"connected","ms":900}\n', b"noise\n",
                            b'{"event":"first_audio","ms":1900}\n', END])
     result, seen, argv = _live(controller, process)
+    runtime = result.pop("speech_runtime")
+    assert runtime["transport"] == "cold" and "first_audio" in runtime["timing_ms"]
     assert result == {"outcome": "complete", "reason": "idle", "barge_ins": 1, "mic": {},
                       "player": {"outcome": "complete", "frames_written": 9600,
                                  "cleanup_verified": True}}
@@ -749,6 +751,9 @@ def test_running_standby_speaks_text_without_a_new_ssh_launch_and_one_session_at
     result = controller.execute_plan(controller.take_plan(plan["plan_id"],
                                                           plan["expected_sha256"]))
     assert result["outcome"] == "applied" and len(launches) == 1
+    assert result["speech_runtime"]["transport"] == "standby"
+    assert result["speech_runtime"]["timing_ms"]["connected"] >= 0
+    assert "ek_secret" not in json.dumps(result)
     line = bytes(pipe.written).split(b"say ", 1)[1].split(b"\n", 1)[0].decode()
     model, seconds, secret, text = line.split(" ", 3)
     assert (model, secret, text) == (rv.TTS_MODEL, "ek_secret", "Привет, мир")
@@ -759,6 +764,42 @@ def test_running_standby_speaks_text_without_a_new_ssh_launch_and_one_session_at
     stop.set()
     runner.join(5)
     assert "mini1" not in lv.ACTIVE
+
+
+def test_voice_action_respects_the_same_speech_backend_binding_as_mcp(
+        live_station: tuple[Controller, Path], monkeypatch: Any) -> None:
+    from alice_mcp import controls, voice_service
+
+    controller, _ = live_station
+    station = controller.station("mini1")
+    bound = Station(**{**station.__dict__, "controls": {**station.controls, "voice": {
+        **station.controls["voice"], "say_backend": "openai"}}})
+    monkeypatch.setattr(controller, "station", lambda _: bound)
+    monkeypatch.setattr(controls, "_check_permission", lambda *a: None)
+    monkeypatch.setattr(rv, "api_key", lambda: "sk-synthetic")
+    monkeypatch.setattr(lv.native_transport, "run_action",
+                        lambda *a: pytest.fail("ignored private speech binding"))
+    spoken: list[str] = []
+    monkeypatch.setattr(lv, "run", lambda c, sid, key, session, text, **kw: (
+        spoken.append(text) or {"outcome": "complete", "reason": "idle", "player": {}}))
+    service = voice_service.VoiceService(controller)
+    service.station = "mini1"
+    result = service._action({"action": "speech.say", "parameters": {"text": "Привет"}})
+    assert result["outcome"] == "applied" and spoken == ["Привет"]
+
+
+def test_live_timings_allowlist_events_without_echoing_station_data(
+        live_station: tuple[Controller, Path]) -> None:
+    controller, _ = live_station
+    process = FakeProcess([
+        b'{"event":"connected","ms":3,"extra":"PRIVATE_SENTINEL"}\n',
+        b'{"event":"first_audio","text":"PRIVATE_SENTINEL"}\n', END])
+    result, _, _ = _live(controller, process, listen=False)
+    runtime = result["speech_runtime"]
+    assert runtime["transport"] == "cold" and runtime["secret_source"] == "minted"
+    assert 0 <= runtime["timing_ms"]["connected"] <= runtime["timing_ms"]["first_audio"]
+    assert runtime["timing_ms"]["total"] >= runtime["timing_ms"]["first_audio"]
+    assert "PRIVATE_SENTINEL" not in json.dumps(result)
 
 
 def test_a_stopped_resident_is_not_waited_for(live_station: tuple[Controller, Path],
@@ -812,3 +853,116 @@ def test_a_spare_speech_secret_is_minted_ahead_and_used_once(
     assert minted == [600, 600]  # Consumed once, replaced in the background.
     stop.set()
     runner.join(5)
+
+
+@pytest.mark.parametrize("outcome", ["idle", "failed", "not_prepared"])
+def test_preconnected_speech_consumes_connection_without_mint_or_reconnect(
+        live_station: tuple[Controller, Path], monkeypatch: Any, outcome: str) -> None:
+    import time
+
+    controller, _ = live_station
+    monkeypatch.setattr(lv, "WARM_CLIENT_SHA256", lv.CLIENT_SHA256, raising=False)
+    pipe, stop, minted = Pipe(), threading.Event(), []
+
+    def minter(*args: Any) -> str:
+        minted.append(1)
+        return "ek_synthetic"
+
+    standby = lv.Standby(controller, "mini1", "sk-key", lambda e: None, stop,
+                         popen=lambda *a, **k: pipe, minter=minter)
+    runner = threading.Thread(target=standby.run)
+    runner.start()
+    try:
+        pipe.say({"event": "detector", "line": READY})
+        until = time.monotonic() + 3
+        while b"prepare " not in pipe.written and time.monotonic() < until:
+            time.sleep(0.01)
+        assert b"prepare gpt-realtime-2.1-mini 120 ek_synthetic\n" in pipe.written
+        assert b"say " not in pipe.written and b"speak " not in pipe.written
+        pipe.say({"event": "prepared"})
+        until = time.monotonic() + 3
+        while getattr(standby, "warm_until", 0) == 0 and time.monotonic() < until:
+            time.sleep(0.01)
+        assert standby.warm_until > time.monotonic()
+
+        def station_side() -> None:
+            until = time.monotonic() + 3
+            while b"speak " not in pipe.written and time.monotonic() < until:
+                time.sleep(0.01)
+            pipe.say({"event": "first_audio"})
+            pipe.say({"event": "session_end", "reason": outcome,
+                      "player": {"outcome": "complete"}})
+            stop.set()  # Do not prepare a second connection in this test.
+
+        threading.Thread(target=station_side).start()
+        result = standby.say("Привет", deadline=time.monotonic() + 30, cancel=threading.Event())
+        assert result["outcome"] == {"idle": "complete", "failed": "unknown",
+                                     "not_prepared": "blocked"}[outcome]
+        assert result["speech_runtime"]["secret_source"] == "preconnected"
+        assert result["speech_runtime"]["transport"] == "standby"
+        assert bytes(pipe.written).count(b"speak ") == 1
+        assert b"say " not in pipe.written and len(minted) == 1
+        assert standby.warm_until == 0
+    finally:
+        stop.set()
+        runner.join(5)
+
+
+def test_unreviewed_client_cannot_enable_preconnection(tmp_path: Path) -> None:
+    path = tmp_path / "client"
+    path.write_bytes(b"unreviewed client")
+    with pytest.raises(SafetyError):
+        lv.load_client(path)
+
+
+def test_preparation_rechecks_permission_and_cannot_cancel_active_speech(
+        live_station: tuple[Controller, Path], monkeypatch: Any) -> None:
+    import time
+
+    from alice_mcp import controls
+
+    controller, _ = live_station
+    standby = lv.Standby(controller, "mini1", "sk-key", lambda e: None, threading.Event(),
+                         minter=lambda *a: pytest.fail("minted under revoked policy"))
+    standby.launched_station = controller.station("mini1")
+    standby.process = Pipe()
+    monkeypatch.setattr(controls, "_check_permission",
+                        lambda *a: (_ for _ in ()).throw(SafetyError("revoked")))
+    standby._prepare_speech()
+    assert not standby.process.written and standby.warm_retry_at > time.monotonic()
+    standby.warm_retry_at = 0
+    standby.preparing_at = time.monotonic() - 20
+    standby.busy.acquire()
+    standby._prepare_speech()
+    assert not standby.process.written
+    standby.busy.release()
+    standby._prepare_speech()
+    assert standby.process.written == b"cancel\n" and standby.preparing_at is None
+
+
+def test_normal_preconnection_expiry_renews_without_a_failure_backoff(
+        live_station: tuple[Controller, Path], monkeypatch: Any) -> None:
+    import time
+
+    controller, _ = live_station
+    monkeypatch.setattr(lv, "WARM_CLIENT_SHA256", lv.CLIENT_SHA256)
+    pipe, stop = Pipe(), threading.Event()
+    standby = lv.Standby(controller, "mini1", "sk-key", lambda e: None, stop,
+                         popen=lambda *a, **k: pipe, minter=lambda *a: "ek_synthetic")
+    runner = threading.Thread(target=standby.run)
+    runner.start()
+    try:
+        until = time.monotonic() + 3
+        while b"prepare " not in pipe.written and time.monotonic() < until:
+            time.sleep(0.01)
+        assert b"prepare " in pipe.written
+        pipe.say({"event": "prepared"})
+        pipe.say({"event": "prepare_end", "reason": "deadline"})
+        until = time.monotonic() + 3
+        while bytes(pipe.written).count(b"prepare ") < 2 and time.monotonic() < until:
+            time.sleep(0.01)
+        assert bytes(pipe.written).count(b"prepare ") == 2
+        assert b"speak " not in pipe.written and b"say " not in pipe.written
+    finally:
+        stop.set()
+        runner.join(5)

@@ -13,6 +13,7 @@ import {
   Tail,
   claim,
   message,
+  optimizeAlice,
   prune,
   readAgentState,
   sessionStatus,
@@ -24,7 +25,8 @@ const POLL_MS = 500
 
 export default {
   id: "alice-mcp.voice",
-  setup(ctx) {
+  async setup(ctx) {
+    await optimizeAlice(ctx)
     const dir = stateDir()
     const tail = new Tail(join(dir, "voice-events.jsonl")).skip()
     const directory = ctx.location?.directory

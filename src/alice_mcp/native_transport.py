@@ -212,10 +212,14 @@ def probe(station: Station, name: str) -> dict[str, Any]:
 
 def run_action(controller: Controller, station: Station, action: str,
                parameters: dict[str, Any]) -> dict[str, Any]:
+    started = time.monotonic()
     preview = preview_action(controller, station, action, parameters)
-    return controller.execute_plan(controller.take_plan(
+    applying = time.monotonic()
+    result = controller.execute_plan(controller.take_plan(
         preview["plan_id"], preview["expected_sha256"],
     ))
+    return {**result, "timing_ms": {"preview": round((applying - started) * 1000),
+                                   "apply": round((time.monotonic() - applying) * 1000)}}
 
 
 def _permission(controller: Controller, station: Station, action: str) -> None:

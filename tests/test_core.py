@@ -148,6 +148,45 @@ def test_inventory_private_errors_do_not_echo_values(inventory: Path) -> None:
     assert "SENSITIVE_SENTINEL" not in str(error.value)
 
 
+def test_process_client_binding_preserves_inventory_and_binds_effective_state(
+    inventory: Path, monkeypatch: Any,
+) -> None:
+    data = json.loads(inventory.read_text())
+    data["stations"][0].update(model="station-mini", preauthorize_all_actions=False,
+                               controls={"firmware_sha256": "a" * 64, "voice": {
+                                   "source": "station_live",
+                                   "asr_directory":
+                                       "/bkupgrade/data/opt/alice-local-asr-aaaaaaaaaaaa",
+                                   "live_client": "/PRIVATE/old-client",
+                                   "live_player": "/PRIVATE/player"}})
+    inventory.write_text(json.dumps(data))
+    before = inventory.read_bytes()
+    original = load_inventory(inventory)["desk"]
+    monkeypatch.setenv("ALICE_MCP_LIVE_CLIENTS", '{"desk":"/PRIVATE/reviewed-client"}')
+    selected = load_inventory(inventory)["desk"]
+    assert selected.controls["voice"]["live_client"] == "/PRIVATE/reviewed-client"
+    assert selected.controls["voice"]["live_player"] == "/PRIVATE/player"
+    assert selected.config_sha256 != original.config_sha256
+    assert selected.trust_sha256 == original.trust_sha256
+    assert selected.preauthorize_all_actions is False
+    assert selected.identity_file == original.identity_file and inventory.read_bytes() == before
+    monkeypatch.delenv("ALICE_MCP_LIVE_CLIENTS")
+    assert load_inventory(inventory)["desk"] == original
+
+
+@pytest.mark.parametrize("value", [
+    "not json", "[]", '{"unknown":"/PRIVATE/client"}', '{"desk":"relative"}',
+    '{"desk":"/PRIVATE/client","desk":"/PRIVATE/other"}', '{"desk":false}',
+])
+def test_invalid_process_client_bindings_fail_closed_without_private_details(
+    inventory: Path, monkeypatch: Any, value: str,
+) -> None:
+    monkeypatch.setenv("ALICE_MCP_LIVE_CLIENTS", value)
+    with pytest.raises(SafetyError) as error:
+        load_inventory(inventory)
+    assert value not in str(error.value) and "/PRIVATE" not in str(error.value)
+
+
 def test_remote_output_is_allowlisted_not_redacted() -> None:
     output = "uptime=12.3\nmem_total=100\nmem_available=20\narch=armv7l\nSENSITIVE_SENTINEL\n"
     assert parse_probe("health", output) == {

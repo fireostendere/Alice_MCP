@@ -840,3 +840,16 @@ def test_stock_step_after_the_wake_is_not_repeated_by_a_late_model_call(
     louder = {"action": "quasar.volume", "parameters": {"step": "louder"}}
     assert voice._action(louder) == {"outcome": "applied", "source": "quasar_spotter"}
     assert not sent
+
+
+def test_status_exposes_only_preconnection_readiness(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    voice = service(tmp_path, monkeypatch, station(tmp_path))
+    voice._standby = SimpleNamespace(warm_supported=True, warm_until=time.monotonic() + 10,
+                                     preparing_at=None, key="PRIVATE_SENTINEL")
+    assert voice.status()["speech_connection"] == {
+        "supported": True, "ready": True, "preparing": False}
+    assert "PRIVATE_SENTINEL" not in json.dumps(voice.status())
+    voice._standby.warm_until = 0
+    assert voice.status()["speech_connection"]["ready"] is False

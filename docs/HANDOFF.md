@@ -1,8 +1,133 @@
 # Voice pilot and development handoff
 
-Updated 2026-10-31. Start with [AGENTS.md](../AGENTS.md) and
+Updated 2026-11-01. Start with [AGENTS.md](../AGENTS.md) and
 [CONTRIBUTING.md](../CONTRIBUTING.md). This is a tested Mini 1 pilot, not general
 Station/firmware qualification or a fully offline conversational assistant.
+
+## Current smart-speaker work
+
+The active Mini 1 route is now `station_oneshot`: one generated answer per wake,
+microphone cutoff at question endpoint, then session close. Explicit
+`start_conversation` is the only transition to free conversation. Belgrade is the
+weather default. Open-Meteo weather/BBC headlines are validated and cached in RAM
+for at most five minutes, not as prepared spoken answers. Time comes from a fresh
+host-clock snapshot. Late tool outputs cannot enter a new session; repeated
+conversation transitions are harmless; silent-wake handling preserves queued speech.
+
+Latest optimization is active: `command_vad_silence_ms=200`, independently of
+`vad_silence_ms=350` for conversation; both accept integer 200–1000, excluding bool.
+Explicit conversation restores its configured timing and full tools. Compact
+weather/news voice context omits URLs and redundant metadata without mutating
+the source caches. A fresh snapshot also omits its redundant fetch tool for that
+one question; missing snapshots retain the fallback.
+
+The final one-shot voice is **coral**; chat-triggered literal speech stays marin.
+Provider-only checks found correct Russian text but unreliable ASR recovery of
+marin/cedar audio; coral's synthetic PCM and subsequent device output were recovered
+correctly. No native transport change was made to obtain that result.
+
+Latest input optimization disables the extra cloud filter only for one-shot
+processed `vqe_0`; explicit conversation restores `far_field` and its own VAD.
+The weather observation time is no longer in the short-answer prompt, avoiding a
+competing clock value. The validated cache retains it. An intermediate six-minute
+clock error is explicitly excluded from accepted answers.
+
+Latest three paired weather trials: ours 1.56/1.41/1.54 s, stock 1.62/1.64/1.54 s;
+medians **1.54/1.62 s**. A further final-source weather trial also gave 1.54 s.
+Latest paired clock trials: ours 1.64/1.38/1.59 s, stock 1.37/1.63/1.22 s; medians
+**1.59/1.37 s**, still slower. Translation gave ~1.39 s, followed by no answer to
+an unwoken follow-up. A news trial gave ~1.56 s before interruption; its transcript
+was not reliably verbatim. A prior news attempt was stopped before measurable
+audible onset and is not a latency acceptance sample. Stock news earlier began
+with a preamble at ~1.83 s, not a substantive-news comparison. News and an
+explicitly enabled conversation were stopped with recognized «хватит» and verified
+native cleanup. These few generated-voice trials are not human latency percentiles
+or a universal speed guarantee. Stop colour also remains unresolved. See the
+[current acceptance evidence](VOICE_ARCHITECTURE.md#one-question-one-generated-answer).
+The reviewed one-shot client pin is
+`c64164b24e1cff594426c81fc091cae68f6268e577bfc2893ff19871c75856d7`;
+the active project-only binding selects that build. No inventory or SSH setting
+was replaced. The following fast-feedback and earlier chat evidence is historical.
+
+Earlier one-shot regression: **1,820 Python tests passed, 13 skipped**, one existing
+fork deprecation warning; 15 Node integration tests, ruff, mypy and MCP contract
+checks passed. The package/privacy checks are recorded separately from the acoustic
+acceptance: passing tests do not establish stock-speed parity or fix stop colour.
+
+Latest full publication regression, including the verification-mode fix:
+**1,831 passed, 13 skipped**,
+with the existing
+fork deprecation warning; 15 Node tests, ruff, mypy and MCP contract passed. A run
+under heavy host load had failures and timed out; a later complete rerun passed
+without loosening tests. Do not describe the interrupted run as passing.
+
+Publication review also binds prepared indicator players to their verification
+mode. A native/SSH mode transition recreates the helper instead of renewing a hold
+prepared for the other mode. The synthetic regression switches native→SSH, changes
+firmware during idle preparation, and requires activation to block before any
+coloured frame; same-mode native state refresh still reuses the prepared player.
+
+The strict speed criterion remains unmet: the latest paired clock median is about
+220 ms slower than stock; there are no human-voice latency percentiles. This is a
+concrete remaining acceptance
+gap, not proof that no further local optimization can help. The current tool
+profile does not expose `goal_update`; discovery returned no match, so no new
+lifecycle status update was performed in this continuation.
+
+Rejected follow-up candidates: halving prompt bytes showed no latency gain;
+100-ms VAD split a command with a 150-ms internal pause before it finished. The
+native queue/poll/ALSA review did not identify a confirmed removable first-audio
+hold. Do not lower buffers or claim a backend-independent lower bound from that.
+
+The pilot uses `station_live` on Mini 1, a pinned direct Realtime client,
+command/conversation-specific endpointing and a red indicator (required by the owner).
+Ordinary Alice chat questions use the guarded `ask_station` tool: host-clock time,
+searched news/weather/facts, one spoken answer and separate source links. The
+plugin's station binding and final context hook preserve the speaker role despite
+later config-agent transforms; the bound chat also carries durable instructions.
+There is still one project-local `alice` connection. Do not reload every OpenCode
+location to refresh it or leave a second MCP process holding the voice-owner lock.
+
+Fast red feedback is now active: the SSH indicator prepares its player even when
+the resident channel is unavailable. A pinned read-only client identity check
+avoids rehashing unchanged firmware at wake; the first full hash and rehash on
+metadata changes remain mandatory. Two common-clock camera/microphone trials
+measured about 350 / 360 ms from the generated wake word's end to the red optical
+rise, with 50-ms video resolution and uncalibrated sensor latency. Inspected
+recognition-to-player acknowledgements were 49 / 46 ms, not the acoustic boundary.
+Earlier fast-feedback regression: 1,799 Python tests passed, 13 skipped; 15 Node tests, lint/types,
+contract/catalog, package and privacy checks passed. The existing fork deprecation
+warning remains.
+
+The latest recognized «хватит» camera trials confirm a stock purple/blue pulse.
+A bounded red acknowledgement through a second player failed visually and was
+removed from source and the running MCP. The shared cancellation path remains;
+synthetic regressions cover both «стоп» and «хватит». Fast red wake onset is unchanged.
+Stop colour is **unresolved**, not an accepted red response. A fixed read-only
+`LedCapability` subscription produced no matching snapshot within five seconds;
+this neither establishes support nor proves absence. Generic animation schemas
+are not Mini 1 capability/access evidence. No candidate native animation write
+was attempted; Quasar and the stock spotter remain enabled.
+
+Post-rollback validation: **1,800 Python tests passed, 13 skipped**, with the existing
+fork deprecation warning; 15 Node tests, lint/types, MCP contract and explicit-source
+privacy checks passed. The unrestricted checkout-tree scanner rejects private/local
+paths as expected; those paths were not changed or included in the package.
+
+Measured acoustic gaps on generated phrases: approximately 1.90 s for arithmetic
+and 1.65 s for a separate time question, versus a 2.50-s baseline. News produced an
+initial reaction in about 1.45 s, not a substantive searched answer in that time.
+Stock stop now also cancels chat-triggered speech: verified native cleanup and
+silence in the bounded microphone capture. The ring-only colour transition is
+**not visually qualified**; changing to the stock palette is not an acceptable
+workaround. Do not claim a universal two-second response or visual acceptance.
+
+See [current architecture and evidence](VOICE_ARCHITECTURE.md#current-smart-speaker-pilot-2026-11-01)
+for exact boundaries, build pin, successful weather/news tests and the one
+unreplayed TTS failure. Remaining priorities: real-human/repeated-turn latency,
+ring-only visual qualification, cloud failure rate, long searched responses and
+boot persistence. Raw room recordings, private configuration and binaries remain
+excluded from Git and distributions. The older on-station-ASR baseline follows.
 
 ## Implemented
 

@@ -26,6 +26,18 @@ compatibility with every OpenCode version or physically verify LEDs/sound.
 
 ## Compact Alice profile
 
+Set the plugin option `station` to an explicit owner-managed alias to bind the
+`alice` agent to that speaker. Ordinary questions call `alice_ask_station`: time
+comes from the PC clock with its UTC offset; news, weather and facts use an actual
+web search, with citation links returned separately from spoken text. A weather
+request without a city uses Belgrade, Serbia; an explicitly named city takes priority.
+The successful tool result is already spoken; the agent must not speak it again.
+Bound Alice tool executors reject a different station even if a question names
+one; other agents and their existing permissions are not changed by that binding.
+The final `context` hook also adds these instructions after config-agent transforms,
+without deleting project/security system sources. Existing development tools are
+removed from Alice's assembled request, not from other agents' requests.
+
 The server plugin now applies a runtime-only compact system prompt to the existing
 `alice` agent and denies development/file/skill/delegation tools for that profile.
 It preserves station-action permissions, model selection, project/security

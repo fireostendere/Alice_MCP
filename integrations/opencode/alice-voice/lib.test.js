@@ -18,21 +18,38 @@ test("compact Alice keeps device permissions and pins only the existing action t
   const agent = { system: "coding prompt", permissions: [{ action: "alice_*", resource: "*", effect: "allow" }] }
   const other = { system: "unchanged" }
   const tool = { options: { codemode: true, other: true }, execute: () => "existing executor" }
+  let contextHook
   const ctx = {
+    options: { station: "desk" },
+    session: { hook: async (name, hook) => { assert.equal(name, "context"); contextHook = hook } },
     agent: { transform: async (f) => f({ update: (id, edit) => edit(id === "alice" ? agent : other) }) },
     tool: { transform: async (f) => f({ update: (id, edit) => {
-      assert.equal(id, "alice_run_station_action")
+      assert.ok(["alice_run_station_action", "alice_ask_station"].includes(id))
       edit(tool)
     } }) },
   }
   await optimizeAlice(ctx)
   assert.ok(agent.system.length < 1600 && agent.system.includes("Quasar"))
   assert.ok(agent.system.includes("alice_run_station_action"))
+  assert.ok(agent.system.includes("alice_ask_station") && agent.system.includes("desk"))
+  assert.ok(agent.system.includes("не озвучивай повторно"))
   assert.equal(agent.permissions[0].action, "alice_*")
   assert.ok(agent.permissions.some((p) => p.action === "skill" && p.effect === "deny"))
   assert.equal(other.system, "unchanged")
   assert.deepEqual(tool.options, { codemode: false, other: true })
   assert.equal(tool.execute(), "existing executor")
+  assert.match((await tool.execute({ station_id: "other" }, { agent: "alice" })).content,
+    /blocked/)
+  assert.equal(await tool.execute({ station_id: "desk" }, { agent: "alice" }), "existing executor")
+  assert.equal(await tool.execute({ station_id: "other" }, { agent: "build" }), "existing executor")
+  const context = { agent: "alice", system: [{ type: "text", text: "Late project safety rules" }],
+    tools: { shell: {}, skill: {}, alice_ask_station: {} } }
+  contextHook(context)
+  assert.equal(context.system[0].text, "Late project safety rules")
+  assert.ok(context.system.some((p) => p.text.includes("alice_ask_station")))
+  assert.deepEqual(Object.keys(context.tools), ["alice_ask_station"])
+  contextHook(context)
+  assert.equal(context.system.length, 2) // Retry/model continuation does not duplicate it.
 })
 
 test("tail reads whole new lines, skips history and follows rotation", () => {
@@ -143,6 +160,7 @@ test("server plugin sends each command once to one reused «Голос» alice s
   const sent = []
   const sessions = []
   const session = {
+    hook: async () => {},
     list: async () => ({ data: sessions, cursor: {} }),
     get: async ({ sessionID }) => sessions.find((s) => s.id === sessionID),
     create: async (input) => {

@@ -29,8 +29,11 @@ Never request credentials, factory keys or private device files.
    retail rootfs are different targets. Its documented data/Wi-Fi prerequisites
    are not the same as Plum's. A missing volume or trust-store file is a stop,
    never permission to guess a partition, flash boot or format UBI.
-4. Pickle has only an existing-root persistence description. Max has no confirmed
-   root; Orion's network route failed. Do not manufacture a supported path.
+4. Pickle has only an existing-root persistence description. At the pinned
+   revision Max has no confirmed root and Orion's network route failed; the live
+   wiki has since added Max ADB, Mini 1 own-image-over-USB and Orion DNS routes
+   that this skill has not reviewed. Read the current page for those models and
+   do not manufacture a supported path from this summary.
 5. Android first-generation Station has a separate **boot-image write** route.
    AliceBridge's reported Lite 1/Mini 1/Midi/Lite 2 tests do not establish every
    server profile; Shizuku networking remains experimental. Phone-kernel rooting

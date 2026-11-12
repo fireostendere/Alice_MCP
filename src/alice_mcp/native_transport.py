@@ -362,7 +362,7 @@ def play_pcm(controller: Controller, station: Station, audio: bytes, *,
     if "local_tts" not in station.controls:
         raise SafetyError("Resident local PCM playback is not configured")
     parameters = wav_parameters(audio)
-    with controller._execution_lock:  # Never over the agent's own speech.
+    with controller.execution_lock(station.id):  # Never over the agent's own speech.
         if cancel is not None and cancel.is_set():
             return {"outcome": "cancelled", "cleanup_verified": True, "do_not_retry": True}
         state = (_state(controller, station, "speech.say", cancellable=True)

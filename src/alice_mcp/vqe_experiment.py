@@ -369,7 +369,7 @@ def preview(controller: Controller, station_id: str, item: Candidate) -> dict[st
 def apply(controller: Controller, plan_id: str, expected: str, item: Candidate) -> dict[str, Any]:
     try:
         plan = controller.take_plan(plan_id, expected)
-        with controller._execution_lock:
+        with controller.execution_lock(plan.station.id):
             station = controller.station(plan.station.id)
             ssh = _ssh(station)
             if (station != plan.station or plan.action != "vqe.metadata_experiment"
@@ -891,7 +891,7 @@ def mute_snapshot(controller: Controller, station_id: str, binary: bytes,
     identifier = controller.store_plan(station, "microphone.mute_probe", digest,
                                        remote_sha256=state["state_sha256"])
     plan = controller.take_plan(identifier, digest)
-    with controller._execution_lock:
+    with controller.execution_lock(station_id):
         fresh = controller.station(station_id)
         if (fresh != station or _ssh(fresh).trust_sha256 != ssh.trust_sha256
             or controller.clock() >= plan.expires):

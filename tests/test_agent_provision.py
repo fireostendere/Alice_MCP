@@ -472,3 +472,40 @@ def test_bootstrap_file_transaction_and_cleanup_are_bounded(
         again = subprocess.run(args, input=payload, capture_output=True, check=True, timeout=5)
         assert json.loads(again.stdout)["outcome"] == "blocked"
         assert {p.name for p in target.iterdir()} == set(agent_provision.NAMES)
+
+
+@pytest.mark.parametrize("reply", ["", "not json", "5", '{"outcome":"ready","state_sha256":5}'])
+def test_unparseable_inspection_output_is_blocked_not_raised(provision: Any, monkeypatch: Any,
+                                                             reply: str) -> None:
+    controller, directory, _ = provision
+    package = agent_provision.bundle(controller.station("desk"), directory, layout="direct")
+    good = controller.runner
+    transfers: list[int] = []
+    monkeypatch.setattr(agent_provision, "_transfer", lambda *a: transfers.append(1))
+    preview = agent_provision.preview(controller, "desk", package)
+    monkeypatch.setattr(controller, "runner", lambda *a: reply)
+    with pytest.raises(SafetyError):
+        agent_provision.preview(controller, "desk", package)
+    result = agent_provision.apply(controller, preview["plan_id"], preview["expected_sha256"],
+                                   package)
+    assert result["outcome"] == "blocked" and not transfers
+    monkeypatch.setattr(controller, "runner", good)
+    assert agent_provision.apply(controller, preview["plan_id"], preview["expected_sha256"],
+                                 package)["outcome"] == "blocked"  # Consumed, never re-sent.
+
+
+@pytest.mark.parametrize("outcome", ["blocked", "installed"])
+def test_clean_blocked_reply_survives_the_unread_package_pipe(
+        provision: Any, monkeypatch: Any, outcome: str) -> None:
+    # The helper refused and exited before reading the package: the writer's EPIPE is
+    # expected then, but it still makes any other reply uncertain.
+    controller, _, _ = provision
+    program = "print('{\"outcome\":\"" + outcome + "\"}', flush=True)"
+    monkeypatch.setattr(agent_provision, "ssh_argv", lambda *_: [sys.executable, "-c", program])
+    data = b"\0" * (4 * 1024 * 1024)
+    if outcome == "blocked":
+        assert agent_provision._transfer(controller.station("desk"), "unused", data) == {
+            "outcome": "blocked"}
+    else:
+        with pytest.raises(SafetyError, match="uncertain"):
+            agent_provision._transfer(controller.station("desk"), "unused", data)

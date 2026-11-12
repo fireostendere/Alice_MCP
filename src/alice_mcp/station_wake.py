@@ -39,7 +39,7 @@ def result(value: dict[str, Any]) -> dict[str, Any]:
 
 def listen_once(controller: Controller, station_id: str) -> dict[str, Any]:
     """Fresh consumed-once host and resident state for one 20 s window; never retries."""
-    with controller._execution_lock:
+    with controller.execution_lock(station_id):
         station = controller.station(station_id)
         io_channel_pilot._permitted(controller, station)
         if (not station.native_mcp

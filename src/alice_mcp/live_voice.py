@@ -70,6 +70,12 @@ BLOCKED = frozenset({"not_owner", "invalid_request", "tmp_unavailable", "pin_mis
                      "not_prepared"})
 CLOUD = frozenset({"api_error", "response_failed", "connect_failed", "tls_failed",
                     "tls_unavailable", "ca_unavailable", "handshake_rejected"})
+# Everything the fixed scripts and native/live_client.c can report; the rest is "unknown".
+REASONS = BLOCKED | CLOUD | frozenset({
+    "idle", "deadline", "stopped", "failed", "player_failed", "output_limit",
+    "unexpected_warm_event", "invalid_control", "wake_failed", "wake_unverified"})
+STANDBY_SECONDS = 3540  # The detector's one-hour audio bound includes capture restarts.
+KILL_MARGIN = 30.0  # Host kill after a session's own bound: a stuck remote holds no lock.
 
 
 def load_client(path: Path) -> tuple[bytes, str]:
@@ -132,7 +138,12 @@ def run(controller: Controller, station_id: str, key: str, session: dict[str, An
     started = time.monotonic()
     timing: dict[str, int] = {}
     station = controller.station(station_id)
-    iop._permitted(controller, station)
+    if listen:
+        iop._permitted(controller, station)
+    else:  # Speak-only: the permission its preview checked; approval is the caller's.
+        from alice_mcp import controls
+
+        controls._check_permission(controller, station, "speech.openai")
     voice = station.controls["voice"]
     player = read_pinned(Path(voice["live_player"]), PLAYER_SHA256, LIMIT)
     client, client_pin = load_client(Path(voice["live_client"]))
@@ -152,6 +163,9 @@ def run(controller: Controller, station_id: str, key: str, session: dict[str, An
     connected = False
     with popen(ssh_argv(_ssh(station), launch), stdin=subprocess.PIPE,
                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+        timer = threading.Timer(seconds + KILL_MARGIN, process.kill)
+        timer.daemon = True
+        timer.start()
         try:
             # The station checks pins and firmware while this PC mints the secret.
             process.stdin.write(launch.data)
@@ -198,6 +212,7 @@ def run(controller: Controller, station_id: str, key: str, session: dict[str, An
                                      name="alice-live-tool", daemon=True).start()
                 on_event(event)
         finally:
+            timer.cancel()
             with contextlib.suppress(OSError, ValueError):
                 process.stdin.close()
             try:
@@ -231,22 +246,34 @@ def _answer(send: Callable[[bytes], None], message: Any,
         ensure_ascii=False, separators=(",", ":")).encode() + b"\n")
 
 
+def _reason(value: Any) -> str:
+    return value if isinstance(value, str) and value in REASONS else "unknown"
+
+
 def _outcome(end: dict[str, Any], cancel: threading.Event) -> dict[str, Any]:
-    reason = end.get("reason")
-    reason = reason if isinstance(reason, str) and len(reason) <= 64 else "unknown"
-    report: dict[str, Any] = end["player"] if type(end.get("player")) is dict else {}
+    """Station lines are untrusted: fixed reasons and typed fields only reach the result."""
+    reason = _reason(end.get("reason"))
+    raw: dict[str, Any] = end["player"] if type(end.get("player")) is dict else {}
+    report: dict[str, Any] = {
+        k: raw[k] for k in ("frames_written", "flushes", "underruns_recovered")
+        if type(raw.get(k)) is int and raw[k] >= 0}
+    if isinstance(raw.get("outcome"), str) and raw["outcome"] in {
+            "complete", "unknown", "blocked"}:
+        report["outcome"] = raw["outcome"]
+    if type(raw.get("cleanup_verified")) is bool:
+        report["cleanup_verified"] = raw["cleanup_verified"]
+    barge_ins = end.get("barge_ins")
     finished = reason in {"idle", "deadline"} or reason == "stopped" and cancel.is_set()
     outcome = ("blocked" if reason in BLOCKED else "cloud_failed" if reason in CLOUD
                else "complete" if finished and report.get("outcome") == "complete"
                else "unknown")  # Playback may have happened: never retried.
     mic: dict[str, Any] = end["mic"] if type(end.get("mic")) is dict else {}
-    return {"outcome": outcome, "reason": reason, "barge_ins": end.get("barge_ins", 0),
+    return {"outcome": outcome, "reason": reason,
+            "barge_ins": barge_ins if type(barge_ins) is int and barge_ins >= 0 else 0,
             "mic": {k: mic[k] for k in ("buffered_ms", "sent_ms", "peak", "sent_peak",
                                         "mean_square")
                     if type(mic.get(k)) is int},
-            "player": {k: report[k] for k in ("outcome", "frames_written", "flushes",
-                                              "underruns_recovered", "cleanup_verified")
-                       if k in report}}
+            "player": report}
 
 
 STANDBY_SCRIPT = r"""set -u
@@ -339,12 +366,15 @@ class Standby:
             "verified" if verified else "full", station.controls["firmware_sha256"],
             str(len(player)), PLAYER_SHA256, str(len(client)), client_pin,
             voice["asr_directory"], station_asr.MANIFEST["capture"], wp.FT_DETECTOR_SHA256,
-            "3540"))  # The detector's one-hour audio bound includes capture restarts.
+            str(STANDBY_SECONDS)))
         launch = SSHInput(command, source + player + client)
         wakes = station_asr.WakeEvents()
         end: dict[str, Any] = {"reason": "unknown"}
         with self.popen(ssh_argv(_ssh(station), launch), stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+            timer = threading.Timer(STANDBY_SECONDS + KILL_MARGIN, process.kill)
+            timer.daemon = True
+            timer.start()
             try:
                 process.stdin.write(launch.data)
                 process.stdin.flush()
@@ -395,6 +425,7 @@ class Standby:
                     if events is not None:
                         events.put(event)
             finally:
+                timer.cancel()
                 self.process = None
                 self.warm_until, self.preparing_at = 0.0, None
                 if ACTIVE.get(station.id) is self:
@@ -409,8 +440,7 @@ class Standby:
             quasar_client._verified[station.id] = stamp
         reason = end.get("reason")
         done = reason == "deadline" or reason == "stopped" and self.stop.is_set()
-        return {"outcome": "complete" if done else "unknown",
-                "reason": reason if isinstance(reason, str) and len(reason) <= 64 else "unknown"}
+        return {"outcome": "complete" if done else "unknown", "reason": _reason(reason)}
 
     def session(self, session: dict[str, Any], text: str, *, listen: bool, deadline: float,
                 cancel: threading.Event,
@@ -580,7 +610,13 @@ class Standby:
             del secret
             timing["dispatched"] = round((time.monotonic() - started) * 1000)
             cancelled = False
+            limit = time.monotonic() + seconds + KILL_MARGIN
             while True:
+                if time.monotonic() >= limit:
+                    # Past the session's own bound: end the stuck transport so no late
+                    # end reaches a later session. The outcome stays unknown, no retry.
+                    process.kill()
+                    break
                 if cancel.is_set() and not cancelled:
                     self.send(b"cancel\n")
                     cancelled = True

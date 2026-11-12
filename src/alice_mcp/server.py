@@ -19,6 +19,7 @@ from alice_mcp import (
     controls,
     device_runtime,
     knowledge,
+    models,
     owned_jobs,
     station_assistant,
     voice_service,
@@ -81,6 +82,8 @@ def get_capabilities() -> dict[str, Any]:
                                 "fresh preview", "expected_sha256",
                                 "native approval unless privately preauthorized"],
         "device_actions": sorted(device_runtime.ACTIONS),
+        # Every known model; get_model_interfaces(model) has its action matrix and gaps.
+        "models": models.lineup(),
         "device_requirements": ["reviewed firmware digest", "per-action private policy",
                                 "stock shell utilities for Mini 3 led.effect and "
                                 "Mini 1 capture/replay/pulse/animate; "
@@ -230,8 +233,8 @@ async def apply_service_action(
 
 @mcp.tool(annotations=READ)
 def get_model_interfaces(model: str) -> dict[str, Any]:
-    """Read source-linked LED/audio/GPIO facts and unknowns; never guesses writable pins."""
-    return _safe(device_runtime.interfaces, model)
+    """Model profile, per-action adapter matrix, LED/audio/GPIO facts and open gaps; no access."""
+    return _safe(models.describe, model)
 
 
 @mcp.tool(annotations=READ)

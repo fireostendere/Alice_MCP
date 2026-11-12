@@ -40,7 +40,8 @@ SHOW_EFFECTS = SHOW_COLOR_EFFECTS | {"rainbow", "spin", "off", "police", "calibr
 SHOW_INTERVAL_MS = {1: 500, 2: 400, 3: 300, 4: 250, 5: 200}
 SHOW_LEVEL = 16
 COLORS = ("red", "green", "blue")
-LED_ZONES = {"station-mini": 6, "station-lite": 3, "station-mini3": 6}
+LIKE_LITE = frozenset({"station-lite", "fiero-hi"})  # One Micro board, two brands.
+LED_ZONES = {"station-mini": 6, "station-lite": 3, "fiero-hi": 3, "station-mini3": 6}
 HUES = ((16, 0, 0), (16, 6, 0), (16, 16, 0), (6, 16, 0), (0, 16, 0), (0, 16, 6),
         (0, 16, 16), (0, 6, 16), (0, 0, 16), (6, 0, 16), (16, 0, 16), (16, 0, 6))
 BREATH = (1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2)  # Eighths of the requested colour.
@@ -58,7 +59,14 @@ SLOTS = {"spotter_start", "spotter_cancel", "volume_sound", "notification_sound"
 MODELS = {"station-lite", "station-lite2", "station-mini", "station-mini2", "station-mini3",
           "station-mini3-pro", "station-2", "station-midi", "station-max",
           "station-3", "station-street", "station-gen1", "yandex-hub",
-          "jbl-link-music"}
+          "jbl-link-music", "fiero-hi", "station-max-zigbee", "jbl-link-portable",
+          "station-duo-max", "station-pro"}
+MINI1 = frozenset({"station-mini"})
+# The model gate: actions with model-specific adapters. An absent action is runtime-probed.
+ACTION_MODELS = {"led.show": frozenset(LED_ZONES), "speech.say": MINI1 | {"station-mini3"},
+                 **dict.fromkeys(("led.capture", "led.replay", "led.pulse", "led.animate",
+                                  "speech.listen", "speech.openai", "quasar.volume",
+                                  "alice.activation"), MINI1)}
 BASE = "/data/opt/alice-mcp"
 CAPTURE_BASE = BASE + "/led-captures"
 CAPTURE_ROOTS = ("/sys/kernel/tracing", "/sys/kernel/debug/tracing")
@@ -329,7 +337,7 @@ def led_layout(model: str) -> list[list[Any]]:
     micro:{red,green,blue}:ring{1,2,3} node order; Mini 3 is its BGR framebuffer.
     """
     _require(model in LED_ZONES, "unsupported_led")
-    if model == "station-lite":
+    if model in LIKE_LITE:
         return [[j % 3, COLORS[j // 3]] for j in range(9)]
     order = (2, 1, 0) if model == "station-mini3" else (0, 1, 2)
     return [[j // 3, COLORS[order[j % 3]]] for j in range(18)]
@@ -431,7 +439,8 @@ def _media(data: bytes, path: str) -> bool:
 def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, Any],
                         model: str) -> dict[str, Any]:
     try:
-        _require(model in MODELS and isinstance(action, str) and action in ACTIONS)
+        _require(isinstance(action, str) and action in ACTIONS
+                 and model in ACTION_MODELS.get(action, MODELS))
         if action == "led.show":
             return _show_parameters(params, model)
         fields = {
@@ -450,7 +459,7 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
         }
         if action == "quasar.volume":
             # Quasar's own level 0-10 (×10 %), or one stock step; never a supplied text.
-            _require(model == "station-mini" and "quasar_client" in policy and len(params) == 1)
+            _require("quasar_client" in policy and len(params) == 1)
             if "step" in params:
                 _require(params["step"] in ("louder", "quieter"))
             else:
@@ -462,37 +471,35 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
             _require(all(_integer(params[c], 0, 32) for c in ("red", "green", "blue")))
             _require(_integer(params["count"], 1, 3) and _integer(params["period_ms"], 500, 1000))
         elif action == "led.capture":
-            _require(model == "station-mini"
-                     and _integer(params["duration_seconds"], 5, CAPTURE_MAX_SECONDS))
+            _require(_integer(params["duration_seconds"], 5, CAPTURE_MAX_SECONDS))
         elif action == "speech.listen":
-            _require(model == "station-mini" and "speech_client" in policy
+            _require("speech_client" in policy
                      and _integer(params["duration_seconds"], 5, 60))
         elif action == "speech.openai":
             # OpenAI's Realtime voice streamed by the station itself (live_voice); literal text.
             text, voice = params["text"], policy.get("voice")
-            _require(model == "station-mini" and type(voice) is dict
+            _require(type(voice) is dict
                      and "live_client" in voice and "live_player" in voice
                      and isinstance(text, str) and 1 <= len(text) <= 1000 and bool(text.strip())
                      and not any(ord(c) < 32 and c != "\n" or 127 <= ord(c) <= 159
                                  for c in text))
         elif action == "alice.activation":
             # Only the stock wake word; Quasar itself keeps running.
-            _require(model == "station-mini" and "quasar_client" in policy
-                     and type(params["enabled"]) is bool)
+            _require("quasar_client" in policy and type(params["enabled"]) is bool)
         elif action == "speech.say":
             text = params["text"]
-            _require(model in {"station-mini", "station-mini3"} and "tts_client" in policy
+            _require("tts_client" in policy
                      and isinstance(text, str) and 1 <= len(text) <= 256
                      and len(text.encode("utf-8")) <= 512 and bool(text.strip())
                      and not any(ord(c) < 32 or 127 <= ord(c) <= 159
                                  or 8234 <= ord(c) <= 8238 or 8294 <= ord(c) <= 8297 for c in text))
         elif action == "led.replay":
-            _require(model == "station-mini" and _match(HEX32, params["capture_id"]))
+            _require(_match(HEX32, params["capture_id"]))
         elif action == "led.pulse":
-            _require(model == "station-mini" and _match(HEX32, params["capture_id"])
+            _require(_match(HEX32, params["capture_id"])
                      and _integer(params["channel"], 0, 2))
         elif action == "led.animate":
-            _require(model == "station-mini" and _match(HEX32, params["capture_id"])
+            _require(_match(HEX32, params["capture_id"])
                      and isinstance(params["mode"], str) and params["mode"] in ANIMATION_MODES)
         elif action == "audio.volume":
             _require(_integer(params["percent"], 0, policy.get("max_volume", 30)))
@@ -526,7 +533,7 @@ def interfaces(model: str) -> dict[str, Any]:
     _require(model in MODELS, "unsupported_model")
     source_model = model
     led: dict[str, Any] = {"supported": False, "limitation": "interface_not_established"}
-    if model in {"station-lite", "station-mini2"}:
+    if model in LIKE_LITE | {"station-mini2"}:
         led = {"supported": True, "interface": "sysfs", "prefix": (
             "mini2" if model == "station-mini2" else "micro"),
                "zones": 6 if model == "station-mini2" else 3,

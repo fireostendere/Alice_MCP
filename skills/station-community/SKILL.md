@@ -16,19 +16,24 @@ State the question or finding, public source page, model/firmware scope and whet
 it comes from direct observation, simulation or third-party documentation. Use the
 [home overview](https://hackalice.me/) and [recipe index](https://hackalice.me/recipes/)
 to choose the narrow topic, not to impose an automatic root/OTA/package sequence.
+Use the [glossary](https://hackalice.me/glossary/) for the wiki's own terms; do not
+repeat the third-party server address it mentions.
 
 ## Diagnosis
 
 1. For a support question, identify the missing prerequisite or contradictory claim
    and link its exact page. Do not turn an old “needs data” example into a claim
-   that the current model matrix lacks that model.
+   that the current model matrix lacks that model. The home access table is
+   build-dated: some routes changed on builds after 21 October 2026.
 2. For a new model report, collect only enough authorized metadata to distinguish
    OS, kernel/application architecture, storage family and relevant peripherals.
    Prefer an allowlisted summary; full dumps and logs may contain identifiers,
    credentials, removed private data or biometric/audio information.
 3. Keep model-general architecture in internals and chassis-specific evidence in
-   a device page. Put an operational recipe with the recipe index; record what
-   was actually verified rather than importing a working claim from another model.
+   a device page. Put an operational recipe with the recipe index and access or
+   recovery steps with getting started; scripts and long dumps are separate
+   repository files linked from the model page. Record what was actually
+   verified rather than importing a working claim from another model.
 4. Link the [contributors page](https://hackalice.me/contributors/) for attribution
    and provenance. Credit is not independent review or validation of a recipe.
 
@@ -38,7 +43,10 @@ Draft a short report: expected behavior, sanitized observation, exact model/buil
 minimal reproduction **without payloads**, relevant source links, limitation and
 proposed documentation location. Let the owner inspect every text/image/attachment
 before publication and request explicit confirmation of destination and contents.
-Do not auto-open issues, upload archives or post to chat.
+Do not auto-open issues, upload archives or post to chat. The wiki's
+[browser editor](https://hackalice.me/edit/) and its error-report shortcut create a
+public pull request or issue from the owner's GitHub account; its filter for key-,
+token- and MAC-like text is a backstop, not the privacy review.
 
 ## Backup and rollback
 
@@ -53,17 +61,21 @@ Check that the draft contains no addresses, serials, account/device IDs, hostnam
 derived from them, credentials, wireless network names, coordinates or raw audio.
 Check source URLs, model/build conditions and qualifiers such as “untested.”
 For a proposed new page, mention the index/navigation update needed without editing
-unrelated files. Confirm the device remained unchanged and Quasar operational.
+unrelated files. A local site build and the wiki's lint script are optional upstream
+checks. Confirm the device remained unchanged and Quasar operational.
 
 ## Limitations
 
-This catalog covers the 42 Markdown pages at a pinned revision, including home,
-indexes and contributors. The same-day sitemap also has 42 canonical URLs;
-redirect aliases, downloads, media and linked external projects are not additional
-audited pages. Public links may later change. No explicit upstream documentation
-redistribution license was found: write original summaries with attribution, not
-copied pages, assets or shell scripts. Local report checks are not device tests.
+This catalog covers 65 of the 73 Markdown pages at pinned revision
+`520fbccd68cb90a8c4f01d06bf38d9a7db915304` (the access-route pages were not
+re-read; `get_knowledge` names them under `upstream.carried`), including home, indexes, the glossary,
+the content-free editor page and contributors. Redirect aliases, downloads, media
+and linked external projects are not additional audited pages. Public links may
+later change. No explicit upstream documentation redistribution license was found:
+write original summaries with attribution, not copied pages, assets or shell
+scripts. Local report checks are not device tests.
 
 Sources: [contribution structure and privacy rules](https://hackalice.me/contributing/),
 [contributors and public change provenance](https://hackalice.me/contributors/),
-[project overview](https://hackalice.me/), [recipe navigation](https://hackalice.me/recipes/).
+[project overview](https://hackalice.me/), [recipe navigation](https://hackalice.me/recipes/),
+[browser editor](https://hackalice.me/edit/), [glossary](https://hackalice.me/glossary/).

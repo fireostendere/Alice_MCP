@@ -2,10 +2,35 @@
   "schema": "alice.catalog.v1",
   "upstream": {
     "url": "https://hackalice.me/",
-    "revision": "1ab048bf95c0e5e547a1ff6c801d2ed9deb193db",
-    "retrieved_at": "2026-10-26",
-    "scope": "All 42 tracked docs/**/*.md pages, including the home page, directory indexes and contributors, read at the pinned revision. The public sitemap retrieved on this date also contains these 42 canonical URLs. Generated redirect aliases, assets, install.sh/install.ps1 downloads and external projects are not additional Markdown pages or audited implementations.",
-    "license_note": "No explicit upstream documentation redistribution license was found at this revision. This catalog and the linked skills contain original English operational summaries and attribution links, not copied pages, shell scripts, binaries, images, certificates or exploit payloads. External projects have separate licensing and trust requirements."
+    "revision": "520fbccd68cb90a8c4f01d06bf38d9a7db915304",
+    "retrieved_at": "2026-11-11",
+    "scope": "The revision tracks 73 docs/**/*.md pages, and the public sitemap retrieved on this date lists the same 73 canonical URLs. 55 pages were re-read at this revision. The 10 pages named in carried.pages keep summaries written at the earlier revision in carried.revision, and the 8 new pages in carried.not_catalogued have no entry: they describe access routes (root, ADB, UART, update blocking) and were not re-read. Generated redirect aliases, assets, installer downloads and external projects are not Markdown pages or audited implementations.",
+    "license_note": "No explicit upstream documentation redistribution license was found at this revision; the site configuration states that all rights are reserved. This catalog and the linked skills contain original English operational summaries and attribution links, not copied pages, shell scripts, binaries, images, certificates or exploit payloads. External projects have separate licensing and trust requirements.",
+    "carried": {
+      "revision": "1ab048bf95c0e5e547a1ff6c801d2ed9deb193db",
+      "pages": [
+        "recipes/packagemanagers",
+        "start",
+        "start/packages",
+        "start/recovery",
+        "start/retail-ca",
+        "start/retail-ca-mini3",
+        "start/root",
+        "start/root-android",
+        "start/root-jbl-link-music",
+        "start/ssh"
+      ],
+      "not_catalogued": [
+        "docs/internals/station1-wifi-rollback.md",
+        "docs/recipes/root-max.md",
+        "docs/recipes/station1-disable-updates.md",
+        "docs/start/adb-max.md",
+        "docs/start/adb.md",
+        "docs/start/root-jbl-link-portable.md",
+        "docs/start/root-mini1-usb.md",
+        "docs/start/uart-shell.md"
+      ]
+    }
   },
   "pages": [
     {
@@ -13,9 +38,9 @@
       "title": "Contributing to the wiki",
       "url": "https://hackalice.me/contributing/",
       "source_path": "docs/contributing.md",
-      "skills": ["station-community"],
-      "summary": "Prepare a model- and firmware-scoped contribution with a minimal sanitized hardware report and an appropriate documentation location.",
-      "compatibility": "Community process; examples of missing models may lag the current device matrix. Diagnostics require existing authorized access.",
+      "skills": ["station-community", "station-bringup"],
+      "summary": "Prepare a model- and firmware-scoped contribution with a minimal sanitized hardware report, an appropriate documentation location and an owner-reviewed submission through the browser editor or a pull request.",
+      "compatibility": "Community process; examples of missing models may lag the current device matrix. The browser editor publishes a pull request or issue from the contributor's GitHub account and its secret-pattern filter is only a backstop. Diagnostics require existing authorized access.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -35,9 +60,20 @@
       "title": "Device families and support matrix",
       "url": "https://hackalice.me/devices/",
       "source_path": "docs/devices/index.md",
-      "skills": ["station-devices"],
+      "skills": ["station-devices", "station-bringup"],
       "summary": "Separate Buildroot, Android and Yocto platforms before selecting a workflow, and resolve misleading retail and internal model names.",
-      "compatibility": "Fourteen dedicated model pages; Duo Max and Station Pro remain data gaps rather than supported devices.",
+      "compatibility": "Seventeen dedicated model pages across Amlogic AXG, A1, A4, A5, Android and MediaTek/Yocto platforms. Two Max SKUs share one software identity; Duo Max and Station Pro remain data gaps rather than supported devices.",
+      "risk": "read_only",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "devices/fiero-hi",
+      "title": "Fiero Hi: partner-branded Lite",
+      "url": "https://hackalice.me/devices/fiero-hi/",
+      "source_path": "docs/devices/fiero-hi.md",
+      "skills": ["station-devices"],
+      "summary": "Treat the retailer-branded Fiero Hi as a Station Lite board with a different cloud platform string, and confirm its LED and amplifier probes on the unit before reusing Lite guidance.",
+      "compatibility": "Micro v1.2 device-tree model, AXG, kernel 4.9.68 aarch64, Buildroot, 256 MB NAND/UBI, sampled on one unit with the 21 October 2026 build. Retail firmware did not answer the DNS route, only the factory image after a hardware reset; voice endpoints are certificate-pinned.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -49,6 +85,17 @@
       "skills": ["station-devices"],
       "summary": "Identify the MediaTek, ARMv7, Yocto/systemd exception and distinguish its persistent data volume from factory material.",
       "compatibility": "MT8516 reported as MT8167 in device-tree; kernel 4.4.22. AArch64 packages do not run; SSH and OTA adaptations remain unresolved.",
+      "risk": "read_only",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "devices/jbl-link-portable",
+      "title": "JBL Link Portable with Alice",
+      "url": "https://hackalice.me/devices/jbl-link-portable/",
+      "source_path": "docs/devices/jbl-link-portable.md",
+      "skills": ["station-devices"],
+      "summary": "Identify the portable MediaTek, ARMv7, Yocto/systemd speaker whose rear USB-C port carries data, and keep its read-only root and missing init.d apart from Buildroot autostart recipes.",
+      "compatibility": "Alice edition on firmware dated 19 December 2025: device-tree MT8167 on the aud8516 platform, kernel 4.4.22, 512 MiB NAND/UBI. Root ADB and key-only SSH are reported; OTA blocking is partial, LED control and the Google Assistant edition are untested, and AArch64 builds do not run.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -69,8 +116,8 @@
       "url": "https://hackalice.me/devices/station-3/",
       "source_path": "docs/devices/station-3.md",
       "skills": ["station-devices"],
-      "summary": "Keep Orion identification limited to reported network observations; do not infer its chipset, operating system or a usable root route.",
-      "compatibility": "No documented root; DNS/TLS route rejected. Glagol TLS acceptance did not yield responses to older commands. Hardware and recovery remain unknown.",
+      "summary": "Identify Orion as Buildroot on the Amlogic A5 that Midi uses but on a different board, and keep its 36-LED ring, ambilight, dot display and separate speaker and ultrasound PCMs apart from Midi layouts.",
+      "compatibility": "A5/Cortex-A55, kernel 5.4.180 aarch64, Buildroot 2023.11.1, eMMC. DNS root is reported on a 2025 factory image and one 30 October 2026 retail build; a custom update server is refused, loss of system edits on OTA is inferred rather than observed, and every recipe is untested.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -92,7 +139,7 @@
       "source_path": "docs/devices/station-lite.md",
       "skills": ["station-devices"],
       "summary": "Baseline the Micro AXG platform, mixed kernel/userspace architecture, three-zone ring and board-revision-specific peripheral probes.",
-      "compatibility": "Micro v1.2 report: 64-bit kernel 4.9.68 with armhf Buildroot, NAND/UBI. Missing optional chips can explain failed probes without a fault.",
+      "compatibility": "Micro v1.2 report: 64-bit kernel 4.9.68 with armhf Buildroot, NAND/UBI. Missing optional chips can explain failed probes without a fault. Builds from 21 October 2026 need the local update-server rollback route instead of plain DNS.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -103,7 +150,7 @@
       "source_path": "docs/devices/station-lite2.md",
       "skills": ["station-devices"],
       "summary": "Distinguish Plum from Lite and Street, and retain the firmware cutoff separating old DNS access from the documented factory CA route.",
-      "compatibility": "AXG/A113X, kernel 4.9.68 aarch64, armhf Buildroot. Post-21 October 2026 access is model-specific; AliceBridge exact tested builds are incompletely recorded.",
+      "compatibility": "AXG/A113X, kernel 4.9.68 aarch64, armhf Buildroot. The factory CA route is primary and also covers builds after 21 October 2026; plain DNS opens only earlier builds, and the AliceBridge fallback rolls firmware back.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -114,7 +161,18 @@
       "source_path": "docs/devices/station-max.md",
       "skills": ["station-devices"],
       "summary": "Treat yandexstation_2 as Android Max, not retail Station 2, and recognize production-shell and verified-boot restrictions.",
-      "compatibility": "Amlogic TV-class, Android 9/YaOS, kernel 4.9.113; AVB, dm-verity and SELinux enforced. Network ADB shell is not root; no confirmed root route.",
+      "compatibility": "Amlogic TV-class, Android 9/YaOS, kernel 4.9.113; AVB, dm-verity and SELinux enforced. Network ADB shell is not root; an ADB service utility is reported to give elevated in-memory access until reboot, with no persistent root or SSH. The identifier also covers the Zigbee SKU.",
+      "risk": "read_only",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "devices/station-max-zigbee",
+      "title": "Station Max with Zigbee",
+      "url": "https://hackalice.me/devices/station-max-zigbee/",
+      "source_path": "docs/devices/station-max-zigbee.md",
+      "skills": ["station-devices"],
+      "summary": "Tell the Zigbee-equipped Max revision from the plain Max by its underside SKU label or a zigbee device-tree node, because Android identity and fingerprint are the same; its coordinator is a UART NCP bridged through the LED FPGA.",
+      "compatibility": "SKU YNDX-00052 on one build: Amlogic S905X2, Android 9/YaOS, kernel 4.9.113 aarch64, single-slot eMMC, AVB, dm-verity and SELinux enforced. Elevated ADB lasts only until reboot; the U-Boot debug switch has no known write path and the NCP chip is unidentified.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -125,7 +183,7 @@
       "source_path": "docs/devices/station-midi.md",
       "skills": ["station-devices"],
       "summary": "Identify Cucumber's A5/eMMC platform and protect the shared microphone clock when diagnosing its audio and peripheral interfaces.",
-      "compatibility": "Kernel 5.4.180, Buildroot 2023.11.1, not AXG station-midi. Reported microphone capture is 96 kHz; changing the PDM rate can disable Alice hearing.",
+      "compatibility": "Kernel 5.4.180, Buildroot 2023.11.1, not AXG station-midi. Reported microphone capture is 96 kHz; changing the PDM rate can disable Alice hearing. A factory-6 image differs in Buildroot version, userspace and ADB marker paths, and eMMC boot areas are not write-protected.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -135,8 +193,8 @@
       "url": "https://hackalice.me/devices/station-mini/",
       "source_path": "docs/devices/station-mini.md",
       "skills": ["station-devices"],
-      "summary": "Keep Mini 1's older Buildroot, gesture sensor, I2C ring and SELinux constraints separate from later Mini generations.",
-      "compatibility": "AXG, kernel 4.9.68, Buildroot 2017.02. Page reports A/B boot and writable rootfs; do not infer slot targets from its abbreviated partition table.",
+      "summary": "Keep Mini 1's older Buildroot, gesture sensor and SN3236 I2C ring separate from later Mini generations, and establish which of its two factory firmware variants a unit runs.",
+      "compatibility": "AXG, kernel 4.9.68, Buildroot 2017.02. The main variant reports SELinux enforcing, a slot suffix and writable rootfs; the LinkPlay variant has neither SELinux nor slots and is untested with the USB own-image root route. Do not infer slot targets from the abbreviated partition table.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -147,18 +205,7 @@
       "source_path": "docs/devices/station-mini2.md",
       "skills": ["station-devices"],
       "summary": "Record Mini 2's six-zone sysfs ring, optional clock segments, separate DAC and flash-vendor differences without assuming a verified animation format.",
-      "compatibility": "AXG, kernel 4.9.68, armhf Buildroot 2020.02.1. NAND variants differ; six-zone .led column interpretation is explicitly unverified.",
-      "risk": "read_only",
-      "evidence": "upstream_documentation"
-    },
-    {
-      "id": "devices/station-mini3-pro",
-      "title": "Station Mini 3 Pro: Pickle",
-      "url": "https://hackalice.me/devices/station-mini3-pro/",
-      "source_path": "docs/devices/station-mini3-pro.md",
-      "skills": ["station-devices"],
-      "summary": "Separate Pickle from Bergamot and plan around the report that only data-volume changes survive reboot, not rootfs startup modifications.",
-      "compatibility": "A4, kernel 5.4.242, Buildroot 2023.11.1, NAND/UBI and enforcing SELinux. Existing-root persistence is described; current root acquisition is not.",
+      "compatibility": "AXG, kernel 4.9.68, armhf Buildroot 2020.02.1. NAND variants differ; six-zone .led column interpretation is explicitly unverified. Stock builds from 21 October 2026 reject the local update server until rolled back from the factory image.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -169,7 +216,18 @@
       "source_path": "docs/devices/station-mini3.md",
       "skills": ["station-devices"],
       "summary": "Identify Bergamot's framebuffer ring and firmware-specific access route without borrowing Pickle persistence behavior.",
-      "compatibility": "AXG, kernel 4.9.68, armhf Buildroot. Six-zone BGR framebuffer; newer firmware requires the separate factory guide and a still-vulnerable factory image.",
+      "compatibility": "AXG, kernel 4.9.68, armhf Buildroot, 512 MB NAND/UBI. Six-zone BGR framebuffer; builds from 21 October 2026 need the separate factory CA-and-markers guide, and OTA rewrites system while data survives.",
+      "risk": "read_only",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "devices/station-mini3-pro",
+      "title": "Station Mini 3 Pro: Pickle",
+      "url": "https://hackalice.me/devices/station-mini3-pro/",
+      "source_path": "docs/devices/station-mini3-pro.md",
+      "skills": ["station-devices"],
+      "summary": "Separate Pickle from Bergamot and establish which firmware a unit runs: current builds keep only data-volume changes across reboot, while the 2025 factory image keeps rootfs edits.",
+      "compatibility": "A4, kernel 5.4.242, Buildroot 2023.11.1, NAND/UBI and enforcing SELinux. DNS root is reported only on the factory-12 image; current builds have no acquisition route, and ADB marker paths differ between the two.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -196,13 +254,35 @@
       "evidence": "upstream_documentation"
     },
     {
+      "id": "edit",
+      "title": "Wiki browser editor",
+      "url": "https://hackalice.me/edit/",
+      "source_path": "docs/edit.md",
+      "skills": ["station-community"],
+      "summary": "Recognize the entry point of the site's in-browser Markdown editor, which turns an edit into a pull request from the contributor's GitHub account; the page itself carries no technical content.",
+      "compatibility": "Model-independent community tooling; a template-only page excluded from site search. Submitting publishes under the owner's account, so privacy review must come first.",
+      "risk": "read_only",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "glossary",
+      "title": "Glossary",
+      "url": "https://hackalice.me/glossary/",
+      "source_path": "docs/glossary.md",
+      "skills": ["station-community"],
+      "summary": "Look up the wiki's terms for access methods, firmware parts, storage layout and on-device software before interpreting an instruction or wording a report.",
+      "compatibility": "Terminology only, mostly for Amlogic/Buildroot stations; entries refer to build-dependent access methods and name a third-party unlock server that this catalog neither reproduces nor endorses.",
+      "risk": "read_only",
+      "evidence": "upstream_documentation"
+    },
+    {
       "id": "index",
       "title": "Yandex Station Extended overview",
       "url": "https://hackalice.me/",
       "source_path": "docs/index.md",
-      "skills": ["station-community"],
-      "summary": "Find the community's access, recipes, hardware and internals sections while retaining its owner-only and privacy boundaries.",
-      "compatibility": "Navigation and project orientation only; broad support badges must be narrowed by model and firmware evidence.",
+      "skills": ["station-community", "station-control"],
+      "summary": "Find the community's access, recipes, hardware and internals sections and its per-model access-method table while retaining its owner-only and privacy boundaries.",
+      "compatibility": "Navigation and project orientation only; the per-model access table is build-dated, with some routes changed on builds after 21 October 2026, and must be narrowed by model and firmware evidence.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -212,8 +292,19 @@
       "url": "https://hackalice.me/internals/architecture/",
       "source_path": "docs/internals/architecture.md",
       "skills": ["station-internals"],
-      "summary": "Trace BusyBox startup, the Quasar launcher and maind roles without changing services or trusting synthesized ABI properties.",
-      "compatibility": "Primarily Lite Quasar 3.21 on Amlogic/Buildroot; not a service map for Android or Yocto. maind getprop can misreport application architecture.",
+      "summary": "Trace BusyBox startup, the Quasar launcher and maind roles, including telemetry, logging and update roles, without changing services or trusting synthesized ABI properties.",
+      "compatibility": "Primarily Lite Quasar 3.21 on Amlogic/Buildroot; not a service map for Android or Yocto. maind getprop can misreport application architecture, and a patch-directory config key seen on one Lite 1 build is unverified.",
+      "risk": "read_only",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "internals/calls",
+      "title": "Alice calls and port 5081",
+      "url": "https://hackalice.me/internals/calls/",
+      "source_path": "docs/internals/calls.md",
+      "skills": ["station-internals"],
+      "summary": "Explain why TCP 5081 appears only during a call or registration: the station is an outbound SIP client whose signalling and media both go through vendor cloud relays, not a local control API.",
+      "compatibility": "Midi (Cucumber) 0.369.1.50-family config, log and capture evidence with labeled inferences; other models and builds are unverified. Server verification is enabled and fallback addresses bypass DNS, so the port is not a probe or interception target.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -223,8 +314,8 @@
       "url": "https://hackalice.me/internals/directives/",
       "source_path": "docs/internals/directives.md",
       "skills": ["station-internals"],
-      "summary": "Diagnose legacy Struct versus typed protobuf directive encoding and distinguish state-reporting channels before any controlled integration experiment.",
-      "compatibility": "Mini 2 firmware 0.369.1.46 evidence; typed payloads require PayloadRaw and a matching DirectiveType. Not an Orion API contract.",
+      "summary": "Diagnose legacy Struct versus typed protobuf directive encoding, alarm, timer and do-not-disturb handling, and the separate state-reporting channels before any controlled integration experiment.",
+      "compatibility": "Mini 2 firmware 0.369.1.46 evidence plus a Lite 1 alarm-volume note; typed payloads require PayloadRaw and a matching DirectiveType, and that build has no iCalendar alarm parser. Not an Orion API contract.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -234,8 +325,8 @@
       "url": "https://hackalice.me/internals/gotchas/",
       "source_path": "docs/internals/gotchas.md",
       "skills": ["station-internals"],
-      "summary": "Account for reduced BusyBox tools, stale ALSA and hotplug configuration, fragile module ABI and competing mDNS publishers.",
-      "compatibility": "Mostly Lite observations. Older TLS and plaintext-endpoint claims are not universal; newer Plum/Bergamot and Orion documentation narrows them.",
+      "summary": "Account for a read-only root with unsynced writes, reduced BusyBox tools, stale ALSA and hotplug configuration, fragile module ABI, cloud-reconciled Wi-Fi networks, IGMP-related mDNS loss and competing mDNS publishers.",
+      "compatibility": "Mixed Lite, Mini 2 and Station 2 observations. The TLS no-pinning and plaintext-endpoint claims are not universal; newer Plum/Bergamot and Orion documentation narrows them.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -245,9 +336,20 @@
       "url": "https://hackalice.me/internals/network/",
       "source_path": "docs/internals/network.md",
       "skills": ["station-internals"],
-      "summary": "Interpret the documented Lite service map and DNS fallbacks without performing discovery or treating open ports as an authorization boundary.",
-      "compatibility": "Lite Quasar 3.21 with access already enabled. Glagol protocol details are deferred upstream; ports and command support vary by platform.",
+      "summary": "Interpret the documented Lite service map, the cloud-supplied resolver configuration and DNS fallbacks without performing discovery or treating open ports as an authorization boundary.",
+      "compatibility": "Lite Quasar 3.21 with access already enabled, plus a Mini 2 0.369.1.46 resolver-configuration report. Glagol protocol details are deferred upstream; ports and command support vary by platform, and local resolver edits are overwritten at the next sync.",
       "risk": "read_only",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "internals/telemetry",
+      "title": "Telemetry pipeline",
+      "url": "https://hackalice.me/internals/telemetry/",
+      "source_path": "docs/internals/telemetry.md",
+      "skills": ["station-internals"],
+      "summary": "Understand how the maind telemetry role aggregates events from other roles and uploads diagnostic analytics, product events and logs, and why consent-gated voice-sample logging is a separate channel.",
+      "compatibility": "Midi (Cucumber) 0.369.1.50-family config, logs and traffic with labeled inferences; the binary is shared across Amlogic models but other builds are unverified. Reports carry device identifiers, online config can override local keys and fallback hosts defeat DNS-only blocking.",
+      "risk": "manual_change",
       "evidence": "upstream_documentation"
     },
     {
@@ -266,9 +368,31 @@
       "title": "Alice voice pipeline",
       "url": "https://hackalice.me/internals/voice/",
       "source_path": "docs/internals/voice.md",
+      "skills": ["station-internals", "station-control"],
+      "summary": "Separate local wake-word and command spotting from cloud ASR and dialogue, and diagnose capture, processed VQE channels, recognition, streamed responses and playback as different failure stages.",
+      "compatibility": "Quasar 3.21 profile plus Lite 1 0.369.1.46-family, Plum and Station 2 observations with labeled inferences; channel sets, VQE presets and rates are model-dependent, especially Cucumber's 96 kHz path. Custom wake words are unavailable on the sampled build, and proxy-verified recognition behaviour is a single-device result.",
+      "risk": "read_only",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "internals/zigbee",
+      "title": "Cloud-free Zigbee on Midi with quasard",
+      "url": "https://hackalice.me/internals/zigbee/",
+      "source_path": "docs/internals/zigbee.md",
       "skills": ["station-internals"],
-      "summary": "Separate local wake-word processing from cloud ASR and dialogue, and diagnose capture, recognition and playback as different failure stages.",
-      "compatibility": "Quasar 3.21 observations and labeled inferences; capture-device numbers and rates are model-dependent, especially Cucumber's 96 kHz path.",
+      "summary": "Understand how a local backend extension lets the stock Quasar Zigbee stack keep an existing network and pair a device through binary discovery directives, with naming metadata and network databases as separate, fragile state.",
+      "compatibility": "Midi (Cucumber) only, 26-27 October 2026, one Aqara lamp and a custom quasard extension; other devices, models and firmware are untested. Not ZHA/Zigbee2MQTT coordinator reuse; metadata or database mistakes can lose pairings, and archives hold network keys.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes",
+      "title": "Recipe index",
+      "url": "https://hackalice.me/recipes/",
+      "source_path": "docs/recipes/index.md",
+      "skills": ["station-community", "station-streaming", "station-gen1"],
+      "summary": "Choose a focused recipe from the desired outcome and its documented model coverage instead of treating all modifications as a prerequisite chain.",
+      "compatibility": "Recipe claims vary from one tested model to open research and now include Station 1 (Android) and streaming rows; some rows are duplicated or lag their destination page, whose prerequisites and caveats take priority.",
       "risk": "read_only",
       "evidence": "upstream_documentation"
     },
@@ -277,9 +401,31 @@
       "title": "AirPlay with Shairport Sync",
       "url": "https://hackalice.me/recipes/airplay/",
       "source_path": "docs/recipes/airplay.md",
-      "skills": ["station-airplay"],
-      "summary": "Diagnose an existing AirPlay installation by version, FIFO, audio ownership and session state; expose Quasar interruption before considering hooks or patches.",
-      "compatibility": "Mini 3: Shairport Sync 4.3.7 and nqptp 1.2.4 fix. Station 2 development-version techniques are separate evidence; base package installation is undocumented.",
+      "skills": ["station-airplay", "station-streaming"],
+      "summary": "Choose the model's AirPlay 2 path (the independent Station AirPlay receiver, a per-model Shairport Sync build, or repair of an existing Mini 3 package), then diagnose discovery, audio ownership and session state; paths that stop Quasar or block updates need a separate explicit request.",
+      "compatibility": "Station AirPlay targets rooted Linux stations with YAM 0.2.x (playback reported on Midi and Station 2), not Android Max or Station 1. Shairport paths are per model: Station 1 with Entware 4.3.6, Lite, Lite 2 and Station 2 with 5.6.2, Mini 3 repair for 4.3.7 with nqptp 1.2.4, whose base package is still undocumented.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/bekend-self-hosted",
+      "title": "Self-hosted backend overview",
+      "url": "https://hackalice.me/recipes/bekend-self-hosted/",
+      "source_path": "docs/recipes/bekend-self-hosted.md",
+      "skills": ["station-llm"],
+      "summary": "Orient on what a self-hosted backend consists of (protocol layer, STT, request processor, optional LLM, TTS), which public projects exist and what an always-on server costs before choosing one.",
+      "compatibility": "Conceptual overview for rooted stations with rough hardware sizing; no model or firmware matrix. Protocol differences between firmware versions, cloud remnants in some projects and loss of stock functions are stated risks.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/bt-proxy",
+      "title": "MPRIS players as a Bluetooth source (bt-proxy)",
+      "url": "https://hackalice.me/recipes/bt-proxy/",
+      "source_path": "docs/recipes/bt-proxy.md",
+      "skills": ["station-integrations"],
+      "summary": "Understand how a D-Bus proxy presents on-station media players to stock Alice as a Bluetooth phone, and which Bluetooth service and boot changes must be reversible before trying it.",
+      "compatibility": "One Lite 2 (plum) build with shairport-sync 5.6.2 and a real phone; other players and models untested. Requires running Quasar, a renamed BlueZ activation file, an init script and players built against the station's own ALSA library.",
       "risk": "high_risk",
       "evidence": "upstream_documentation"
     },
@@ -295,14 +441,14 @@
       "evidence": "upstream_documentation"
     },
     {
-      "id": "recipes",
-      "title": "Recipe index",
-      "url": "https://hackalice.me/recipes/",
-      "source_path": "docs/recipes/index.md",
-      "skills": ["station-community"],
-      "summary": "Choose a focused recipe from the desired outcome and its documented model coverage instead of treating all modifications as a prerequisite chain.",
-      "compatibility": "Recipe claims vary from one tested model to open research; each destination's prerequisites and caveats take priority.",
-      "risk": "read_only",
+      "id": "recipes/home-assistant",
+      "title": "Lite 2 as a Home Assistant voice satellite",
+      "url": "https://hackalice.me/recipes/home-assistant/",
+      "source_path": "docs/recipes/home-assistant.md",
+      "skills": ["station-integrations"],
+      "summary": "Assess handing the station's microphones and speaker to Home Assistant Assist through Pulsar: stock Alice is stopped while it runs, an init file is added, and a disable command returns to Alice.",
+      "compatibility": "One Lite 2/Plum build with Pulsar 0.5.0 and HA Core 2026.9.2, installed from Linux x86-64. Vendor updates are not blocked by it, network isolation from the vendor is unverified, and full removal was not exercised.",
+      "risk": "high_risk",
       "evidence": "upstream_documentation"
     },
     {
@@ -311,19 +457,63 @@
       "url": "https://hackalice.me/recipes/led/",
       "source_path": "docs/recipes/led.md",
       "skills": ["station-led"],
-      "summary": "Select the model's sysfs or framebuffer interface, preview a short low-brightness effect and preserve normal status indication.",
-      "compatibility": "Lite and Mini 2 sysfs differ from Mini 3 and Station 2 framebuffers. Zone counts, pixel order and animation formats are not interchangeable.",
+      "summary": "Select the model's sysfs, framebuffer or I2C ring interface, preview a short low-brightness effect and preserve normal status indication, including LED triggers and the mute pattern.",
+      "compatibility": "Lite, Lite 2/Plum and Mini 2 sysfs nodes differ from Mini 3 and Station 2 framebuffers and from Mini 1's SN3236 I2C ring. Lite 2 and Mini 1 details come from one build each; zone counts, byte order and animation formats are not interchangeable.",
       "risk": "manual_change",
       "evidence": "upstream_documentation"
     },
     {
       "id": "recipes/llm",
-      "title": "Custom LLM and backend alternatives",
+      "title": "Custom LLM: Quasar Bridge and ChatGPT Voice",
       "url": "https://hackalice.me/recipes/llm/",
       "source_path": "docs/recipes/llm.md",
       "skills": ["station-llm"],
-      "summary": "Compare the cloud-speech Quasar Bridge hybrid with a replacement quasard backend, including voice privacy, lost features and reversible endpoint plans.",
-      "compatibility": "Bridge reported on Station 2/Quasar 3.21. quasard describes older JSON and 3.x protobuf protocols; model-wide operation and current TLS compatibility are not established.",
+      "summary": "Compare the cloud-speech Quasar Bridge hybrid with a ChatGPT voice session on the station's microphones and speaker, including data destinations, lost functions and endpoint rollback; full backend replacement is a separate page.",
+      "compatibility": "Quasar Bridge v0.6.2: project-reported install on Station 2 and Midi, operation only on Lite, ARMv7 build untested. ChatGPT Voice 0.3.3: verified on one Lite 2/Plum build, Lite 1 and Station 2 from adaptation authors, retail Midi unsupported. Both remain cloud-dependent.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/microphone",
+      "title": "Processed microphone on Lite 2",
+      "url": "https://hackalice.me/recipes/microphone/",
+      "source_path": "docs/recipes/microphone.md",
+      "skills": ["station-microphone"],
+      "summary": "Understand the post-processing VQE channel and what a third-party bridge does to forward it to a Linux PC, with consent of everyone audible and a tested way back to stock Alice.",
+      "compatibility": "One Lite 2/Plum build: two microphones plus speaker reference in, mono 16 kHz out. The tap is preloaded into Quasar after a restart; channel types and library interface are vendor-undocumented and unverified on other builds or models.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/midipult",
+      "title": "MidiPult web panel for Station Midi",
+      "url": "https://hackalice.me/recipes/midipult/",
+      "source_path": "docs/recipes/midipult.md",
+      "skills": ["station-integrations"],
+      "summary": "Review exposure before using an on-station web panel that controls display, ring, playback, LLM profiles, VPN and scenarios: it is HTTP with an optional PIN and must stay on a trusted LAN.",
+      "compatibility": "Panel 0.4.56 and Android shell 1.0.8 on one Midi (Cucumber) build, quasar 3.21. Needs root, SSH, Entware and a running Luna; paths may differ elsewhere, and Alice can answer alongside panel voice commands.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/packagemanagers",
+      "title": "YAM and BetterYAM",
+      "url": "https://hackalice.me/recipes/packagemanagers/",
+      "source_path": "docs/recipes/packagemanagers.md",
+      "skills": ["station-yam"],
+      "summary": "Review daemon exposure, plugin permissions, architecture and update policy before manually installing or enabling a model-compatible plugin manager.",
+      "compatibility": "Snapshot: YAM 0.1.15 for AArch64 kernels; BetterYAM 0.1.18 only Mini 1 with ARMv7 daemon. Both expose an unauthenticated LAN API and lack installed autostart.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/quasard",
+      "title": "quasard replacement backend",
+      "url": "https://hackalice.me/recipes/quasard/",
+      "source_path": "docs/recipes/quasard.md",
+      "skills": ["station-llm"],
+      "summary": "Weigh a full cloud replacement that answers activation, speech recognition, dialogue, synthesis and music from an owner's GPU server, against lost Alice functions and the DNS and trust changes it requires.",
+      "compatibility": "Project status and model compatibility are marked unchecked. Handles older JSON (around 1.56) and 3.x protobuf voice formats; needs router DNS redirection, a station-trusted certificate and an NVIDIA GPU; blocks firmware updates; no Yandex smart home.",
       "risk": "high_risk",
       "evidence": "upstream_documentation"
     },
@@ -333,9 +523,20 @@
       "url": "https://hackalice.me/recipes/sounds/",
       "source_path": "docs/recipes/sounds.md",
       "skills": ["station-sounds"],
-      "summary": "Prefer a quiet one-shot media test through the existing audio pipeline before optional startup sounds or reversible system-sound replacement.",
-      "compatibility": "Native maind/GStreamer Buildroot recipes; not Android Max/gen1 or audio-less Saturn. System-sound hot reload is unverified.",
+      "summary": "Prefer a quiet one-shot media test through the existing audio pipeline before optional startup sounds or reversible system-sound replacement; spoken text uses cloud synthesis through the station's local IPC.",
+      "compatibility": "Native maind/GStreamer Buildroot recipes; not Android Max/gen1 or audio-less Saturn. Recent firmware keeps system sounds on the data partition (Mini 2 report); native TTS is reported on one Lite 2 build with unverified event codes. Replacement is followed by a reboot; hot reload is unverified.",
       "risk": "manual_change",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/spotify",
+      "title": "Spotify Connect on Station 2",
+      "url": "https://hackalice.me/recipes/spotify/",
+      "source_path": "docs/recipes/spotify.md",
+      "skills": ["station-streaming"],
+      "summary": "Assess a librespot Connect receiver and Web API voice bridge layered on the Station 2 AirPlay bundle, separating discovery, network reachability and missing track-key failures before any owner-run install.",
+      "compatibility": "Station 2 only, firmware 0.369.1.50 with librespot 0.8.0 and a Premium account. Inherits the bundle's update blocking and media-daemon handover; some accounts receive no track keys, and upstream warns of account blocking for third-party clients.",
+      "risk": "high_risk",
       "evidence": "upstream_documentation"
     },
     {
@@ -345,7 +546,73 @@
       "source_path": "docs/recipes/standalone.md",
       "skills": ["station-standalone"],
       "summary": "Frame standalone reuse as a bounded experiment, not a proven subscription-unlock method or a reason to disable Quasar automatically.",
-      "compatibility": "Subscription-blocked stations are explicitly unverified. Bluetooth, AirPlay and third-party Spotify Connect claims do not establish general offline operation.",
+      "compatibility": "Subscription-blocked stations are explicitly unverified. Bluetooth, AirPlay, a Home Assistant satellite tested only on a working Lite 2 and third-party Spotify Connect claims do not establish general offline operation.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/station1-debian",
+      "title": "Debian on Station 1",
+      "url": "https://hackalice.me/recipes/station1-debian/",
+      "source_path": "docs/recipes/station1-debian.md",
+      "skills": ["station-gen1", "station-standalone"],
+      "summary": "Assess a third-party installer that boots Debian 13 with a board-specific kernel beside or instead of Android, reviewing its preflight checks, boot modes, partition changes and uninstall path as a written plan only.",
+      "compatibility": "Station 1 (YNDX-0001, tulip) on firmware 2.369.5.46 with AliceBridge root, installer release debian-v8; will not start on other boards. Rewrites recovery and optionally boot, leaves bootloaders alone, and Debian itself has no Alice.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/station1-privacy",
+      "title": "Station 1 analytics endpoint blocking",
+      "url": "https://hackalice.me/recipes/station1-privacy/",
+      "source_path": "docs/recipes/station1-privacy.md",
+      "skills": ["station-gen1"],
+      "summary": "Preview a reversible hosts-file bind mount that blocks a short list of analytics endpoints while Alice keeps running, then verify with its check mode and an ordinary voice command.",
+      "compatibility": "Station 1 (tulip), Android 6.0.1 build MOB30J.20261013 with AliceBridge root and SSH autostart. Persistence after reboot and long-term use are untested; identifiers, queued reports and assistant cloud traffic are unaffected.",
+      "risk": "manual_change",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/station1-soundcloud",
+      "title": "SoundCloud by voice on Station 1",
+      "url": "https://hackalice.me/recipes/station1-soundcloud/",
+      "source_path": "docs/recipes/station1-soundcloud.md",
+      "skills": ["station-streaming"],
+      "summary": "Plan a patched NewPipe build with a first-track voice bridge and a bundled VPN client, previewing the app replacement, VPN autostart and per-app routing rule together with their separate uninstall and restore modes.",
+      "compatibility": "Station 1 (tulip), Android 6.0.1 with AliceBridge root, NewPipe 0.29.1 and v2rayNG 1.9.45; other models untested. Needs the owner's own VPN profile; subscription-only tracks stay unavailable and the build's signature differs from the official app.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/station1-spotify",
+      "title": "Spotify by voice on Station 1",
+      "url": "https://hackalice.me/recipes/station1-spotify/",
+      "source_path": "docs/recipes/station1-spotify.md",
+      "skills": ["station-streaming"],
+      "summary": "Plan the unmodified official Android TV client plus a local voice bridge with code pairing, and tell an absent media session, slow first launch and the service's own account-country rule apart.",
+      "compatibility": "Station 1 (tulip), Android 6.0.1 with AliceBridge root, client 1.134.2 on a Free account; other models untested. Free-tier advertising and limits remain, and the installer changes neither account country nor network.",
+      "risk": "manual_change",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/station1-tv",
+      "title": "Station 1 TV kit and web remote",
+      "url": "https://hackalice.me/recipes/station1-tv/",
+      "source_path": "docs/recipes/station1-tv.md",
+      "skills": ["station-gen1", "station-streaming"],
+      "summary": "Plan the HDMI kit of a browser remote, TV launcher, patched SmartTube build and VPN client, with the owner-set remote passphrase, backups before each update and the documented stop and previous-version steps.",
+      "compatibility": "Station 1 (tulip), Android 6.0.1 build MOB30J.20261013 with AliceBridge root, SSH and HDMI. The remote speaks unencrypted HTTP on the LAN, and booting into the alternative launcher can silence Alice.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/upravlenie-golosom-alisy",
+      "title": "Voice web panel for spoken text",
+      "url": "https://hackalice.me/recipes/upravlenie-golosom-alisy/",
+      "source_path": "docs/recipes/upravlenie-golosom-alisy.md",
+      "skills": ["station-sounds"],
+      "summary": "Recognise a PC-hosted web form that relays typed text to the station's local speech IPC over SSH, and prefer the reviewed speech action over running its unaudited archive.",
+      "compatibility": "Reported on Mini 2 and Lite 2 without firmware versions. Needs root SSH and socat; the archive comes from an anonymous file host without checksum, and its 'local synthesis' wording conflicts with the cloud-TTS finding on the sounds page.",
       "risk": "high_risk",
       "evidence": "upstream_documentation"
     },
@@ -361,13 +628,24 @@
       "evidence": "upstream_documentation"
     },
     {
-      "id": "recipes/yam",
-      "title": "YAM and BetterYAM",
-      "url": "https://hackalice.me/recipes/yam/",
-      "source_path": "docs/recipes/yam.md",
-      "skills": ["station-yam"],
-      "summary": "Review daemon exposure, plugin permissions, architecture and update policy before manually installing or enabling a model-compatible plugin manager.",
-      "compatibility": "Snapshot: YAM 0.1.15 for AArch64 kernels; BetterYAM 0.1.18 only Mini 1 with ARMv7 daemon. Both expose an unauthenticated LAN API and lack installed autostart.",
+      "id": "recipes/v3rt3p",
+      "title": "v3rt3p self-hosted stack",
+      "url": "https://hackalice.me/recipes/v3rt3p/",
+      "source_path": "docs/recipes/v3rt3p.md",
+      "skills": ["station-llm"],
+      "summary": "Consider a container-based self-hosted voice stack with Home Assistant, timers and reminders when the owner can operate Docker, DNS, logs and keys; installation is deferred to the project's own documentation.",
+      "compatibility": "Model compatibility is left undefined on the page. Lists no music, multiroom, notifications or calls; CPU-only baseline with an external OpenAI-compatible LLM. GPLv3 project outside this catalog's audit.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
+      "id": "recipes/youtube-music",
+      "title": "YouTube Music with ytm-alice",
+      "url": "https://hackalice.me/recipes/youtube-music/",
+      "source_path": "docs/recipes/youtube-music.md",
+      "skills": ["station-streaming"],
+      "summary": "Review the ytm-alice YAM package (voice phrases, LAN web panel, optional phone casting and a bt-proxy media layer) including its autostart, Bluetooth restart and documented uninstall order.",
+      "compatibility": "Mini 2 with Quasar 3.21 and YAM 0.2.5; Lite 1 reported by the project's author; no packages for other models. The web panel has no access control, release 0.7.2-hotfix lacks seek and casting, and shared carrier addresses hit service rate limits.",
       "risk": "high_risk",
       "evidence": "upstream_documentation"
     },
@@ -405,6 +683,17 @@
       "evidence": "upstream_documentation"
     },
     {
+      "id": "start/retail-ca",
+      "title": "Lite 2 factory-to-retail access assessment",
+      "url": "https://hackalice.me/start/retail-ca/",
+      "source_path": "docs/start/retail-ca.md",
+      "skills": ["station-access"],
+      "summary": "Assess Plum's documented CA-bundle modification as a manual trust-boundary change requiring exact volume identification and original-file recovery.",
+      "compatibility": "Verified upstream only for Lite 2/Plum. MTD and UBI numbering is not portable; Android models are excluded and Mini 3 has a separate guide.",
+      "risk": "high_risk",
+      "evidence": "upstream_documentation"
+    },
+    {
       "id": "start/retail-ca-mini3",
       "title": "Mini 3 factory-to-retail access assessment",
       "url": "https://hackalice.me/start/retail-ca-mini3/",
@@ -416,13 +705,13 @@
       "evidence": "upstream_documentation"
     },
     {
-      "id": "start/retail-ca",
-      "title": "Lite 2 factory-to-retail access assessment",
-      "url": "https://hackalice.me/start/retail-ca/",
-      "source_path": "docs/start/retail-ca.md",
+      "id": "start/root",
+      "title": "DNS access assessment",
+      "url": "https://hackalice.me/start/root/",
+      "source_path": "docs/start/root.md",
       "skills": ["station-access"],
-      "summary": "Assess Plum's documented CA-bundle modification as a manual trust-boundary change requiring exact volume identification and original-file recovery.",
-      "compatibility": "Verified upstream only for Lite 2/Plum. MTD and UBI numbering is not portable; Android models are excluded and Mini 3 has a separate guide.",
+      "summary": "Assess historical DNS-assisted setup against the exact model and firmware; make reset, router scope and third-party trust changes explicit before any owner action.",
+      "compatibility": "Older supported Buildroot builds only; local-stand test coverage is narrower than the general table. Newer Plum/Bergamot, Android Max/gen1 and Orion need separate treatment.",
       "risk": "high_risk",
       "evidence": "upstream_documentation"
     },
@@ -445,17 +734,6 @@
       "skills": ["station-access"],
       "summary": "Describe the reported transient service-USB access and persistent network exposure as a model-specific manual procedure, not an automatic catcher.",
       "compatibility": "JBL Link Music with Alice, reported firmware dated 19 December 2025. Other marker roles, ARMv7 SSH support and OTA blocking remain unverified.",
-      "risk": "high_risk",
-      "evidence": "upstream_documentation"
-    },
-    {
-      "id": "start/root",
-      "title": "DNS access assessment",
-      "url": "https://hackalice.me/start/root/",
-      "source_path": "docs/start/root.md",
-      "skills": ["station-access"],
-      "summary": "Assess historical DNS-assisted setup against the exact model and firmware; make reset, router scope and third-party trust changes explicit before any owner action.",
-      "compatibility": "Older supported Buildroot builds only; local-stand test coverage is narrower than the general table. Newer Plum/Bergamot, Android Max/gen1 and Orion need separate treatment.",
       "risk": "high_risk",
       "evidence": "upstream_documentation"
     },

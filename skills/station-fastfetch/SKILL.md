@@ -11,8 +11,8 @@ summary instead of installing an information tool just to identify a model.
 
 ## Prerequisites
 
-Confirm kernel architecture and binary provenance. The published Fastfetch is
-AArch64, not for ARMv7 Street or JBL. Determine whether another package manager
+Confirm kernel architecture and binary provenance. The published Fastfetch is a
+static AArch64 build, not for ARMv7 Street or JBL. Determine whether another package manager
 already owns the executable. Use an original or licensed logo, not copied wiki art.
 
 ## Diagnosis
@@ -22,8 +22,9 @@ already owns the executable. Use an original or licensed logo, not copied wiki a
 2. If the program fails, inspect ELF class/interpreter and dependencies; “aarch64”
    in its OS display does not prove a 64-bit vendor userspace.
 3. Separate core modules from optional command-backed USB rows. Those rows depend
-   on a separately installed OTG helper and may be absent normally. Do not install
-   USB host support merely to populate an information line.
+   on a separately installed OTG helper; the program hides command rows that fail,
+   so their absence is normal. Do not install USB host support merely to populate
+   an information line.
 4. Audit custom command modules as executable code. A display configuration is not
    automatically safe, especially when it runs with root access.
 
@@ -31,8 +32,9 @@ already owns the executable. Use an original or licensed logo, not copied wiki a
 
 Show the exact binary/version, destination, minimal module list and configuration
 diff. Omit local addresses and identifier-bearing host titles from shared output.
-Use a per-user/data-volume config selected through the installed version's supported
-options where possible rather than remounting rootfs just for presentation.
+The recipe keeps the binary and logo on the data volume but its config on rootfs,
+which needs a temporary writable remount. Prefer a data-volume config selected through
+the installed version's supported options rather than remounting rootfs for presentation.
 Ask before adding any command module; do not add shell-login autostart by default.
 
 ## Backup and rollback
@@ -40,6 +42,8 @@ Ask before adding any command module; do not add shell-login autostart by defaul
 Retain the original config and package ownership record. For manual installation,
 record only the files introduced; rollback restores that config and removes only
 those files, not a package manager's shared directory or someone else's binary.
+The page's own rollback deletes the binary and the logo directory; a config placed
+on rootfs is a separate item to list. To keep the config, drop only its command rows.
 Do not install over a conflicting unowned executable.
 
 ## Verification
@@ -55,4 +59,4 @@ This is not a benchmark, a flash-health check or a compatibility test. The wiki'
 sample figures are one device snapshot, not expected values for every station.
 No binary, ASCII artwork or USB helper is redistributed or executed here.
 
-Source: [Fastfetch recipe and optional OTG helper](https://hackalice.me/recipes/fastfetch/).
+Source: [Fastfetch recipe, optional OTG helper and rollback](https://hackalice.me/recipes/fastfetch/).

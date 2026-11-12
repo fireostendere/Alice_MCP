@@ -37,6 +37,27 @@ META_LIMIT = 8192
 MAX_FAILURES = 3
 ERRORS = iop.PROFILE_ERRORS | {"tmpfs_unavailable", "helper_missing"}
 MATCH = 512  # One vqe_0 frame: the probe used to find the overlap of two streams.
+BACKLOG = 30 * 32000  # Unconsumed PCM bytes (30 s) kept in RAM before the session ends.
+
+
+class _Backlog(queue.Queue[Any]):
+    """Bounded by queued audio bytes: read sizes vary with the transport, lag does not."""
+
+    def _init(self, maxsize: int) -> None:
+        super()._init(maxsize)
+        self.size = 0
+
+    def _qsize(self) -> int:
+        return self.size
+
+    def _put(self, item: Any) -> None:
+        super()._put(item)
+        self.size += len(item[1]) or 1  # The empty end marker still counts as queued.
+
+    def _get(self) -> Any:
+        item = super()._get()
+        self.size -= len(item[1]) or 1
+        return item
 
 # Fixed wrapper; only validated numbers, pins and a setup identity digest are arguments.
 # Chunk metadata goes to the session's stderr, so its stdout is raw PCM only.
@@ -247,6 +268,7 @@ class _Chunk:
         self.skip = 0
         self.first_at: float | None = None
         self.stopped = False
+        self.overflow = False
         self.meta: list[bytes] = []
         self.reader = threading.Thread(target=self._read, args=(events,), daemon=True)
         self.errors = threading.Thread(target=self._errors, daemon=True)
@@ -261,7 +283,11 @@ class _Chunk:
                 data = os.read(fd, 65536)
             except OSError:
                 data = b""
-            events.put((self, data))
+            try:
+                events.put_nowait((self, data))
+            except queue.Full:
+                self.overflow = True  # The consumer fell behind: this audio is dropped.
+                return
             if not data:
                 return
 
@@ -319,7 +345,7 @@ def _session(ssh: Station, station: Station, item: Stream, known: str,
              backoff_s: float, live: dict[str, Any] | None = None) -> dict[str, Any]:
     stats: dict[str, Any] = live if live is not None else {}  # Readable while it runs.
     stats.update(chunks=0, handovers=0, gaps=0, failures=0, audio_bytes=0, reason=None)
-    events: queue.Queue[Any] = queue.Queue()
+    events: queue.Queue[Any] = _Backlog(BACKLOG)
     command = _command(station, item, "chunk", known=known).command
     active: _Chunk | None = None
     pending: _Chunk | None = None
@@ -394,6 +420,9 @@ def _session(ssh: Station, station: Station, item: Stream, known: str,
             if not room and active is None and pending is None and not running:
                 stats["reason"] = "max_chunks"
                 break
+            if any(chunk.overflow for chunk in running):
+                stats["reason"] = "error"
+                break
             for chunk in running:
                 if now > chunk.deadline:
                     chunk.signal(signal.SIGKILL)  # Hung session: its EOF follows, counts.
@@ -444,7 +473,7 @@ def apply(controller: Controller, plan_id: str, expected: str, item: Stream,
     base: dict[str, Any] = {"do_not_retry": True, "audio_exported": False}
     try:
         plan = controller.take_plan(plan_id, expected)
-        with controller._execution_lock:
+        with controller.execution_lock(plan.station.id):
             station = controller.station(plan.station.id)
             iop._permitted(controller, station)
             ssh = _ssh(station)

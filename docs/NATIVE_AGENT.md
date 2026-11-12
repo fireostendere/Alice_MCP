@@ -249,8 +249,18 @@ synthetic tests, not real firmware qualification.
 On 2026-10-30, owner-authorized maintenance installed the first combined build,
 then the calibrated and firmware-cache builds on one Mini 1. All returned `installed`, verified
 the native TLS route, preserved Quasar and the init hook, and cleaned staging.
-Reboot persistence was not exercised. Physical voice-route evidence is recorded
+Reboot persistence was not exercised then. Physical voice-route evidence is recorded
 in [VOICE_ARCHITECTURE.md](VOICE_ARCHITECTURE.md).
+
+**Cold boot, 2026-11-11 (one observation).** The station was powered on after days
+off. Thirteen hours later the init hook was present and executable and `rcS` had
+finished, but there was no agent process, pid file or start lock, and the native
+channel was unavailable. One manual `start` through the same hook then succeeded and
+TLS probes answered. The agent's stderr is discarded, so the cause is inferred, not
+logged: the hook runs right after Quasar's own boot script, the agent binds one
+private address that Wi-Fi may not hold yet, exits, and the start script's
+three-second liveness check fails. Until the agent waits for its address, start it
+by hand after every reboot; this needs a rebuilt, re-pinned agent and was not changed.
 
 Historical W0 evidence: a previous owner-operated update installed the W0 agent/player,
 preserved the existing init hook, TLS credentials/helpers and Quasar identity, and bound only host

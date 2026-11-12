@@ -28,8 +28,14 @@ normal function and existing secure access. Subscription-blocked devices have
    authorize them. Local file playback may be a smaller experiment than replacing
    the whole voice backend. Saturn is a hub, not an audio-reuse candidate.
 4. A third-party Spotify Connect report for Mini 2 is not evidence for all stations.
+   The Home Assistant voice satellite through Pulsar was tested on a working Lite 2
+   (Plum) only, never on a subscription-blocked unit.
    Full ASR is normally cloud-based; offline speech requires a replacement pipeline,
    not simply blocking vendor DNS or killing a daemon.
+5. Station 1 alone has a documented alternative OS: Debian beside or instead of the
+   Android system, tested on one firmware. It contains no Alice, rewrites the recovery
+   and optionally boot partitions, and is unrelated to subscription status. Plan it
+   with [station-gen1](../station-gen1/SKILL.md), not as a generic unlock.
 
 ## Preview and confirmation
 
@@ -58,11 +64,13 @@ permanent offline operation or no cloud traffic. Disclose what was not measured.
 ## Limitations
 
 The upstream page is a research request rather than a working subscription-block
-guide. Hardware similarity and normal-device success cannot fill that evidence
-gap. This skill supplies no bypass payloads or shutdown scripts and runs no station
+guide: it lists what to check and what might run instead of Alice, with no verified
+subscription-station report. Hardware similarity and normal-device success cannot
+fill that evidence gap. This skill supplies no bypass payloads or shutdown scripts and runs no station
 operations. Prefer a supported existing function over speculative platform surgery.
 
 Sources: [standalone research gaps](https://hackalice.me/recipes/standalone/),
 [AirPlay service effects](https://hackalice.me/recipes/airplay/),
+[Debian on Station 1](https://hackalice.me/recipes/station1-debian/),
 [local playback](https://hackalice.me/recipes/sounds/),
 [replacement voice backends](https://hackalice.me/recipes/llm/).

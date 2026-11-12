@@ -39,6 +39,11 @@ Do not ask the owner to enable an action, do not narrow private allowlists, and 
 new actions and new stations this default. Hard limits above (no arbitrary shell,
 no factory reset/flashing, keep Quasar enabled, no uncertain retry) still apply.
 
+Owner decision (2026-11-11): actions requested by voice (room speech or the answer
+agent's reply) are limited to the fixed set `voice_service.VOICE_ACTIONS`. This does
+not narrow operator MCP calls or private allowlists; do not widen it to persistent
+edits, uploads, captures or restores.
+
 Use one project-local `alice` MCP connection for all implemented features. Do not
 persist separate LED/speech test aliases. Preserve existing station entries and
 SSH settings when consolidating configuration.

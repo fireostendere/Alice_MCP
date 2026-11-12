@@ -200,7 +200,10 @@ def test_cancelled_native_request_closes_the_connection_without_resending(
 def test_native_controls_and_one_action_preserve_unknown_without_retry(native: Any,
                                                                      monkeypatch: Any) -> None:
     controller, calls, _, _, _ = native
-    assert controls.capabilities(controller, "desk")["transport"] == "native_mcp"
+    capabilities = controls.capabilities(controller, "desk")
+    assert capabilities["transport"] == "native_mcp"
+    # Same key as the SSH path: the resident's own list narrowed to this model's adapters.
+    assert capabilities["supported_actions"] == capabilities["allowed_actions"]
     monkeypatch.setattr(server, "controller", controller)
     result = asyncio.run(server.run_station_action(
         "desk", "speech.say", {"text": "synthetic"}, object(),

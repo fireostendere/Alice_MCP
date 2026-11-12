@@ -366,10 +366,13 @@ def preview(controller: Controller, station_id: str, package: AgentBundle) -> di
     _permitted(controller, station)
     _verify(station, package)
     nonce = secrets.token_hex(16)
-    response = json.loads(controller.runner(station, _command(station, package, nonce)))
-    if (set(response) != {"outcome", "state_sha256"} or response["outcome"] != "ready"
-        or not re.fullmatch("[a-f0-9]{64}", response["state_sha256"])):
-        raise SafetyError("Native-agent bootstrap profile is not ready")
+    try:
+        response = json.loads(controller.runner(station, _command(station, package, nonce)))
+        if (set(response) != {"outcome", "state_sha256"} or response["outcome"] != "ready"
+            or not re.fullmatch("[a-f0-9]{64}", response["state_sha256"])):
+            raise ValueError
+    except (ValueError, TypeError, KeyError, RecursionError):  # Empty or non-JSON output too.
+        raise SafetyError("Native-agent bootstrap profile is not ready") from None
     request = {"bundle_sha256": package.sha256, "nonce": nonce, "layout": package.layout,
                "autostart": package.autostart,
                "helper_sha256": hashlib.sha256(SCRIPT.encode()).hexdigest()}
@@ -391,6 +394,7 @@ def _transfer(station: Station, command: str, data: bytes, *,
         sink, source = process.stdin, process.stdout
         output: list[bytes] = []
         failed: list[bool] = []
+        unsent: list[bool] = []
         tls_verified: list[bool] = []
 
         def write() -> None:
@@ -398,13 +402,13 @@ def _transfer(station: Station, command: str, data: bytes, *,
                 sink.write(data)
                 sink.flush()
             except (OSError, ValueError):
-                failed.append(True)
+                unsent.append(True)
             finally:
-                if verify_tls is None or failed:
+                if verify_tls is None or unsent or failed:
                     try:
                         sink.close()  # EOF releases a transaction waiting for missing bytes.
                     except OSError:
-                        failed.append(True)
+                        unsent.append(True)
 
         def read() -> None:
             try:
@@ -455,6 +459,10 @@ def _transfer(station: Station, command: str, data: bytes, *,
             or result.keys() - {"outcome", "error_code", "quasar_changed", "autostart_registered",
                                "package_verified", "staging_cleaned", "do_not_retry"}):
             raise SafetyError("Native-agent transfer returned incompatible metadata")
+        # A helper that refuses exits without reading the package: only then is the
+        # writer's broken pipe expected rather than an uncertain transfer.
+        if unsent and result.get("outcome") != "blocked":
+            raise SafetyError("Native-agent transfer uncertain; do not retry")
         if verify_tls is not None and result.get("outcome") == "installed" and not tls_verified:
             raise SafetyError("Native-agent TLS barrier missing; do not retry")
         for key in ("quasar_changed", "autostart_registered", "package_verified",
@@ -471,7 +479,7 @@ def apply(controller: Controller, plan_id: str, expected_sha256: str,
           package: AgentBundle) -> dict[str, Any]:
     try:
         plan = controller.take_plan(plan_id, expected_sha256)
-        with controller._execution_lock:
+        with controller.execution_lock(plan.station.id):
             station = controller.station(plan.station.id)
             _permitted(controller, station)
             _verify(station, package)
@@ -485,9 +493,12 @@ def apply(controller: Controller, plan_id: str, expected_sha256: str,
                    != hashlib.sha256(SCRIPT.encode()).hexdigest()):
                 raise SafetyError("Native-agent preview changed or expired")
             request = plan.request
-            state = json.loads(controller.runner(
-                station, _command(station, package, request["nonce"]),
-            ))
+            try:
+                state = json.loads(controller.runner(
+                    station, _command(station, package, request["nonce"]),
+                ))
+            except (ValueError, RecursionError):
+                state = None
             if state != {"outcome": "ready", "state_sha256": plan.remote_sha256}:
                 raise SafetyError("Native-agent bootstrap state changed")
             if controller.clock() >= plan.expires:

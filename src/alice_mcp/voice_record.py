@@ -234,7 +234,7 @@ def apply(controller: Controller, plan_id: str, expected: str, take: Take,
           directory: Path = DEFAULT_DIR) -> dict[str, Any]:
     try:
         plan = controller.take_plan(plan_id, expected)
-        with controller._execution_lock:
+        with controller.execution_lock(plan.station.id):
             station = controller.station(plan.station.id)
             iop._permitted(controller, station)
             ssh = _ssh(station)

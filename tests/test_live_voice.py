@@ -19,6 +19,8 @@ from alice_mcp import realtime_voice as rv
 from alice_mcp import station_assistant as sa
 from alice_mcp.core import Controller, SafetyError, Station
 
+REAL_PERMITTED = lv.iop._permitted  # The fixture below disables it.
+
 ASR = "/bkupgrade/data/opt/alice-local-asr-0123456789ab"
 FAKE_CLIENT = r"""#!/bin/sh
 IFS= read -r secret; IFS= read -r opening
@@ -1165,3 +1167,144 @@ def test_normal_preconnection_expiry_renews_without_a_failure_backoff(
     finally:
         stop.set()
         runner.join(5)
+
+
+def test_station_supplied_end_fields_are_allowlisted_and_type_checked() -> None:
+    end = {"event": "end", "reason": "/private/path token=SECRET", "barge_ins": "PRIVATE",
+           "player": {"outcome": "PRIVATE", "frames_written": "PRIVATE", "flushes": -1,
+                      "underruns_recovered": True, "cleanup_verified": "yes", "extra": 1},
+           "mic": {"peak": "PRIVATE"}}
+    result = lv._outcome(end, threading.Event())
+    assert result == {"outcome": "unknown", "reason": "unknown", "barge_ins": 0, "mic": {},
+                      "player": {}}
+    end = {"reason": "idle", "barge_ins": 2, "player": {
+        "outcome": "complete", "frames_written": 9600, "flushes": 1, "underruns_recovered": 0,
+        "cleanup_verified": True, "stage": "complete"}}
+    assert lv._outcome(end, threading.Event()) == {
+        "outcome": "complete", "reason": "idle", "barge_ins": 2, "mic": {}, "player": {
+            "outcome": "complete", "frames_written": 9600, "flushes": 1,
+            "underruns_recovered": 0, "cleanup_verified": True}}
+    for reason in lv.BLOCKED | lv.CLOUD | {"stopped", "deadline", "failed", "player_failed",
+                                          "output_limit", "invalid_control", "wake_failed"}:
+        assert lv._outcome({"reason": reason}, threading.Event())["reason"] == reason
+    assert lv._outcome({"reason": ["idle"], "player": {"outcome": ["complete"]}},
+                       threading.Event())["reason"] == "unknown"
+
+
+def test_standby_listener_reports_only_fixed_reasons(
+        live_station: tuple[Controller, Path]) -> None:
+    controller, _ = live_station
+    pipe = Pipe()
+    standby = lv.Standby(controller, "mini1", "sk-key", lambda e: None, threading.Event(),
+                         popen=lambda *a, **k: pipe, minter=lambda *a: "ek_secret")
+    pipe.say({"event": "end", "reason": "/private/path token=SECRET"})
+    assert standby.run() == {"outcome": "unknown", "reason": "unknown"}
+
+
+def _speak_only(controller: Controller, monkeypatch: Any, **changes: Any) -> None:
+    import dataclasses
+
+    station = dataclasses.replace(controller.station("mini1"), **changes)
+    monkeypatch.setattr(controller, "station", lambda _: station)
+    monkeypatch.setattr(lv.iop, "_permitted", REAL_PERMITTED)
+
+
+def test_speak_only_session_needs_only_the_previewed_speech_permission(
+        live_station: tuple[Controller, Path], monkeypatch: Any) -> None:
+    # The owner approves the form; no standing preauthorization or speech.listen needed.
+    controller, _ = live_station
+    policy = {**controller.station("mini1").controls, "allowed_actions": ["speech.openai"]}
+    _speak_only(controller, monkeypatch, preauthorize_all_actions=False, controls=policy)
+    assert _live(controller, FakeProcess([END]), listen=False)[0]["outcome"] == "complete"
+    with pytest.raises(SafetyError):  # The microphone keeps the stricter check.
+        _live(controller, FakeProcess([END]), listen=True)
+    _speak_only(controller, monkeypatch, controls={**policy, "allowed_actions": ["speech.say"]})
+    with pytest.raises(SafetyError):
+        _live(controller, FakeProcess([END]), listen=False)
+
+
+class Stuck(FakeProcess):
+    """A live SSH transport whose remote never answers; only a kill ends the read."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.killed = threading.Event()
+
+    def readline(self, limit: int = -1) -> bytes:
+        self.killed.wait(5)
+        return super().readline(limit)
+
+    def kill(self) -> None:
+        self.killed.set()
+
+
+def test_previewed_speech_applies_without_preauthorization_and_a_stuck_remote_is_unknown(
+        live_station: tuple[Controller, Path], monkeypatch: Any) -> None:
+    import functools
+    import time
+
+    from alice_mcp import controls
+
+    controller, _ = live_station
+    _speak_only(controller, monkeypatch, preauthorize_all_actions=False)
+    monkeypatch.setattr(rv, "api_key", lambda: "sk-key")
+    processes: list[FakeProcess] = [FakeProcess([END]), Stuck()]
+    monkeypatch.setattr(lv, "run", functools.partial(
+        lv.run, popen=lambda *a, **k: processes.pop(0), minter=lambda *a: "ek_secret"))
+
+    def apply() -> dict[str, Any]:
+        plan = controls.preview(controller, "mini1", "speech.openai", {"text": "Привет"})
+        assert plan["approval_required"] is True
+        return controller.execute_plan(controller.take_plan(plan["plan_id"],
+                                                            plan["expected_sha256"]))
+
+    assert apply()["outcome"] == "applied"
+    # speech.openai sessions are bound to 179 s; shrink the host margin instead of waiting.
+    monkeypatch.setattr(lv, "KILL_MARGIN", -178.5, raising=False)
+    started = time.monotonic()
+    result = apply()
+    assert time.monotonic() - started < 4 and not processes
+    assert result["outcome"] == "unknown" and result["do_not_retry"] is True
+    assert result["reason"] == "unknown"
+
+
+def test_standby_transport_is_killed_after_its_own_bound(
+        live_station: tuple[Controller, Path], monkeypatch: Any) -> None:
+    controller, _ = live_station
+    pipe = Pipe()
+    pipe.kill = lambda: pipe.lines.put(b"")  # type: ignore[method-assign]
+    monkeypatch.setattr(lv, "STANDBY_SECONDS", 0, raising=False)
+    monkeypatch.setattr(lv, "KILL_MARGIN", 0.2, raising=False)
+    standby = lv.Standby(controller, "mini1", "sk-key", lambda e: None, threading.Event(),
+                         popen=lambda *a, **k: pipe, minter=lambda *a: "ek_secret")
+    assert standby.run() == {"outcome": "unknown", "reason": "unknown"}
+
+
+def test_standby_session_stops_waiting_at_its_deadline_and_is_unknown(
+        live_station: tuple[Controller, Path], monkeypatch: Any) -> None:
+    import time
+
+    controller, _ = live_station
+    pipe = Pipe()
+    killed = threading.Event()
+    pipe.kill = lambda: (killed.set(), pipe.lines.put(b""))  # type: ignore[method-assign]
+    monkeypatch.setattr(lv, "KILL_MARGIN", 0, raising=False)
+    standby = lv.Standby(controller, "mini1", "sk-key", lambda e: None, threading.Event(),
+                         popen=lambda *a, **k: pipe, minter=lambda *a: "ek_secret")
+    runner = threading.Thread(target=standby.run)
+    runner.start()
+    while standby.process is None:
+        time.sleep(0.01)
+    # Without a host deadline this late end would be awaited and reported as complete.
+    late = threading.Timer(4, pipe.say, [{"event": "session_end", "reason": "idle",
+                                          "player": {"outcome": "complete"}}])
+    late.start()
+    started = time.monotonic()
+    result = standby.say("Привет", deadline=started + 1.5, cancel=threading.Event())
+    late.cancel()
+    assert time.monotonic() - started < 3
+    assert result["outcome"] == "unknown" and result["reason"] == "unknown"
+    # The stuck transport is ended, so no late end can reach the next session.
+    assert killed.is_set()
+    runner.join(5)
+    assert not runner.is_alive() and standby.process is None

@@ -15,7 +15,7 @@ import time
 from importlib.resources import files
 from typing import Any
 
-from alice_mcp import device_runtime
+from alice_mcp import device_runtime, models
 from alice_mcp.core import (
     BUILDROOT_MODELS,
     Controller,
@@ -26,7 +26,8 @@ from alice_mcp.core import (
     _unique,
 )
 
-MAX_REQUEST_COMMAND = 120 * 1024
+# Helper source plus the largest media upload, with headroom; each stays one argv string.
+MAX_REQUEST_COMMAND = 192 * 1024
 RESULT_KEYS = {
     "outcome", "state_sha256", "backup_id", "restoration_verified", "reload_required",
     "error_code", "command_succeeded", "effect_observed", "evidence_class",
@@ -166,13 +167,18 @@ def capabilities(controller: Controller, station_id: str) -> dict[str, Any]:
     if station.native_mcp:
         from alice_mcp import native_transport
 
-        return {**native_transport.capabilities(controller, station), **jobs}
+        native = native_transport.capabilities(controller, station)
+        return {**native, **jobs, "supported_actions": [
+            a for a in native.get("allowed_actions", []) if models.supports(station.model, a)]}
     policy = station.controls
+    allowed = device_runtime.allowed_actions(policy)
     return {
         **jobs,
         "evidence_class": "caller", "station_id": station.id, "model": station.model,
         "writes_enabled": controller.writes and os.name != "nt",
-        "allowed_actions": device_runtime.allowed_actions(policy),
+        "allowed_actions": allowed,
+        # The private allowlist narrowed to actions this model has an adapter for.
+        "supported_actions": [a for a in allowed if models.supports(station.model, a)],
         "preauthorize_all_actions": station.preauthorize_all_actions,
         "preauthorized_actions": (device_runtime.allowed_actions(policy)
                                   if station.preauthorize_all_actions

@@ -287,7 +287,7 @@ Consume preview, use private preauthorization or ask once, revalidate and execut
 
 ## `get_model_interfaces`
 
-Read source-linked LED/audio/GPIO facts and unknowns; never guesses writable pins.
+Model profile, per-action adapter matrix, LED/audio/GPIO facts and open gaps; no access.
 
 ```json
 {

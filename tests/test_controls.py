@@ -284,3 +284,36 @@ def test_host_and_deployed_helper_roundtrip_without_a_device(device: Any, tmp_pa
     assert json.loads(config.read_text()) == {
         "uniProxyUrl": "https://model.invalid/uni.ws", "keep": True,
     }
+
+
+def test_largest_declared_media_upload_fits_every_transport_bound() -> None:
+    from types import SimpleNamespace
+
+    from alice_mcp import device_runtime as rt
+
+    data = b"RIFF\0\0\0\0WAVE" + b"\0" * (rt.MAX_MEDIA - 12)
+    policy = rt.validate_policy({"firmware_sha256": "a" * 64, "media": {"clip": {
+        "path": "/data/sounds/clip.wav", "sha256": hashlib.sha256(data).hexdigest()}}},
+        "station-lite")
+    request = {"schema": rt.SCHEMA, "mode": "apply", "model": "station-lite", "policy": policy,
+               "action": "media.upload", "nonce": "e" * 32, "expected_sha256": "d" * 64,
+               "params": {"asset": "clip", "content_base64": base64.b64encode(data).decode()}}
+    sent: list[SSHInput] = []
+
+    def runner(station: object, command: SSHInput) -> str:
+        sent.append(command)
+        return '{"outcome":"ready","state_sha256":"' + "d" * 64 + '"}'
+
+    real_invoke(SimpleNamespace(runner=runner), SimpleNamespace(), request)  # type: ignore[arg-type]
+    size = len(sent[0].data)
+    # Headroom for helper growth: the documented ceiling must not erode silently again.
+    assert controls.MAX_REQUEST_COMMAND - size >= 16 * 1024
+    import re
+
+    match = re.search(r" -I -c (.*) ([A-Za-z0-9+/=]+); fi; done; exit 126\Z",
+                      sent[0].data.decode(), re.S)
+    assert match is not None
+    source, payload = match[1], match[2]
+    # Linux caps one argv string at 128 KiB; the station helper caps its own argument too.
+    assert len(payload) < 128 * 1024 and len(source) < 128 * 1024
+    assert len(payload) <= 160000 and len(base64.b64decode(payload)) <= 120000

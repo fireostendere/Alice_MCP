@@ -484,7 +484,12 @@ so closely spaced recognition results cannot start overlapping responses.
 
 Station actions are bound to the listening station. They reuse the existing
 fresh previews, one-use consumption, live policy/trust/state checks and standing
-preauthorization. Spoken input never changes those permissions. An unknown action
+preauthorization. Spoken input never changes those permissions. A voice request can
+reach only the fixed bounded set `voice_service.VOICE_ACTIONS` (speech, Quasar/mixer
+volume, short playback, the stock wake-word switch and self-ending LED effects):
+room speech and web pages read by the answer agent are untrusted, so persistent
+edits (`sound.replace`, `config.select`, `media.upload`, `restore`) and captures
+are refused before any preview and stay with the operator's own MCP call. An unknown action
 or playback outcome latches the voice route off until the listener is restarted;
 it is never replayed automatically.
 
@@ -715,6 +720,27 @@ The personalized `komp` model did not react to generated (Piper) phrases on 2026
 either through the standby or a direct `capture | wake-detector` run. Live checks of this
 mode therefore need the owner's voice. The direct Realtime half was validated separately
 (above).
+
+## Second provider: Gemini Live (not integrated)
+
+The owner asked to try the Gemini Live free tier. Nothing in the voice path uses it
+yet: `live_client.c`, the session settings and the client-secret mint speak only the
+OpenAI Realtime protocol. What exists:
+
+- `scripts/voice/gemini_probe.py` — owner-run from the PC, no station access. With
+  `GEMINI_API_KEY` in the private `.env` it asks one typed question, answers the
+  model's `get_time` call, then mints a one-use constrained token and opens a second
+  session with it. It prints wire facts (frame type, event names and timings, token
+  field accepted), never the key, the token or audio. It has not been run against the
+  provider: no key was configured.
+- Build evidence (2026-11-12): Zig 0.15.1 from the `ziglang` wheel rebuilt the
+  unchanged `live_client.c` twice from clean caches to the recorded 33,536 bytes and
+  `live_voice.ONESHOT_CLIENT_SHA256`, so a ported client can be built reproducibly here.
+- Mini 1 reaches the API host with verified TLS ([MODELS.md](MODELS.md)). Regional
+  availability and free-tier quota are only visible with a key.
+
+On the free tier the provider uses requests to improve its products; a station
+client would send room speech after the wake word there.
 
 ## Setup
 

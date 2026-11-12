@@ -22,36 +22,45 @@ to discussing compatibility. Read the [model matrix](references/models.md).
 
 1. Match retail identity against platform evidence, not a similar internal name.
    Internal device-tree `station-midi` means Station 2; Cucumber means retail Midi;
-   `yandexstation_2` means Android Max.
+   `yandexstation_2` means Android Max, with or without Zigbee.
 2. If access already exists, compare kernel architecture (`uname -m`), OS family,
    firmware version and ELF interpreter/class of the intended application.
    A 64-bit kernel does not establish a 64-bit system userspace.
-3. Select Buildroot, Android or Yocto guidance. Treat Orion as unknown rather than
-   borrowing a nearby model. Distinguish Mini 1, Bergamot and Pickle explicitly.
+3. Select Buildroot, Android or Yocto guidance. Orion is Buildroot on the Amlogic
+   A5 that Midi uses but a different board: do not borrow Midi's LED or audio
+   layout. Distinguish Mini 1, Bergamot and Pickle explicitly.
 4. Record observed facts separately from wiki reports, estimates and missing data.
     Do not collect factory contents, full boot arguments or an unfiltered inventory.
-5. Use `get_model_interfaces(model)` for local source-linked interface evidence and
-   unknowns. With a configured private inventory, `get_station_controls(station_id)`
+5. With existing SSH access, `station_probe(station_id, "identify")` compares fixed
+   device-tree tokens with the declared model: `declared_matches=false` is a wrong
+   inventory entry, `null` means the board has no known token.
+6. Use `get_model_interfaces(model)` for the model profile, its per-action adapter
+   matrix (`adapter`, `generic`, `none`), interface evidence and open gaps.
+   With a configured private inventory, `get_station_controls(station_id)`
    lists declared action/asset/binding/option aliases, not paths, private values or
    verified hardware availability. Neither tool accesses the station. A declared
    model or action allowlist is not hardware detection or permission to write.
 
 ## Interface evidence and unsupported writes
 
-- Lite: sysfs `micro:{red,green,blue}:ring1` through `ring3` brightness nodes.
-  Mini 2: `mini2:{red,green,blue}:ring1` through `ring6`. Applicable triggers must
-  be checked; do not infer Lite 2 support from Lite.
+- Lite and Fiero Hi: sysfs `micro:{red,green,blue}:ring1` through `ring3` brightness
+  nodes. Mini 2: `mini2:{red,green,blue}:ring1` through `ring6`. Applicable triggers
+  must be checked; do not infer Lite 2 support from Lite.
 - Mini 3/Bergamot: 6×1, 24-bpp BGR framebuffer, 18 bytes. Station 2: 89×1,
   32-bpp RGBW, 356 bytes; index 88 is not visible. Runtime geometry/stride and
   exact locally reviewed `maind` firmware SHA-256 must match, not just model name.
-- Mini 1 I2C ring protocol is unknown; Midi framebuffer channel order is unknown.
-  Both have unsupported LED writes. Never guess an I2C payload or byte ordering.
+- Mini 1 has an SN3236 I2C ring: no generic `led.effect`, only the bounded
+  `led.show`, capture, replay, pulse and animation actions with a privately
+  calibrated map. Midi framebuffer channel order is unknown and its LED writes are
+  unsupported. On Orion `/dev/fb0` is the ambilight, not the ring, and its frame
+  format is unverified. Never guess an I2C payload or byte ordering.
 - Full GPIO pinouts are unavailable. Lite's AO 497–511 and EE 411–496 ranges and
   named consumers do not identify safe writable pins. Midi's `zb-reset-gpios` and
   `zb-boot-gpios` lack line mappings. No arbitrary GPIO/I2C/memory/register controls.
 - Volume requires a runtime-probed `Master` control on operator-reviewed Buildroot;
-  the public exact command is documented only for Lite. Native maind/GStreamer
-  playback evidence is not proof of every firmware's codecs, route or speakers.
+  the device pages document the `Master` percentage command for Lite, Fiero Hi,
+  Station 2 and Mini 3 Pro. Native maind/GStreamer playback evidence is not proof of
+  every firmware's codecs, route or speakers; Pickle's factory image lacks that mode.
 
 ## Preview and confirmation
 
@@ -93,13 +102,14 @@ effects; declared controls, runtime checks and owner observations remain distinc
 
 ## Limitations
 
-The matrix covers all fourteen dedicated upstream model pages and the device
-index, not fourteen validated integrations. Duo Max and Station Pro have no
-dedicated pages at this revision. Firmware changes invalidate inferred persistence,
-TLS behavior and binary compatibility. This repository has not tested stations.
-Public evidence is pinned to revision `1ab048bf95c0e5e547a1ff6c801d2ed9deb193db`.
-No station access or hardware test was performed; integration checks are
-offline/synthetic. JSON endpoint/voice/model adapters are explicit operator bindings,
+The matrix covers all seventeen dedicated upstream model pages and the device
+index, not seventeen validated integrations. Duo Max and Station Pro have no
+dedicated pages. Firmware changes invalidate inferred persistence,
+TLS behavior and binary compatibility. Public evidence is pinned to revision
+`520fbccd68cb90a8c4f01d06bf38d9a7db915304`.
+This project's own live evidence is one Mini 1 pilot and one audible Mini 3 speech
+test; every other model is a profile slot with offline/synthetic checks only.
+To add a station of another model, use [station-bringup](../station-bringup/SKILL.md). JSON endpoint/voice/model adapters are explicit operator bindings,
 not manufacturer-certified schemas or backend installation; native `quasar.cfg`
 bindings cover only `uniProxyUrl`/`uniProxyQuicUrl`, not arbitrary stock voice replacement.
 

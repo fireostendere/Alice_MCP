@@ -111,9 +111,28 @@ for «скажи …» get the OpenAI voice without the resident agent. On 2026-
 through `run_station_action(speech.say)` was `applied` with a verified player cleanup.
 
 Without that binding, a private `controls.local_tts` makes `speech.say` synthesize on
-this PC and play through the resident agent: either the pinned Piper model or
-`{"command": [...]}`, any synthesizer program that reads text on stdin and prints a WAV
-([details](NATIVE_AGENT.md#any-other-synthesizer)).
+this PC: either the pinned Piper model or `{"command": [...]}`, any synthesizer program
+that reads text on stdin and prints a WAV
+([details](NATIVE_AGENT.md#any-other-synthesizer)). A Mini 1 behind the resident agent
+plays it through the agent's PCM player.
+
+### Host speech without the agent
+
+Every other Buildroot speaker takes the same `local_tts` key over SSH. The entry needs
+only `controls.firmware_sha256` and `controls.local_tts`; `local_tts` wins over a
+`tts_client` on the same station. The preview runs a fixed stock-shell script (no
+Python, nothing installed) that checks the firmware digest and binds the state. Apply
+synthesizes on this PC, then streams one canonical WAV (mono 16-bit, at most 20 s,
+attenuated to a quarter of full scale) into the firmware's own GStreamer player:
+the `audio.play` pipeline reading the SSH stream instead of a file. The text never
+reaches the station, nothing is written there and Quasar keeps running. A 26-second
+watchdog on the station ends a stuck player. `applied` means the player exited
+cleanly, not that anyone heard it; any other exit is `unknown` and is not retried.
+
+One observation, 2026-11-12, Station Lite (BusyBox 1.31, no Python): `applied` for a
+2.5-second phrase. Loudness against the station's own voice, behaviour while Alice is
+speaking or playing music, and every other model are unverified. Android, Yocto and
+unknown-family models have no write path, so this does not reach them.
 
 While the `station_live` listener runs, speech goes through its warm station process (a `say`
 session without the microphone). There is no SSH launch, binary upload, firmware hash or

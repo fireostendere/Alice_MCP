@@ -271,13 +271,12 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
             if _keys(local, {"command"}):
                 # Host program of the owner's (text on stdin, WAV on stdout), run without a shell.
                 argv = local["command"]
-                _require(model == "station-mini" and type(argv) is list
+                _require(type(argv) is list
                          and 1 <= len(argv) <= 16 and _safe_path(argv[0])
                          and all(type(a) is str and 0 < len(a) <= 256 and "\0" not in a
                                  for a in argv))
             else:
-                _require(model == "station-mini"
-                         and _keys(local, {"model_file", "model_sha256", "config_sha256"})
+                _require(_keys(local, {"model_file", "model_sha256", "config_sha256"})
                          and _safe_path(local["model_file"])
                          and _match(HEX64, local["model_sha256"])
                          and _match(HEX64, local["config_sha256"]))
@@ -447,8 +446,10 @@ def _media(data: bytes, path: str) -> bool:
 def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, Any],
                         model: str) -> dict[str, Any]:
     try:
+        # Host synthesis (`local_tts`) makes speech.say model-agnostic: the station only plays.
         _require(isinstance(action, str) and action in ACTIONS
-                 and model in ACTION_MODELS.get(action, MODELS))
+                 and (model in ACTION_MODELS.get(action, MODELS)
+                      or action == "speech.say" and "local_tts" in policy))
         if action == "led.show":
             return _show_parameters(params, model)
         fields = {
@@ -496,7 +497,7 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
             _require("quasar_client" in policy and type(params["enabled"]) is bool)
         elif action == "speech.say":
             text = params["text"]
-            _require("tts_client" in policy
+            _require(("tts_client" in policy or "local_tts" in policy)
                      and isinstance(text, str) and 1 <= len(text) <= 256
                      and len(text.encode("utf-8")) <= 512 and bool(text.strip())
                      and not any(ord(c) < 32 or 127 <= ord(c) <= 159

@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from alice_mcp import asr_resources, capture_probe, models, network_probe
 
@@ -159,11 +159,18 @@ class SSHInput:
 
     command: str
     data: bytes
+    LIMIT: ClassVar[int] = 192 * 1024
 
     def __post_init__(self) -> None:
         if (not isinstance(self.command, str) or len(self.command.encode()) > 4096
-            or not isinstance(self.data, bytes) or len(self.data) > 192 * 1024):
+            or not isinstance(self.data, bytes) or len(self.data) > self.LIMIT):
             raise SafetyError("Bundled helper exceeds SSH input bounds")
+
+
+class SSHStream(SSHInput):
+    """One canonical utterance (20 s of 48 kHz mono S16) for the fixed player command."""
+
+    LIMIT = 1920044
 
 
 def confirm(answer: str, word: str) -> dict[str, str] | None:
@@ -316,8 +323,8 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
                 control_policy = validate_policy({**control_policy, "voice": {
                     **voice, "indicator": {**indicator, "color": colours[entry["id"]]}}},
                     entry["model"])
-            if ("local_tts" in control_policy or "local_media" in control_policy) and not native:
-                raise ValueError("Local speech requires the resident transport")
+            if "local_media" in control_policy and not native:
+                raise ValueError("Local media requires the resident transport")
             from alice_mcp.owned_jobs import validate_policy as validate_jobs
 
             jobs = validate_jobs(entry.get("jobs", {}), control_policy, entry["model"],

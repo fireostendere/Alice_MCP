@@ -336,10 +336,13 @@ text, the program's output and its error stream are never reported. The MCP
 caller cannot choose or change the program. If the program sends text to a cloud
 service, that is the owner's choice for that inventory entry; the host adds no
 fallback of its own. A private `voice.say_backend: "openai"` still wins: remove
-it to use `local_tts`. Synthetic tests only; no engine has been run through this
-form on hardware.
+it to use `local_tts`. On 2026-11-12 the Piper command line
+(`python -m piper -m MODEL -f -`) ran through this form on one Mini 1: `applied`,
+2.5 s of playback, verified cleanup; audibility is the owner's to confirm.
 
-Either form requires native transport. It synthesizes in RAM, sends canonical
+On a station without the resident agent the same key plays through the firmware's
+own player over SSH: see [CONTROLS.md](CONTROLS.md#host-speech-without-the-agent).
+The rest of this section is the agent path. It synthesizes in RAM, sends canonical
 WAV plus its digest over authenticated TLS and **never falls back to cloud text
 TTS or SSH**. Native private `local_pcm` contains `client` (the installed pinned
 `pcm-player`), `alsa_config_sha256` (reviewed `/etc/asound.conf`) and

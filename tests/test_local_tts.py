@@ -137,5 +137,5 @@ def test_policy_accepts_a_synthesizer_command_only_as_an_absolute_argv() -> None
         rt.validate_policy({**base, "local_tts": {
             "command": command, "model_file": "/x", "model_sha256": "a" * 64,
             "config_sha256": "b" * 64}}, "station-mini")
-    with pytest.raises(ValueError):
-        rt.validate_policy({**base, "local_tts": {"command": command}}, "station-lite")
+    # Host synthesis is not tied to a model: the station only has to play the result.
+    assert rt.validate_policy({**base, "local_tts": {"command": command}}, "station-lite")

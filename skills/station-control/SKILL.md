@@ -79,8 +79,9 @@ retry it, check `station_status` or the relevant probe and report.
 
 Native and OpenAI speech, Quasar volume, the wake word switch, the wake listener,
 captures and most LED actions exist for Mini 1 only; Mini 3 has `speech.say` and
-LED effects. Other Buildroot models have only the unverified generic audio and
-config path, and Android or Yocto models are read-only. Timers have no on-device
+LED effects. Other Buildroot models have the generic audio and config path and,
+with a private `local_tts`, `speech.say` in the owner's own synthesizer voice
+(heard on one Lite only); Android or Yocto models are read-only. Timers have no on-device
 countdown. Answers from `ask_station` depend on the host's network and API key.
 
 Sources: [project home and model routing](https://hackalice.me/),

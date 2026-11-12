@@ -15,6 +15,7 @@ from alice_mcp.core import Controller, SafetyError
 # so only the model gate decides.
 FULL_POLICY: dict[str, Any] = {
     "max_volume": 30, "quasar_client": "/x", "speech_client": {}, "tts_client": {},
+    "local_tts": {"command": ["/x"]},
     "voice": {"live_client": "/x", "live_player": "/x"},
     "media": {"a": {"path": "/data/sounds/a.opus", "sha256": "0" * 64}},
     "configs": {"b": {"choices": {"c": "x"}}},

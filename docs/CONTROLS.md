@@ -110,6 +110,11 @@ binding for every call, not a fallback after a failure, so agents that pick `spe
 for «скажи …» get the OpenAI voice without the resident agent. On 2026-11-01 «Привет!»
 through `run_station_action(speech.say)` was `applied` with a verified player cleanup.
 
+Without that binding, a private `controls.local_tts` makes `speech.say` synthesize on
+this PC and play through the resident agent: either the pinned Piper model or
+`{"command": [...]}`, any synthesizer program that reads text on stdin and prints a WAV
+([details](NATIVE_AGENT.md#any-other-synthesizer)).
+
 While the `station_live` listener runs, speech goes through its warm station process (a `say`
 session without the microphone). There is no SSH launch, binary upload, firmware hash or
 resident call. One spare speech secret (600 s) stays on this PC, is used once and is

@@ -340,13 +340,15 @@ def test_native_capture_never_releases_unverified_text(change: str) -> None:
 
 
 @pytest.mark.parametrize("synthesis_ok", [True, False])
+@pytest.mark.parametrize("entry,policy", [
+    ("synthesize", {"model_file": "/PRIVATE/voice.onnx", "model_sha256": "a" * 64,
+                    "config_sha256": "b" * 64}),
+    ("command_wav", {"command": ["/PRIVATE/say", "--voice", "ru"]})])
 def test_local_speech_uses_only_pcm_tls_and_never_falls_back_to_cloud(
-    native: Any, monkeypatch: Any, synthesis_ok: bool,
+    native: Any, monkeypatch: Any, synthesis_ok: bool, entry: str, policy: dict[str, Any],
 ) -> None:
     controller, calls, result, data, _ = native
-    data["stations"][0]["controls"]["local_tts"] = {
-        "model_file": "/PRIVATE/voice.onnx", "model_sha256": "a" * 64, "config_sha256": "b" * 64,
-    }
+    data["stations"][0]["controls"]["local_tts"] = policy
     controller.inventory.write_text(json.dumps(data))
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as audio:
@@ -356,11 +358,13 @@ def test_local_speech_uses_only_pcm_tls_and_never_falls_back_to_cloud(
         audio.writeframes(b"\x01\x00" * 22050)
 
     def synthesize(*args: Any, **kwargs: Any) -> bytes:
+        if not synthesis_ok and entry == "command_wav":
+            raise local_tts.SpeechCommandError("TTS command failed")
         if not synthesis_ok:
             raise SafetyError("SENSITIVE_SENTINEL")
         return buffer.getvalue()
 
-    monkeypatch.setattr(local_tts, "synthesize", synthesize)
+    monkeypatch.setattr(local_tts, entry, synthesize, raising=False)
     result.clear()
     result.update(outcome="applied", playback_started=True, playback_completed=True,
                   cleanup_verified=True, frames_written=22050, sample_rate=22050,
@@ -377,6 +381,8 @@ def test_local_speech_uses_only_pcm_tls_and_never_falls_back_to_cloud(
         assert not response["physical_effects_verified"]
     else:
         assert response["outcome"] == "blocked" and calls == ["get_station_controls"]
+        # Only the command backend's own fixed reasons are shown.
+        assert ("TTS command failed" in response["error"]) == (entry == "command_wav")
 
 
 def test_local_pcm_results_reject_uncorrelated_or_private_fields() -> None:

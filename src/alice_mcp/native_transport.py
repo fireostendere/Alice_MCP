@@ -289,12 +289,16 @@ def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
     local = station.controls.get("local_tts") if action == "speech.say" else None
     audio = b""
     if local is not None:
-        from alice_mcp.local_tts import synthesize, wav_parameters
+        from alice_mcp import local_tts
 
         try:
-            audio = synthesize(parameters["text"], Path(local["model_file"]),
-                               local["model_sha256"], local["config_sha256"])
-            parameters = wav_parameters(audio)
+            audio = (local_tts.command_wav(parameters["text"], local["command"])
+                     if "command" in local else
+                     local_tts.synthesize(parameters["text"], Path(local["model_file"]),
+                                          local["model_sha256"], local["config_sha256"]))
+            parameters = local_tts.wav_parameters(audio)
+        except local_tts.SpeechCommandError as error:
+            return {"outcome": "blocked", "error": f"{error}; nothing was sent to the station"}
         except Exception:
             return {"outcome": "blocked", "error": "Local synthesis unavailable; no cloud fallback"}
     if action in native_typed.ACTIONS:

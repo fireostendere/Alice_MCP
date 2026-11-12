@@ -1,6 +1,7 @@
-"""Optional offline Russian Piper synthesis; no listener, download or device action.
+"""Host-side speech synthesis; no listener, download or device action.
 
-The operator installs Piper and hash-pinned model/config separately. Generated
+Two owner-selected engines: a hash-pinned offline Russian Piper model, or any
+synthesizer program of the owner's (text on stdin, WAV on stdout). Generated
 text/audio stay in RAM; this module does not provide station playback or claim
 that the room heard anything.
 """
@@ -15,7 +16,11 @@ import json
 import logging
 import re
 import struct
+import subprocess
+import threading
+import time
 import wave
+from array import array
 from pathlib import Path
 
 from alice_mcp import device_runtime as rt
@@ -39,6 +44,72 @@ def wav_parameters(audio: bytes) -> dict[str, str]:
                 "sha256": hashlib.sha256(audio).hexdigest()}
     except Exception:
         raise SafetyError("Local PCM invalid or outside playback bounds") from None
+
+
+COMMAND_SECONDS = 60.0  # A preview lives 300 s; cloud engines answer in a few.
+
+
+class SpeechCommandError(SafetyError):
+    """Fixed reasons only: safe to show, never the text or the program's output."""
+
+
+def _wav(rate: int, pcm: bytes) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(pcm)
+    return output.getvalue()
+
+
+def canonical(raw: bytes) -> bytes:
+    """Any mono 16-bit PCM WAV as the quiet canonical form the resident player accepts."""
+    try:
+        with wave.open(io.BytesIO(raw), "rb") as wav:
+            rate = wav.getframerate()
+            shape = wav.getnchannels(), wav.getsampwidth(), wav.getcomptype()
+            data = wav.readframes(rate * 20 + 1)  # Streamed headers lie about the length.
+    except (wave.Error, EOFError):
+        raise SpeechCommandError("TTS command output is not a WAV file") from None
+    if shape != (1, 2, "NONE") or not 16000 <= rate <= 48000:
+        raise SpeechCommandError("TTS command must print mono 16-bit PCM WAV at 16-48 kHz")
+    samples = array("h", data[:len(data) & ~1])
+    if not samples or len(samples) > rate * 20:
+        raise SpeechCommandError("TTS command output is empty or longer than 20 s")
+    peak = max(max(samples), -min(samples))
+    if peak > 8191:  # The player rejects louder audio: attenuate, never amplify.
+        samples = array("h", (int(sample * 8191 / peak) for sample in samples))
+    return _wav(rate, samples.tobytes())
+
+
+def command_wav(text: str, command: list[str]) -> bytes:
+    """The owner's own synthesizer: UTF-8 text on stdin, a WAV on stdout; no shell."""
+    limit = 48000 * 2 * 20 * 4  # Room for a header and for an over-long reply to be named.
+    start = time.monotonic()
+    try:
+        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL) as process:
+            assert process.stdin and process.stdout
+            timer = threading.Timer(COMMAND_SECONDS, process.kill)
+            timer.start()
+            try:
+                process.stdin.write(text.encode())  # At most 512 bytes: fits the pipe.
+                process.stdin.close()
+                raw = process.stdout.read(limit + 1)
+                if len(raw) > limit:
+                    process.kill()
+                code = process.wait()
+            finally:
+                timer.cancel()
+    except OSError:
+        raise SpeechCommandError("TTS command could not be run") from None
+    if len(raw) > limit:
+        raise SpeechCommandError("TTS command printed too much")
+    if code:
+        late = time.monotonic() - start >= COMMAND_SECONDS
+        raise SpeechCommandError("TTS command timed out" if late else "TTS command failed")
+    return canonical(raw)
 
 
 def synthesize(text: str, model: Path, model_sha256: str, config_sha256: str,
@@ -85,12 +156,6 @@ def synthesize(text: str, model: Path, model_sha256: str, config_sha256: str,
                 pcm.extend(data)
         if not pcm:
             raise ValueError
-        output = io.BytesIO()
-        with wave.open(output, "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(rate)
-            wav.writeframes(pcm)
-        return output.getvalue()
+        return _wav(rate, bytes(pcm))
     except Exception:
         raise SafetyError("Local TTS unavailable, changed or outside safety bounds") from None

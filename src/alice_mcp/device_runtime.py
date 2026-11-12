@@ -268,11 +268,19 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
             result["voice"] = voice
         if "local_tts" in policy:
             local = policy["local_tts"]
-            _require(model == "station-mini"
-                     and _keys(local, {"model_file", "model_sha256", "config_sha256"})
-                     and _safe_path(local["model_file"])
-                     and _match(HEX64, local["model_sha256"])
-                     and _match(HEX64, local["config_sha256"]))
+            if _keys(local, {"command"}):
+                # Host program of the owner's (text on stdin, WAV on stdout), run without a shell.
+                argv = local["command"]
+                _require(model == "station-mini" and type(argv) is list
+                         and 1 <= len(argv) <= 16 and _safe_path(argv[0])
+                         and all(type(a) is str and 0 < len(a) <= 256 and "\0" not in a
+                                 for a in argv))
+            else:
+                _require(model == "station-mini"
+                         and _keys(local, {"model_file", "model_sha256", "config_sha256"})
+                         and _safe_path(local["model_file"])
+                         and _match(HEX64, local["model_sha256"])
+                         and _match(HEX64, local["config_sha256"]))
             result["local_tts"] = dict(local)
         if "local_media" in policy:
             # Host-side WAV files for the resident local-PCM player, never station paths.

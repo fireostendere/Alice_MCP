@@ -249,8 +249,18 @@ synthetic tests, not real firmware qualification.
 On 2026-10-30, owner-authorized maintenance installed the first combined build,
 then the calibrated and firmware-cache builds on one Mini 1. All returned `installed`, verified
 the native TLS route, preserved Quasar and the init hook, and cleaned staging.
-Reboot persistence was not exercised. Physical voice-route evidence is recorded
+Reboot persistence was not exercised then. Physical voice-route evidence is recorded
 in [VOICE_ARCHITECTURE.md](VOICE_ARCHITECTURE.md).
+
+**Cold boot, 2026-11-11 (one observation).** The station was powered on after days
+off. Thirteen hours later the init hook was present and executable and `rcS` had
+finished, but there was no agent process, pid file or start lock, and the native
+channel was unavailable. One manual `start` through the same hook then succeeded and
+TLS probes answered. The agent's stderr is discarded, so the cause is inferred, not
+logged: the hook runs right after Quasar's own boot script, the agent binds one
+private address that Wi-Fi may not hold yet, exits, and the start script's
+three-second liveness check fails. Until the agent waits for its address, start it
+by hand after every reboot; this needs a rebuilt, re-pinned agent and was not changed.
 
 Historical W0 evidence: a previous owner-operated update installed the W0 agent/player,
 preserved the existing init hook, TLS credentials/helpers and Quasar identity, and bound only host
@@ -303,7 +313,33 @@ host `controls.local_tts` object selects the hash-pinned installed Piper model:
 }
 ```
 
-This selection requires native transport. It synthesizes in RAM, sends canonical
+### Any other synthesizer
+
+The same key takes a second form instead: a host program of the owner's choice.
+
+```json
+{ "command": ["/PRIVATE/bin/say-ru", "--voice", "anna"] }
+```
+
+`speech.say` runs it without a shell (an absolute path plus up to 15 fixed
+arguments), writes the text as UTF-8 to its standard input and reads one WAV from
+its standard output within 60 seconds. The program is the adapter: a local engine,
+a call to a cloud voice with its own key from the environment, or a wrapper that
+converts MP3 with `ffmpeg`. Its output must be mono 16-bit PCM at 16–48 kHz and at
+most 20 seconds; the host attenuates it to the player's amplitude ceiling (never
+amplifies) and rewrites the header. Check a program by hand first:
+`printf 'Привет' | /PRIVATE/bin/say-ru --voice anna > /tmp/check.wav`.
+
+A failure blocks the call before any station traffic with one fixed reason
+(could not be run, failed, timed out, not a WAV, wrong format, too long); the
+text, the program's output and its error stream are never reported. The MCP
+caller cannot choose or change the program. If the program sends text to a cloud
+service, that is the owner's choice for that inventory entry; the host adds no
+fallback of its own. A private `voice.say_backend: "openai"` still wins: remove
+it to use `local_tts`. Synthetic tests only; no engine has been run through this
+form on hardware.
+
+Either form requires native transport. It synthesizes in RAM, sends canonical
 WAV plus its digest over authenticated TLS and **never falls back to cloud text
 TTS or SSH**. Native private `local_pcm` contains `client` (the installed pinned
 `pcm-player`), `alsa_config_sha256` (reviewed `/etc/asound.conf`) and

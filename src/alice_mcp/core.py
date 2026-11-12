@@ -18,14 +18,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from alice_mcp import asr_resources, capture_probe, network_probe
+from alice_mcp import asr_resources, capture_probe, models, network_probe
 
-MODELS = frozenset({
-    "station-lite", "station-lite2", "station-mini", "station-mini2", "station-mini3",
-    "station-mini3-pro", "station-midi", "station-2", "station-3", "station-street",
-    "station-gen1", "station-max", "yandex-hub", "jbl-link-music",
-})
-BUILDROOT_MODELS = MODELS - {"station-gen1", "station-max", "jbl-link-music"}
+MODELS = frozenset(models.PROFILES)
+# Native maind/init.d: the only OS family with service and device write adapters.
+BUILDROOT_MODELS = frozenset(m for m, p in models.PROFILES.items() if p["os"] == "buildroot")
+# Device-tree token -> models sharing that board (Lite and Fiero Hi are one board).
+DT_MODELS = {token: sorted(m for m, p in models.PROFILES.items() if p["dt"] == token)
+             for token in sorted({p["dt"] for p in models.PROFILES.values()} - {""})}
+IDENTIFY_FLAGS = {
+    "buildroot": "test -f /etc/init.d/S99quasar", "android": "test -f /system/build.prop",
+    "systemd": "test -d /run/systemd/system", "maind": "test -x /system/vendor/quasar/maind",
+}
 MAX_OUTPUT = 65536
 LED_CHECKS = {
     "sn3236_device": "test -c /dev/led_sn3236",
@@ -78,6 +82,16 @@ I2C_TRACE_CHECKS = {
     }.items()
 }
 PROBES = {
+    # Fixed tokens and file presence only: no serial, cmdline or other tree content leaves.
+    "identify": "LC_ALL=C; export LC_ALL; " + " ".join(
+        f"if tr '\\000' '\\n' < /proc/device-tree/compatible 2>/dev/null | "
+        f"grep -qx -e '{token}' -e '{token}-[a-z0-9]*'; "
+        f"then echo dt{index}=1; else echo dt{index}=0; fi;"
+        for index, token in enumerate(DT_MODELS)
+    ) + " " + " ".join(
+        f"if {check}; then echo {key}=1; else echo {key}=0; fi;"
+        for key, check in IDENTIFY_FLAGS.items()
+    ),
     "asr_resources": asr_resources.COMMAND,
     "network": network_probe.COMMAND,
     # Capture-coexistence metadata only: never opens PCM nodes or captures audio.
@@ -99,12 +113,13 @@ PROBES = {
     "if pidof \"$p\" >/dev/null 2>&1; then printf '%s=1\\n' \"$p\"; "
     "else printf '%s=0\\n' \"$p\"; fi; done",
     "audio": "if test -d /dev/snd; then echo sound_devices=1; else echo sound_devices=0; fi",
-    "reboot": "printf 'reason='; cat /sys/class/aml_info/reboot_reason",
+    # Amlogic 4.9 only: elsewhere the reason is unknown, not a transport failure.
+    "reboot": "printf 'reason='; cat /sys/class/aml_info/reboot_reason 2>/dev/null || echo",
     # Only counts leave the station. Do not transport raw logs to the model.
-    "logs": "test -r /data/quasar/daemons_logs/maind.log && "
+    "logs": "if test -r /data/quasar/daemons_logs/maind.log; then "
     "tail -n 200 /data/quasar/daemons_logs/maind.log | head -c 32768 | "
     "awk 'BEGIN {e=0; w=0} /[Ee][Rr][Rr][Oo][Rr]/ {e++} "
-    "/[Ww][Aa][Rr][Nn]/ {w++} END {print \"errors=\" e; print \"warnings=\" w}'",
+    "/[Ww][Aa][Rr][Nn]/ {w++} END {print \"errors=\" e; print \"warnings=\" w}'; fi",
 }
 STATE_COMMAND = (
     "test -f /etc/init.d/S99quasar && "
@@ -147,7 +162,7 @@ class SSHInput:
 
     def __post_init__(self) -> None:
         if (not isinstance(self.command, str) or len(self.command.encode()) > 4096
-            or not isinstance(self.data, bytes) or len(self.data) > 120 * 1024):
+            or not isinstance(self.data, bytes) or len(self.data) > 192 * 1024):
             raise SafetyError("Bundled helper exceeds SSH input bounds")
 
 
@@ -348,6 +363,8 @@ def ssh_argv(station: Station, command: str | SSHInput) -> list[str]:
         "-o", "KbdInteractiveAuthentication=no", "-o", "PreferredAuthentications=publickey",
         "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
         "-o", "ClearAllForwardings=yes", "-o", "ConnectTimeout=5",
+        # A vanished station ends the session in ~45 s instead of hanging its reader.
+        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
         "-o", "ConnectionAttempts=1", "-o", "LogLevel=ERROR",
         *(["-o", f"HostKeyAlias={station.host_key_alias}"] if station.host_key_alias else []),
         f"{station.user}@{station.host}",
@@ -432,6 +449,21 @@ def parse_probe(probe: str, text: str) -> dict[str, Any]:
         except ValueError:
             raise SafetyError("Capture probe unavailable or incompatible") from None
     fields = _fields(text)
+    if probe == "identify":
+        flags = {key: _number(fields, key) for key in
+                 [f"dt{i}" for i in range(len(DT_MODELS))] + list(IDENTIFY_FLAGS)}
+        if set(flags.values()) - {0, 1}:
+            raise SafetyError("Probe unavailable or incompatible")
+        detected = sorted({m for i, found in enumerate(DT_MODELS.values())
+                           if flags[f"dt{i}"] for m in found})
+        # Native maind without Android or systemd is Buildroot even when the init script
+        # is absent (seen on Mini 1); service start/restart still needs that script.
+        family = next((name for key, name in (
+            ("buildroot", "buildroot"), ("android", "android"), ("systemd", "yocto"),
+            ("maind", "buildroot")) if flags[key]), "unknown")
+        return {"device_tree_models": detected, "os_family": family,
+                "maind_present": bool(flags["maind"]),
+                "quasar_init_script": bool(flags["buildroot"])}
     if probe == "asr_resources":
         resources: dict[str, Any] = {k: _number(fields, k) for k in asr_resources.COUNTERS}
         if (resources["mem_available"] > resources["mem_total"]
@@ -529,7 +561,7 @@ class Controller:
         self.jobs: dict[str, Any] = {}  # Owned jobs live only as long as this process.
         self._probe_slots = threading.BoundedSemaphore(2)
         self._plan_lock = threading.Lock()
-        self._execution_lock = threading.Lock()
+        self._execution_locks: dict[str, threading.Lock] = {}
 
     def station(self, station_id: str) -> Station:
         stations = load_inventory(self.inventory)
@@ -557,9 +589,13 @@ class Controller:
             command = (SSHInput("sh -s", source.encode())
                        if probe in {"network", "capture", "asr_resources"}
                        else source)
-            return {"evidence_class": "analytical", "data": parse_probe(
-                probe, self.runner(station, command),
-            )}
+            data = parse_probe(probe, self.runner(station, command))
+            if probe == "identify":
+                # A match is board evidence, not attestation; no token is not a mismatch.
+                found = data["device_tree_models"]
+                data.update(declared_model=station.model,
+                            declared_matches=station.model in found if found else None)
+            return {"evidence_class": "analytical", "data": data}
 
     def _state(self, station: Station) -> tuple[str, bool]:
         if station.native_mcp:
@@ -625,9 +661,12 @@ class Controller:
         return plan
 
     def execute_plan(self, plan: Plan) -> dict[str, Any]:
-        # ponytail: serialize service actions globally; split by station if throughput matters.
-        with self._execution_lock:
+        with self.execution_lock(plan.station.id):
             return self._execute_plan(plan)
+
+    def execution_lock(self, station_id: str) -> threading.Lock:
+        """One writer per station; a busy station never makes another one wait."""
+        return self._execution_locks.setdefault(station_id, threading.Lock())
 
     def _execute_plan(self, plan: Plan) -> dict[str, Any]:
         if not math.isfinite(plan.expires) or self.clock() >= plan.expires:

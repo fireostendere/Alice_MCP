@@ -214,6 +214,19 @@ def test_stop_event_ends_the_session_and_cleans_up(
     assert not (tmp_path / "dev/tmp/alice-mcp-stream").exists()
 
 
+def test_a_consumer_behind_real_time_ends_the_session_instead_of_queueing_audio(
+    tmp_path: Path, client: bytes, monkeypatch: Any,
+) -> None:
+    live = Live()
+    controller, item, _ = setup(tmp_path, client, live.port, monkeypatch, run_s=1, lead_s=0)
+    monkeypatch.setattr(ws, "BACKLOG", 2, raising=False)
+    result, _ = run(controller, item, sink=lambda _: time.sleep(0.1), max_chunks=1)
+    live.close()
+    assert result["outcome"] == "unknown" and result["reason"] == "error", result
+    assert result["cleanup_verified"] is True and result["do_not_retry"] is True
+    assert not (tmp_path / "dev/tmp/alice-mcp-stream").exists()
+
+
 def test_repeated_failures_stop_without_endless_retries(
     tmp_path: Path, client: bytes, monkeypatch: Any,
 ) -> None:
@@ -291,3 +304,16 @@ def test_chunk_metadata_is_parsed_strictly(meta: bytes, status: str) -> None:
     result = ws.parse_chunk(meta)
     assert result["status"] == status, result
     assert SENTINEL.decode() not in json.dumps(result)
+
+
+def test_backlog_is_bounded_by_audio_bytes_not_by_read_count() -> None:
+    # Read sizes depend on the transport: many tiny reads are not a lagging consumer.
+    events = ws._Backlog(1000)
+    for _ in range(600):
+        events.put_nowait((None, b"\0"))
+    events.put_nowait((None, b""))  # An end-of-stream marker still fits and is delivered.
+    events.put_nowait((None, b"\0" * 500))  # The read that crosses the bound is the last one.
+    with pytest.raises(ws.queue.Full):
+        events.put_nowait((None, b"\0"))
+    assert sum(len(events.get_nowait()[1]) for _ in range(602)) == 1100 and events.empty()
+    assert ws.BACKLOG >= 10 * 32000  # At least ten seconds of 16 kHz mono PCM.

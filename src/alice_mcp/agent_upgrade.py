@@ -265,7 +265,9 @@ def _command(station: Station, package: UpgradeBundle, nonce: str, script: str,
 def _permitted(controller: Controller, station: Station) -> None:
     if (controller.writes is not True or station.preauthorize_all_actions is not True
         or not station.native_mcp or station.model != "station-mini"
-        or not rt.allows(station.controls, "speech.say")):
+        or not rt.allows(station.controls, "speech.say")
+        # The upgraded resident speaks local PCM only; verify_tls() needs this host side.
+        or "local_tts" not in station.controls):
         raise SafetyError("Native-agent upgrade not authorized")
 
 
@@ -314,7 +316,7 @@ def apply(controller: Controller, plan_id: str, expected_sha256: str,
           package: UpgradeBundle) -> dict[str, Any]:
     try:
         plan = controller.take_plan(plan_id, expected_sha256)
-        with controller._execution_lock:
+        with controller.execution_lock(plan.station.id):
             station = controller.station(plan.station.id)
             _permitted(controller, station)
             _verify(station, package)

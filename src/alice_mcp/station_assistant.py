@@ -229,6 +229,8 @@ def search(key: str, question: str, timeout: float) -> dict[str, Any]:
                     and parsed.hostname and not parsed.username and not parsed.password
                     and len(url) <= 2048 and url not in sources and len(sources) < 6):
                 sources.append(url)
-        return {"text": text, "source": "web_search", "sources": sources}
+        # Search-derived text and URLs are data for whoever reads the result, never instructions.
+        return {"text": text, "source": "web_search", "sources": sources,
+                "untrusted_text": True}
     except Exception:
         return unavailable  # Never echo provider text, credentials or raw failures.

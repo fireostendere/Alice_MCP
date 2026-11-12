@@ -570,3 +570,73 @@ def test_native_tone_is_written_create_only_and_never_uploaded(
     owned_jobs.main(["tone", "--station", "desk", "--out", str(out), "--live"])
     assert json.loads(capsys.readouterr().out)["outcome"] == "blocked"  # Never overwritten.
     assert calls == []
+
+
+def test_native_job_steps_follow_run_station_action_routing_and_voice_binding(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    # As server.run_station_action: the private say binding applies, and Quasar/live steps
+    # go through the pinned-SSH preview/apply; only the rest is the resident's.
+    ca, credential = tmp_path / "ca", tmp_path / "credential"
+    key, hosts = tmp_path / "identity", tmp_path / "hosts"
+    ca.write_bytes(b"synthetic")
+    credential.write_bytes(b"a" * 64)
+    credential.chmod(0o600)
+    key.touch(mode=0o600)
+    hosts.touch()
+    write(tmp_path / "inventory.json", {
+        "id": "desk", "model": "station-mini", "preauthorize_all_actions": True,
+        "host": "station.invalid", "port": 2222, "user": "root",
+        "identity_file": str(key), "known_hosts_file": str(hosts),
+        "native_mcp": {"url": "https://station.invalid:18443/mcp", "ca_file": str(ca),
+                       "token_file": str(credential)},
+        "controls": {
+            "firmware_sha256": "a" * 64, "quasar_client": "/private/quasar-client",
+            # speech.say itself is not allowed: only its bound action is checked.
+            "allowed_actions": ["quasar.volume", "speech.openai", "audio.volume"],
+            "voice": {"source": "station_asr", "say_backend": "openai",
+                      "asr_directory": "/bkupgrade/data/opt/alice-local-asr-0123456789ab",
+                      "live_client": "/private/live-client",
+                      "live_player": "/private/live-player"}},
+        "jobs": {"presets": {"evening": [
+            {"action": "quasar.volume", "parameters": {"level": 2}},
+            {"action": "speech.say", "parameters": {"text": "Привет"}},
+            {"action": "audio.volume", "parameters": {"step": "quieter"}}]}},
+    })
+    ssh: list[tuple[str, str, bool]] = []
+    native: list[tuple[str, str]] = []
+
+    def invoke(controller: Controller, station: Any, request: dict[str, Any]) -> dict[str, Any]:
+        ssh.append((request["mode"], request["action"], bool(station.native_mcp)))
+        return ({"outcome": "ready", "state_sha256": "d" * 64}
+                if request["mode"] == "inspect" else {"outcome": "applied"})
+
+    def preview_action(controller: Controller, station: Any, action: str,
+                       params: dict[str, Any]) -> dict[str, str]:
+        native.append(("preview", action))
+        return {"plan_id": controller.store_plan(station, action, "e" * 64),
+                "expected_sha256": "e" * 64}
+
+    def run_action(controller: Any, station: Any, action: str,
+                   params: dict[str, Any]) -> dict[str, Any]:
+        native.append(("run", action))
+        return {"outcome": "applied"}
+
+    monkeypatch.setattr(controls, "invoke", invoke)
+    monkeypatch.setattr(native_transport, "preview_action", preview_action)
+    monkeypatch.setattr(native_transport, "run_action", run_action)
+    controller = Controller(tmp_path / "inventory.json", writes=True, clock=lambda: 0.0)
+
+    planned = owned_jobs.preview(controller, "desk", "preset", {"preset": "evening"})
+    assert [p["outcome"] for p in planned["step_previews"]] == ["ready"] * 3
+    assert native == [("preview", "audio.volume")]
+    assert ssh == [("inspect", "quasar.volume", False), ("inspect", "speech.openai", False)]
+    ssh.clear()
+    native.clear()
+
+    report = finish(controller, owned_jobs.start(controller, "desk", "preset",
+                                                 {"preset": "evening"})["job_id"])
+    assert report["state"] == "complete" and report["step_outcomes"] == ["applied"] * 3
+    assert native == [("run", "audio.volume")]
+    assert [(mode, action) for mode, action, _ in ssh if mode == "apply"] == [
+        ("apply", "quasar.volume"), ("apply", "speech.openai")]
+    assert not any(resident for _, _, resident in ssh)  # The pinned SSH twin, not a fallback.

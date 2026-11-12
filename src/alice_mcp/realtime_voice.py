@@ -79,9 +79,9 @@ def _private(path: Path, info: os.stat_result) -> bool:
     return True
 
 
-def api_key() -> str | None:
+def api_key(name: str = "REAL_TIME_API_KEY") -> str | None:
     """Read only this project's explicit dotenv; no search, shell or interpolation."""
-    key = os.environ.get("REAL_TIME_API_KEY")
+    key = os.environ.get(name)
     if key:
         if len(key) > 1024 or any(c.isspace() for c in key):
             raise SafetyError("Realtime configuration unavailable")
@@ -102,7 +102,7 @@ def api_key() -> str | None:
         from dotenv import dotenv_values
 
         data = os.read(fd, 16385).decode("utf-8")
-        key = dotenv_values(stream=io.StringIO(data), interpolate=False).get("REAL_TIME_API_KEY")
+        key = dotenv_values(stream=io.StringIO(data), interpolate=False).get(name)
         if key and (len(key) > 1024 or any(c.isspace() for c in key)):
             raise ValueError
         return key or None

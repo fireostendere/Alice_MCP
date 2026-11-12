@@ -69,4 +69,4 @@ unavailable unless the owner separately requests that outage. Its hotspot featur
 is hardware-unverified. YAM and BetterYAM feature APIs are third-party contracts,
 not Alice MCP permissions. No installer, daemon or plugin is bundled or run here.
 
-Source: [YAM/BetterYAM architecture, permissions and deployment caveats](https://hackalice.me/recipes/yam/).
+Source: [YAM/BetterYAM architecture, permissions and deployment caveats](https://hackalice.me/recipes/packagemanagers/).

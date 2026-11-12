@@ -356,7 +356,7 @@ def parse_result(raw: str, preamble: str = "none") -> dict[str, Any]:
 def apply(controller: Controller, plan_id: str, expected: str, item: Pilot) -> dict[str, Any]:
     try:
         plan = controller.take_plan(plan_id, expected)
-        with controller._execution_lock:
+        with controller.execution_lock(plan.station.id):
             station = controller.station(plan.station.id)
             _permitted(controller, station)
             ssh = _ssh(station)

@@ -21,6 +21,7 @@ import json
 import os
 import queue
 import resource
+import select
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,7 @@ FOLLOW_S = 5.0  # A name said alone takes speech starting this soon after it as 
 COOLDOWN_S = 2.5  # One event per wake across Vosk and mww, unless a command lies between.
 MATCH_S = 1.0  # An mww hit is the name Vosk heard ending this close to it.
 LAG_S = 0.25  # mww fires after the name has begun at least this long ago.
+STALL_S = 5.0  # An mww child that accepts no audio for this long counts as exited.
 Word = tuple[str, float, float]
 
 
@@ -78,6 +80,11 @@ class Mww:
                 stderr=subprocess.DEVNULL, pass_fds=(fd,), start_new_session=True)
         finally:
             os.close(fd)
+        assert self.process.stdin is not None
+        self.stdin = self.process.stdin.fileno()
+        os.set_blocking(self.stdin, False)
+        self.writable = select.poll()
+        self.writable.register(self.stdin, select.POLLOUT)
         self.limit_ms = max_seconds * 1000
         self.vmhwm_kib = 0  # The detector's own peak RSS, read from /proc before it exits.
         self.audio_ms = 0
@@ -131,13 +138,17 @@ class Mww:
     def feed(self, pcm: bytes) -> None:
         if self.failed or self.process.poll() is not None:
             return
-        assert self.process.stdin is not None
         try:
-            self.process.stdin.write(pcm)
-            self.process.stdin.flush()
+            view = memoryview(pcm)
+            while view:
+                # A child that stopped reading must not block the audio loop (and its stop).
+                if not self.writable.poll(STALL_S * 1000):
+                    raise OSError
+                view = view[os.write(self.stdin, view):]
             self.audio_ms += len(pcm) // 32
         except OSError:
             self.failed = True
+            self.process.kill()
 
     def poll(self) -> list[tuple[Any, ...]]:
         out = []
@@ -289,6 +300,8 @@ class Listener:
                 if self.deaths >= 3:
                     self.factory = None
                     self.log({"mww": "disabled_after_repeated_exits"})
+                    if self.mode in {"mww", "both"}:  # No wake is possible without it.
+                        raise SafetyError("Wake detector exited repeatedly; listener stopped")
         if self.mww is None and self.factory is not None:
             self.mww, self.offset_ms = self.factory(), self.samples * 1000 // RATE
         if self.mww is not None:

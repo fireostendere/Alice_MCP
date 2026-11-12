@@ -192,6 +192,8 @@ def _check(controller: Controller, station: Station, steps: Steps, restore: bool
                  [] if station.native_mcp else rt.preauthorized_actions(station.controls))
     # Native volume is restored by setting the reported previous level, not a backup record.
     restore_action = {"restore"} if restore and not station.native_mcp else set()
+    # Each step runs as its bound action, exactly as server.run_station_action does.
+    steps = tuple((controls.bound_action(station, action), params) for action, params in steps)
     actions = {action for action, _ in steps} | restore_action
     if any(action not in allowed or action not in delegated for action in actions):
         raise SafetyError("Job steps need allowed actions with standing preauthorization")
@@ -244,12 +246,14 @@ def _attempt(controller: Controller, job: Job, action: str, params: dict[str, An
         station = controller.station(job.station.id)
         if station != job.station:
             return "blocked"
-        if station.native_mcp:
+        bound = controls.bound_action(station, action)
+        # Quasar IPC and live voice use the pinned SSH entry, as in server.run_station_action.
+        if station.native_mcp and bound not in controls.QUASAR_ACTIONS | controls.LIVE_ACTIONS:
             from alice_mcp import native_transport
 
-            result = native_transport.run_action(controller, station, action, params)
+            result = native_transport.run_action(controller, station, bound, params)
         else:
-            preview = controls.preview(controller, station.id, action, params)
+            preview = controls.preview(controller, station.id, bound, params)
             plan = controller.take_plan(preview["plan_id"], preview["expected_sha256"])
             if preview["approval_required"]:
                 return "blocked"
@@ -369,13 +373,15 @@ def preview(controller: Controller, station_id: str, kind: str,
             continue
         seen.add(key)
         try:
-            if station.native_mcp:
+            bound = controls.bound_action(station, action)
+            if (station.native_mcp
+                    and bound not in controls.QUASAR_ACTIONS | controls.LIVE_ACTIONS):
                 from alice_mcp import native_transport
 
                 plan: dict[str, Any] = native_transport.preview_action(controller, station,
-                                                                       action, params)
+                                                                       bound, params)
             else:
-                plan = controls.preview(controller, station.id, action, params)
+                plan = controls.preview(controller, station.id, bound, params)
             controller.take_plan(plan["plan_id"], plan["expected_sha256"])
             previews.append({"action": action, "outcome": "ready"})
         except SafetyError:

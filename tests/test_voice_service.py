@@ -886,3 +886,93 @@ def test_stock_stop_cancels_chat_speech_even_when_no_voice_turn_is_active(
     stopped.clear()
     voice._station_event({"event": "spotter", "phrase": "громче", "trusted": False})
     assert stopped == []
+
+
+def test_worker_that_fails_before_listening_ends_stopped_and_can_restart(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    fake_stream(monkeypatch, {"outcome": "complete"})
+    mini = station(tmp_path)
+    voice_service = service(tmp_path, monkeypatch, mini)
+    broken = [True]
+
+    def lookup(station_id: str) -> Station:
+        # The inventory became invalid between the start call and the worker's first read.
+        if broken[0] and threading.current_thread().name == "alice-voice":
+            raise SafetyError("Private inventory invalid")
+        return mini
+
+    voice_service.controller.station = lookup
+    publish = voice_service._state
+
+    def lingering(state: str) -> None:
+        publish(state)
+        if state == "stopped":
+            time.sleep(0.2)  # "stopped" is visible before the worker thread has exited.
+
+    voice_service._state = lingering
+    voice_service.start("mini1")
+    wait(lambda: voice_service.status()["state"] == "stopped")
+    assert voice_service.status()["last_error"] == "Private inventory invalid"
+    broken[0] = False
+    voice_service.start("mini1")  # Not latched as "already running"; the PC claim was released.
+    voice_service.stop()
+
+
+def test_failed_start_closes_the_indicator_it_already_started(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    closed: list[bool] = []
+    monkeypatch.setattr(vs.vi, "Indicator", lambda *args, **kwargs: SimpleNamespace(
+        close=lambda: closed.append(True), status=lambda: {}))
+    monkeypatch.setattr(vs.rv, "api_key", lambda: "synthetic")
+    monkeypatch.setenv("ALICE_MCP_OPENCODE", "relative/opencode")
+
+    def refuse(*args: Any) -> None:
+        raise SafetyError("OpenCode executable must be absolute")
+
+    monkeypatch.setattr(vs.ov, "Agent", refuse)
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    with pytest.raises(SafetyError, match="absolute"):
+        voice_service.start("mini1")
+    assert closed == [True] and voice_service.status()["state"] == "stopped"
+
+
+def test_voice_requests_are_limited_to_bounded_actions(tmp_path: Path, monkeypatch: Any) -> None:
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    voice_service.station = "mini1"
+    previewed: list[str] = []
+
+    def preview(controller: Any, station_id: str, action: str, params: Any) -> dict[str, Any]:
+        previewed.append(action)
+        raise SafetyError("synthetic stop after the gate")
+
+    monkeypatch.setattr(vs.controls, "preview", preview)
+    # Text heard in the room or fetched from the web must not reach persistent edits.
+    for action in ("sound.replace", "config.select", "media.upload", "restore",
+                   "speech.listen", "led.capture", "led.replay", "led.pulse"):
+        assert action not in vs.VOICE_ACTIONS
+        assert voice_service._action({"action": action, "parameters": {}}) == {
+            "outcome": "blocked", "error": "Station policy or runtime blocked action"}
+    assert previewed == []
+    voice_service._action({"action": "quasar.volume", "parameters": {"level": 2}})
+    voice_service._action({"action": "audio.play", "parameters": {}})
+    assert previewed == ["quasar.volume", "audio.play"]
+    assert vs.VOICE_ACTIONS <= rt.ACTIONS
+
+
+def test_pc_owner_claim_is_released_only_after_station_cleanup(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(vs.vi, "Indicator", lambda *args, **kwargs: SimpleNamespace(
+        close=lambda: order.append("indicator"), status=lambda: {}))
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    release = voice_service._release_owner
+    monkeypatch.setattr(voice_service, "_release_owner",
+                        lambda: (order.append("owner"), release())[1])
+    (tmp_path / "client").write_bytes(b"tampered")  # The worker ends at once.
+    voice_service.start("mini1")
+    wait(lambda: voice_service.status()["state"] == "stopped")
+    # Another MCP process may claim the PC only once this one has cleaned the ring.
+    assert order == ["indicator", "owner"]

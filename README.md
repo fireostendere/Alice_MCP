@@ -137,18 +137,26 @@ and the [runtime control contract](docs/CONTROLS.md).
 | `search_knowledge`, `get_knowledge` | Original summaries, compatibility/risk metadata, source links |
 | `list_skills`, `read_skill` | Bundled skills and references; not arbitrary local file access |
 | `station_status` | Every station at once: online flag, read-only `health` metrics, writes and private-policy summary |
-| `station_probe` | Fixed `health`, `storage`, `services`, `audio`, `reboot`, `logs`, `led`, `i2c_trace`, `network` probes; [`asr_resources`](docs/ON_STATION_ASR.md) explicitly uses pinned SSH for passive memory/storage checks |
+| `station_probe` | Fixed `identify`, `health`, `storage`, `services`, `audio`, `reboot`, `logs`, `led`, `i2c_trace`, `network` probes; `identify` compares fixed device-tree tokens with the declared model; [`asr_resources`](docs/ON_STATION_ASR.md) explicitly uses pinned SSH for passive memory/storage checks |
 | `preview_service_action` | Read state and create a five-minute one-use preview |
 | `apply_service_action` | Native human approval, fresh-state validation, Quasar `start`/`restart`, post-check |
-| `get_model_interfaces(model)` | Local source-linked LED/audio/GPIO facts and explicit unknowns; no station access |
-| `get_station_controls(station_id)` | Declared private-policy action/asset/option aliases; not verified hardware availability |
+| `get_model_interfaces(model)` | Model profile, per-action adapter matrix (`adapter`/`generic`/`none`), LED/audio/GPIO facts and open gaps; no station access |
+| `get_station_controls(station_id)` | Declared private-policy action/asset/option aliases, plus `supported_actions` (those this model has an adapter for); not verified hardware availability |
 | `preview_station_action(station_id, action, parameters)` | Read-only runtime inspection and a 300-second one-use device preview |
 | `apply_station_action(plan_id, expected_sha256)` | Private preauthorization or native human approval, fresh-state validation, bounded device action, post-check |
 | `run_station_action(station_id, action, parameters)` | Preview and apply in one call: fresh one-use preview, then private preauthorization or one native approval form |
-| `ask_station(station_id, question)` | Answer and speak once on the selected station: local clock, current news/weather/facts through actual web search, with separate source links; normal speech gates remain |
+| `ask_station(station_id, question)` | Answer and speak once on the selected station: local clock, current news/weather/facts through actual web search, with separate source links; normal speech gates remain; web-derived answers carry `untrusted_text` |
 | `get_capture_status(station_id, capture_id)` | Read fresh capture readiness, bounded LED records or one approved ASR text; never starts capture |
 | `start_job`, `list_jobs`, `cancel_job` | Owned host timers, declarative presets and a bounded generated-tone siren; cancel by owned ID; lost when this process exits ([jobs](docs/JOBS.md)) |
 | `voice_listen_start`, `voice_listen_stop`, `voice_status`, `get_voice_events` | Mini 1 wake word «компьютер», optional [recognition on the station](docs/ON_STATION_ASR.md), untrusted voice commands for OpenCode Alice or Realtime; audio stays in RAM |
+
+### Models
+
+Every retail model has a profile in the [model registry](docs/MODELS.md), including
+slots with no data yet. Only Mini 1 is a live pilot; Mini 3, Lite, Mini 2 and
+Station 2 have offline-tested adapters; other Buildroot models have only the
+runtime-probed generic audio/config path; Android, Yocto and unknown platforms are
+read-only. The same document is the checklist for bringing up another model.
 
 The active Mini 1 `station_live` pilot uses **one generated answer per wake**, not
 automatic free conversation. Weather without a city defaults to Belgrade. Its
@@ -372,8 +380,8 @@ preserved even for AirPlay/standalone requests.
 
 ## Skills and source coverage
 
-The catalog maps every documentation page in a pinned upstream revision to one
-or more skills. It is a source-linked, original workflow adaptation, **not a
+The catalog maps 65 of the 73 documentation pages in a pinned upstream revision
+to one or more skills. It is a source-linked, original workflow adaptation, **not a
 mirror** of every script, asset or external linked project. Upstream material
 was not vendored because a redistribution license was not identified. Consult
 the linked current page when executing a manual procedure and check exact
@@ -381,7 +389,12 @@ model/firmware compatibility. No private experiences or station results were
 imported. Documentation claims and offline tests do not certify a physical unit.
 
 Skills are in `skills/` for manual installation into your agent's skill directory
-(copy only the skill directories, not private inventory files). The wheel also
+(copy only the skill directories, not private inventory files). Two of them are
+about this server rather than a wiki topic: `station-control` routes everyday
+requests to the right tool, `station-bringup` adds a station of another model.
+The catalog is pinned to the revision in [SOURCES.md](docs/SOURCES.md); its
+access-route pages (root, ADB, UART, update blocking) were not re-read there and
+are named by `get_knowledge` under `upstream.carried`. The wheel also
 bundles them, accessible through `read_skill`. Installation does not register
 them automatically in a client's global skill catalog.
 

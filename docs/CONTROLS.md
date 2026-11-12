@@ -27,7 +27,8 @@ the action's local policy gates despite being read-only. No command, path, URL,
 GPIO number or register address can be supplied as an action argument.
 
 Device actions reuse the existing service controller's preview registry, pinned
-key-only SSH, trust/configuration binding, expiry checks and serialized execution.
+key-only SSH, trust/configuration binding, expiry checks and execution serialized
+per station (one writer per station; stations do not wait for each other).
 `ALICE_MCP_ALLOW_WRITES=1` and the station's `controls.allowed_actions` must permit
 the action. Native Windows device writes are unavailable; WSL uses POSIX trust
 checks with suitably protected files. Service start/restart separately requires
@@ -100,7 +101,7 @@ and unapproved aliases are not valid parameters. Aliases match
 | `media.upload` | `asset`: approved media alias; `content_base64`: encoded content, decoded size at most 49,152 bytes | Decoded SHA-256 must match the asset's preregistered policy hash. This limit deliberately bounds SSH arguments; it is not a streaming upload API. |
 | `sound.replace` | `asset`: approved media alias; `slot`: `spotter_start`, `spotter_cancel`, `volume_sound` or `notification_sound` | Backs up and replaces only that fixed system-sound slot. Reload and audible effect remain unverified. |
 | `config.select` | `binding`: approved config alias; `option`: one of that binding's approved option aliases | Changes an existing known JSON leaf to its private operator-approved value. No supplied URL/value, new field, backend installation or automatic reload. |
-| `quasar.volume` | `level`: integer 0–10 (×10 %, within `max_volume`), or `step`: `louder`/`quieter` | Mini 1 with private `quasar_client`. Asks stock Alice locally (fixed text, Quasar's IPC) so Quasar sets its own level, ring, click and app/VQE state; verified by its saved level. Uses the Alice text path (Yandex cloud). |
+| `quasar.volume` | `level`: integer 0–10 (×10 %, within `max_volume`), or `step`: `louder`/`quieter` (a louder step that would end above `max_volume` is blocked `at_limit`) | Mini 1 with private `quasar_client`. Asks stock Alice locally (fixed text, Quasar's IPC) so Quasar sets its own level, ring, click and app/VQE state; verified by its saved level. Uses the Alice text path (Yandex cloud). |
 | `speech.openai` | `text`: 1–1000 characters of literal text, line breaks allowed | Mini 1 with private `voice.live_client`/`voice.live_player`. Speaks once with OpenAI's `gpt-realtime-2.1-mini` voice: the station streams it directly (see [direct station Realtime](VOICE_ARCHITECTURE.md)), and this PC only mints a one-session secret. Works without the resident agent. No microphone, no retry; only a clean end counts as `applied`. Measured 2026-10-31: 4.6 s of speech with no underrun and a verified player cleanup. |
 
 With the private `voice.say_backend: "openai"` (allowed only together with the live builds),
@@ -108,6 +109,11 @@ every `speech.say` for that station runs as `speech.openai`. This is an explicit
 binding for every call, not a fallback after a failure, so agents that pick `speech.say`
 for «скажи …» get the OpenAI voice without the resident agent. On 2026-11-01 «Привет!»
 through `run_station_action(speech.say)` was `applied` with a verified player cleanup.
+
+Without that binding, a private `controls.local_tts` makes `speech.say` synthesize on
+this PC and play through the resident agent: either the pinned Piper model or
+`{"command": [...]}`, any synthesizer program that reads text on stdin and prints a WAV
+([details](NATIVE_AGENT.md#any-other-synthesizer)).
 
 While the `station_live` listener runs, speech goes through its warm station process (a `say`
 session without the microphone). There is no SSH launch, binary upload, firmware hash or
@@ -134,8 +140,9 @@ firmware, preview impact and owner consent, then pass only the returned plan and
 digest to `apply_station_action`. Media must be owner-held or appropriately licensed;
 do not upload private recordings, copied branded chimes or unreviewed loud clips.
 The complete bundled helper input (source plus encoded policy/media) is bounded to
-120 KiB and sent through SSH stdin, not a long SSH exec argument. Requests near the media ceiling, especially with larger policies, may
-require a smaller approved clip. Oversized requests fail before SSH, not by
+192 KiB and sent through SSH stdin, not a long SSH exec argument. A test keeps the
+largest declared upload inside that bound with headroom; very large private policies may
+still require a smaller approved clip. Oversized requests fail before SSH, not by
 bypassing the bound or splitting an unapproved write into retries.
 
 ## Private JSON policy
@@ -206,7 +213,7 @@ readback is not proof that any color was visible. This backend has synthetic tes
 not physical-device qualification, and is not used for Mini 3 Pro or Station 2.
 
 The following are public community reports at revision
-`1ab048bf95c0e5e547a1ff6c801d2ed9deb193db`, not tested hardware availability:
+`520fbccd68cb90a8c4f01d06bf38d9a7db915304`, not tested hardware availability:
 
 | Retail model | Source-backed LED interface | Runtime qualification limit |
 |---|---|---|
@@ -214,8 +221,10 @@ The following are public community reports at revision
 | [Mini 2](https://hackalice.me/devices/station-mini2/) | Sysfs `mini2:{red,green,blue}:ring1` through `ring6`. | Ring only; clock and the six-zone animation-file interpretation are not established by this adapter. |
 | [Mini 3 / Bergamot](https://hackalice.me/devices/station-mini3/) | Framebuffer 6×1, 24-bpp BGR, 18-byte frame. | Verify geometry and stride; do not substitute Mini 3 Pro/Pickle. |
 | [Station 2](https://hackalice.me/devices/station-2/) | Framebuffer 89×1, 32-bpp RGBW, 356-byte frame. | Index 88 is not visible; do not substitute retail Midi. |
-| [Mini 1](https://hackalice.me/devices/station-mini/) | I2C ring; RGB/physical zone maps uncalibrated. | Arbitrary RGB effects unsupported; fixed replay/pulse/animate profiles require their own permissions and evidence. |
+| [Mini 1](https://hackalice.me/devices/station-mini/) | I2C SN3236 ring, six zones; the wiki reports B,G,R byte order and zone order 1,6,5,4,3,2. | No generic `led.effect`; `led.show` uses the private calibrated map, and replay/pulse/animate keep their own permissions and evidence. |
 | [Midi / Cucumber](https://hackalice.me/devices/station-midi/) | Ring/logo framebuffers; channel order unknown. | Unsupported LED writes; do not guess frame order. |
+| [Lite 2 / Plum](https://hackalice.me/recipes/led/) | Sysfs `plum:{red,green,blue}:ring1` through `ring3` under an active trigger. | No adapter: the sysfs helper refuses nodes with an active trigger. |
+| [Station 3 / Orion](https://hackalice.me/devices/station-3/) | Ring framebuffer is `/dev/fb2` (36×1); `/dev/fb0` is the ambilight. | No adapter: the framebuffer helper targets `/dev/fb0` only. |
 
 Other model names or kernel interfaces do not establish a compatible write
 adapter. A complete GPIO pinout is unavailable: Lite reports AO 497–511 and
@@ -224,7 +233,7 @@ Midi names `zb-reset-gpios`/`zb-boot-gpios` without line mappings. No arbitrary
 GPIO, I2C, memory or register controls are exposed.
 
 Volume requires runtime probing of `Master` on operator-reviewed Buildroot.
-The public exact mixer command is documented only for Lite, not all stations.
+The public exact mixer command is documented for Lite, Fiero Hi, Station 2 and Mini 3 Pro, not all stations.
 Likewise the native maind/GStreamer playback recipe does not establish every
 firmware's plugins, codec support, output route or speaker availability. Preserve
 unknowns; never replace missing support with package installation or Quasar shutdown.

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import threading
 import wave
 from pathlib import Path
 from typing import Any
@@ -235,6 +236,62 @@ def test_unknown_word_or_mode_is_refused() -> None:
         wl.Listener("алиса", "either", Vosk([]), Mww, emit=print)
     with pytest.raises(SafetyError):
         wl.Listener("компьютер", "any", Vosk([]), Mww, emit=print)
+
+
+class Dead(Mww):
+    def alive(self) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(("mode", "ends"), [("mww", True), ("both", True), ("either", False),
+                                            ("vosk", False)])
+def test_a_repeatedly_exiting_detector_ends_the_modes_that_need_it(mode: str, ends: bool) -> None:
+    emitted: list[dict[str, Any]] = []
+    logged: list[dict[str, Any]] = []
+    listener = wl.Listener("компьютер", mode, Vosk(NAME), Dead, emit=emitted.append,
+                           log=logged.append)
+
+    def run() -> None:
+        for _ in range(40):
+            listener.feed(b"\0\1" * 1600)
+        listener.finish()
+
+    if ends:  # Every wake needs mww here: "listening" without it could never wake.
+        with pytest.raises(SafetyError, match="Wake detector exited repeatedly"):
+            run()
+        assert not emitted
+    else:
+        run()
+        assert [e["command"] for e in emitted] == ["включи свет"]  # Vosk carries on.
+    assert {"mww": "disabled_after_repeated_exits"} in logged
+
+
+def test_a_detector_that_stops_reading_cannot_block_the_audio_loop(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(wl, "STALL_S", 0.3, raising=False)
+    pcm = b"\0" * (2 << 20)  # Far more than a pipe holds.
+
+    def start(script: bytes) -> wl.Mww:
+        path = tmp_path / "mww"
+        path.write_bytes(script)
+        path.chmod(0o700)
+        monkeypatch.setitem(wl.MWW_PINS, "ft", hashlib.sha256(script).hexdigest())
+        return wl.Mww(path)
+
+    stuck = start(b"#!/bin/sh\nexec sleep 30\n")
+    feeder = threading.Thread(target=stuck.feed, args=(pcm,), daemon=True)
+    feeder.start()
+    feeder.join(5)
+    blocked = feeder.is_alive()
+    stuck.process.kill()  # Releases an untimed write, so a failing run leaves no thread.
+    feeder.join(5)
+    assert not blocked and not stuck.alive() and stuck.audio_ms == 0
+    stuck.close()
+    healthy = start(b"#!/bin/sh\nexec cat >/dev/null\n")
+    healthy.feed(pcm)  # A reading child still takes a write larger than the pipe.
+    assert healthy.alive() and healthy.audio_ms == len(pcm) // 32
+    healthy.close()
 
 
 def stand_in() -> bytes:

@@ -23,7 +23,6 @@ from typing import Any
 
 from alice_mcp import device_runtime as rt
 from alice_mcp import io_channel_pilot as iop
-from alice_mcp import native_transport
 from alice_mcp.core import Controller, SafetyError, SSHInput, Station, ssh_argv
 from alice_mcp.vqe_experiment import _ssh
 from alice_mcp.wake_simulate import read_pinned
@@ -46,7 +45,8 @@ CONTROL_ERRORS = frozenset({"not_owner", "invalid_request", "firmware_mismatch",
 CONTROL_SCRIPT = r"""set -u
 umask 077
 exec 2>/dev/null
-mode=$1; firmware=$2; size=$3; pin=$4; stamp=$5; command=$6; arg=$7; expected=${8:-}
+mode=$1; firmware=$2; size=$3; pin=$4; stamp=$5; command=$6; arg=$7; ceiling=${8:-}
+expected=${9:-}
 blocked() { printf '{"outcome":"blocked","error_code":"%s"}\n' "$1"; exit 0; }
 unknown() { printf '{"outcome":"unknown","error_code":"%s"}\n' "$1"; exit 0; }
 [ "$(id -u)" = 0 ] || blocked not_owner
@@ -57,6 +57,8 @@ case "$command:$arg" in
  --send-activation:on|--send-activation:off) ;;
  *) blocked invalid_request;;
 esac
+case "$ceiling" in ''|*[!0-9]*) blocked invalid_request;; esac
+[ "$ceiling" -le 100 ] || blocked invalid_request
 # *_verified: the host just matched the resident's firmware/boot/Quasar stamp to one that
 # a full hash here already proved; otherwise hash the firmware now.
 case "$mode" in *_verified) ;; *)
@@ -79,8 +81,10 @@ if [ "${mode%_verified}" = inspect ]; then
  exit 0
 fi
 [ "${mode%_verified}" = apply ] && [ "$expected" = "$state" ] || blocked preview_state_changed
-if [ "$command:$arg" = --send-volume-step:louder ] && [ "$volume" -ge 10000 ]; then
- blocked at_limit
+# A stock step is 10 % of the scale; it must not end above the private max_volume.
+if [ "$command:$arg" = --send-volume-step:louder ]; then
+ next=$((volume + 1000)); [ "$next" -le 10000 ] || next=10000
+ [ "$volume" -lt 10000 ] && [ "$next" -le $((ceiling * 100)) ] || blocked at_limit
 fi
 if [ "$command:$arg" = --send-volume-step:quieter ] && [ "$volume" -le 0 ]; then
  blocked at_limit
@@ -122,6 +126,7 @@ done
 unknown not_observed
 """
 
+WATCH_KILL_SECONDS = 3600 + 30  # The listener's own bound below, plus a margin.
 SCRIPT = r"""set -eu
 umask 077
 exec 2>/dev/null
@@ -191,21 +196,23 @@ def control(action: str, params: dict[str, Any]) -> tuple[str, str]:
 
 
 def control_request(firmware: str, mode: str, command: str, arg: str, client: bytes = b"",
-                    expected: str = "", *, stamp: str = "-", pin: str | None = None) -> SSHInput:
+                    expected: str = "", *, stamp: str = "-", pin: str | None = None,
+                    ceiling: int = 100) -> SSHInput:
     pin = pin or CLIENT_SHA256
     apply = mode.startswith("apply")
     if (mode not in {"inspect", "apply", "inspect_verified", "apply_verified"}
             or not rt._match(rt.HEX64, firmware) or apply != bool(client)
             or apply != bool(expected) or client and hashlib.sha256(client).hexdigest() != pin
-            or mode.endswith("_verified") and not rt._match(rt.HEX64, stamp)):
+            or mode.endswith("_verified") and not rt._match(rt.HEX64, stamp)
+            or not rt._integer(ceiling, 0, 100)):
         raise SafetyError("Reviewed Quasar client missing or changed; no transfer")
-    args = (mode, firmware, str(len(client)), pin, stamp, command, arg,
+    args = (mode, firmware, str(len(client)), pin, stamp, command, arg, str(ceiling),
             *([expected] if expected else []))
     command_line, source = _loader(CONTROL_SCRIPT, args)
     return SSHInput(command_line, source + client)
 
 
-def parse_control(raw: str) -> dict[str, Any]:
+def parse_control(raw: str, max_level: int = 10) -> dict[str, Any]:
     try:
         value = rt._json(raw.strip().splitlines()[-1].encode())
         if type(value) is not dict:
@@ -222,7 +229,7 @@ def parse_control(raw: str) -> dict[str, Any]:
                 raise ValueError
         elif outcome == "applied" and keys == {"outcome", "previous_level", "level"}:
             if not all(type(value[k]) is int and 0 <= value[k] <= 10
-                       for k in ("previous_level", "level")):
+                       for k in ("previous_level", "level")) or value["level"] > max_level:
                 raise ValueError
         else:
             raise ValueError
@@ -243,21 +250,23 @@ def invoke(controller: Controller, station: Station, request: dict[str, Any]) ->
     """
     command, arg = control(request["action"], request["params"])
     firmware = station.controls["firmware_sha256"]
-    resident = controller.station(station.id)
-    stamp = (native_transport._state(controller, resident, "led.show")
-             if resident.native_mcp else "-")
+    from alice_mcp import live_voice  # It imports this module.
+
+    # A down or busy resident only costs the full firmware hash on the station.
+    stamp = live_voice._stamp(controller, controller.station(station.id))
+    ceiling = station.controls.get("max_volume", 30)
     verified = stamp != "-" and _verified.get(station.id) == stamp
     suffix = "_verified" if verified else ""
     if request["mode"] == "inspect":
         result = parse_control(controller.runner(station, control_request(
-            firmware, "inspect" + suffix, command, arg, stamp=stamp)))
+            firmware, "inspect" + suffix, command, arg, stamp=stamp, ceiling=ceiling)))
         if result["outcome"] == "ready" and stamp != "-":
             _verified[station.id] = stamp
         return result
     client = read_pinned(Path(station.controls["quasar_client"]), CLIENT_SHA256, 64 * 1024)
     return parse_control(controller.runner(station, control_request(
         firmware, "apply" + suffix, command, arg, client, request["expected_sha256"],
-        stamp=stamp)))
+        stamp=stamp, ceiling=ceiling)), ceiling // 10 if arg == "louder" else 10)
 
 
 def stream(process: Any, sink: Callable[[dict[str, Any]], None],
@@ -271,7 +280,7 @@ def stream(process: Any, sink: Callable[[dict[str, Any]], None],
     threading.Thread(target=closer, name="alice-spotter-stop", daemon=True).start()
     summary: dict[str, Any] = {"event": "end", "outcome": "unknown",
                                "error_code": "ipc_closed", "spotted": 0}
-    for raw in process.stdout:
+    for raw in iter(lambda: process.stdout.readline(513), b""):
         event = parse(raw.rstrip(b"\n"))
         if event["event"] == "end":
             summary = event
@@ -291,11 +300,16 @@ def watch(controller: Controller, station_id: str, sink: Callable[[dict[str, Any
     with subprocess.Popen(ssh_argv(ssh, launch), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL) as process:
         assert process.stdin is not None
-        process.stdin.write(launch.data)
-        process.stdin.flush()
+        # A live but stuck remote must not outlast the session's own one-hour bound.
+        timer = threading.Timer(WATCH_KILL_SECONDS, process.kill)
+        timer.daemon = True
+        timer.start()
         try:
+            process.stdin.write(launch.data)
+            process.stdin.flush()
             return stream(process, sink, stop)
         finally:
+            timer.cancel()
             with contextlib.suppress(OSError, ValueError):
                 process.stdin.close()
             try:

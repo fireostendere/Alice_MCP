@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from alice_mcp import device_runtime as rt
+from alice_mcp import native_transport
 from alice_mcp import quasar_client as qc
 from alice_mcp.core import SafetyError
 
@@ -128,7 +129,7 @@ def fake_station(tmp_path: Path, client_body: str) -> tuple[Any, bytes]:
 
 def run_control(device: Any, client: bytes, command: str, arg: str, *,
                 firmware: bytes = b"synthetic firmware", verified: bool = False,
-                stamp: str = "c" * 64) -> dict[str, Any]:
+                stamp: str = "c" * 64, ceiling: int = 100) -> dict[str, Any]:
     firmware_sha = hashlib.sha256(firmware).hexdigest()
     pin = hashlib.sha256(client).hexdigest()
     env = {"PATH": f"{device.root / 'bin'}:/usr/bin:/bin"}
@@ -136,7 +137,7 @@ def run_control(device: Any, client: bytes, command: str, arg: str, *,
 
     def run(mode: str, expected: str = "", data: bytes = b"") -> dict[str, Any]:
         args = [mode + suffix, firmware_sha, str(len(data)), pin, stamp, command, arg,
-                *([expected] if expected else [])]
+                str(ceiling), *([expected] if expected else [])]
         out = subprocess.run(["dash", "-c", device.script, "sh", *args], input=data,
                              capture_output=True, env=env, timeout=20)
         return qc.parse_control(out.stdout.decode())
@@ -161,7 +162,7 @@ def test_verified_cache_only_follows_a_full_check_for_the_same_resident_stamp(
         monkeypatch: Any) -> None:
     calls: list[str] = []
     stamps = iter(["1" * 64] * 3 + ["2" * 64] * 2)
-    monkeypatch.setattr(qc.native_transport, "_state", lambda *a: next(stamps))
+    monkeypatch.setattr(native_transport, "_state", lambda *a: next(stamps))
     station = SimpleNamespace(id="mini1", native_mcp={"url": "x"},
                               controls={"firmware_sha256": "a" * 64})
 
@@ -196,6 +197,103 @@ def test_step_at_the_limit_is_blocked_before_sending(tmp_path: Path, dash: None)
     assert run_control(device, client, "--send-volume-step", "louder") == {
         "outcome": "blocked", "error_code": "at_limit"}
     assert not (device.root / "sent").exists()
+
+
+@pytest.mark.parametrize(("start", "arg", "after", "sent"), [
+    ("3000", "louder", "4000", False),  # Already at the ceiling.
+    ("2500", "louder", "3500", False),  # One 10 % step would end above it.
+    ("2000", "louder", "3000", True),
+    ("8000", "quieter", "7000", True),  # Leaving a manual level above the ceiling is fine.
+])
+def test_louder_step_never_ends_above_the_private_ceiling(
+        tmp_path: Path, dash: None, start: str, arg: str, after: str, sent: bool) -> None:
+    device, client = fake_station(tmp_path, f"echo SENT > ROOT/sent; echo {after} > ROOT/vol")
+    (device.root / "vol").write_text(start)
+    result = run_control(device, client, "--send-volume-step", arg, ceiling=30)
+    assert result == ({"outcome": "applied", "previous_level": int(start) // 1000,
+                       "level": int(after) // 1000} if sent else
+                      {"outcome": "blocked", "error_code": "at_limit"})
+    assert (device.root / "sent").exists() is sent
+    for bad in ("", "x", "101"):
+        assert run_control(device, client, "--send-volume-step", "quieter",
+                           ceiling=bad) == {  # type: ignore[arg-type]
+            "outcome": "blocked", "error_code": "invalid_request"}
+
+
+def _control_station(tmp_path: Path, monkeypatch: Any, reply: str,
+                     native: bool = False) -> tuple[Any, Any, list[list[str]]]:
+    client = tmp_path / "client"
+    client.write_bytes(b"\x7fELF synthetic")
+    monkeypatch.setattr(qc, "CLIENT_SHA256", hashlib.sha256(client.read_bytes()).hexdigest())
+    station = SimpleNamespace(id="mini1", native_mcp={"url": "x"} if native else {}, controls={
+        "firmware_sha256": "a" * 64, "quasar_client": str(client), "max_volume": 30})
+    calls: list[list[str]] = []
+
+    def runner(target: Any, command: Any) -> str:
+        calls.append(shlex.split(command.command)[4:])
+        return ('{"outcome":"ready","state_sha256":"' + "b" * 64 + '"}'
+                if calls[-1][0].startswith("inspect") else reply)
+
+    qc._verified.clear()
+    return SimpleNamespace(runner=runner, station=lambda _: station), station, calls
+
+
+@pytest.mark.parametrize(("step", "outcome"), [("louder", "unknown"), ("quieter", "applied")])
+def test_invoke_sends_the_ceiling_and_rejects_a_louder_result_above_it(
+        tmp_path: Path, monkeypatch: Any, step: str, outcome: str) -> None:
+    controller, station, calls = _control_station(
+        tmp_path, monkeypatch, '{"outcome":"applied","previous_level":3,"level":4}')
+    request = {"action": "quasar.volume", "params": {"step": step}}
+    assert qc.invoke(controller, station, {**request, "mode": "inspect"})["outcome"] == "ready"
+    result = qc.invoke(controller, station, {**request, "mode": "apply",
+                                             "expected_sha256": "b" * 64})
+    assert result["outcome"] == outcome  # Unknown, never retried: the level did change.
+    assert [call[7] for call in calls] == ["30", "30"] and calls[1][8] == "b" * 64
+
+
+@pytest.mark.parametrize("error", [
+    "Native preview state unavailable; no action dispatched",  # Resident down.
+    "Native state-bound action contract unavailable or policy changed",  # Busy or not allowed.
+])
+def test_unavailable_resident_stamp_falls_back_to_the_station_firmware_hash(
+        tmp_path: Path, monkeypatch: Any, error: str) -> None:
+    def state(*args: Any) -> str:
+        raise SafetyError(error)
+
+    monkeypatch.setattr(native_transport, "_state", state)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    controller, station, calls = _control_station(
+        tmp_path, monkeypatch, '{"outcome":"applied","previous_level":1,"level":2}', native=True)
+    request = {"action": "quasar.volume", "params": {"level": 2}}
+    assert qc.invoke(controller, station, {**request, "mode": "inspect"})["outcome"] == "ready"
+    assert qc.invoke(controller, station, {**request, "mode": "apply",
+                                           "expected_sha256": "b" * 64})["outcome"] == "applied"
+    assert [call[0] for call in calls] == ["inspect", "apply"]  # Full hash on the station.
+    assert [call[4] for call in calls] == ["-", "-"] and not qc._verified
+
+
+def test_stream_reads_bounded_lines() -> None:
+    process = FakeProcess([b"x" * 100000])
+    with pytest.raises(SafetyError):
+        qc.stream(process, lambda _: None, threading.Event())
+    assert process.stdout.tell() < 1024
+
+
+def test_watch_kills_a_stuck_transport_after_the_session_bound(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    controller, station, _ = _control_station(tmp_path, monkeypatch, "")
+    process = FakeProcess([])
+    killed = threading.Event()
+    process.kill = killed.set  # type: ignore[method-assign]
+    process.stdout = SimpleNamespace(  # type: ignore[assignment]
+        readline=lambda limit=-1: b"" if killed.wait(3) else b"")
+    monkeypatch.setattr(qc.iop, "_permitted", lambda *a: None)
+    monkeypatch.setattr(qc, "_ssh", lambda station: station)
+    monkeypatch.setattr(qc, "ssh_argv", lambda *a: ["ssh"])
+    monkeypatch.setattr(qc.subprocess, "Popen", lambda *a, **k: process)
+    monkeypatch.setattr(qc, "WATCH_KILL_SECONDS", 0.1, raising=False)
+    summary = qc.watch(controller, "mini1", lambda _: None, stop=threading.Event())
+    assert killed.is_set() and summary["outcome"] == "unknown"
 
 
 def test_activation_is_confirmed_by_a_new_spotter_log_line(tmp_path: Path, dash: None) -> None:
@@ -259,7 +357,7 @@ def test_controls_run_quasar_actions_over_the_pinned_ssh_twin_of_a_resident_stat
 
     controller = Controller(None, writes=True, runner=runner)
     monkeypatch.setattr(controller, "station", lambda _: station)
-    monkeypatch.setattr(qc.native_transport, "_state", lambda *a: "d" * 64)
+    monkeypatch.setattr(native_transport, "_state", lambda *a: "d" * 64)
     qc._verified.clear()
     plan = controls.preview(controller, "mini1", "quasar.volume", {"level": 7})
     result = controller.execute_plan(controller.take_plan(plan["plan_id"],

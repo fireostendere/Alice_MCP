@@ -33,7 +33,8 @@ def setup(monkeypatch: Any) -> Any:
     monkeypatch.setattr(pcm_pilot, "PLAYER_SHA256", sha(b"player"))
     station = Station("desk", "station-mini", "station.invalid", 22, "root", Path("unused"),
                       Path("unused"), False, "", "config", "native trust",
-                      {"firmware_sha256": "a" * 64, "allowed_actions": ["speech.say"]},
+                      {"firmware_sha256": "a" * 64, "allowed_actions": ["speech.say"],
+                       "local_tts": {}},
                       preauthorize_all_actions=True, native_mcp={"endpoint": "synthetic"})
     root = agent_provision.destination("direct")
     config = {"station_id": "desk", "model": "station-mini",
@@ -50,8 +51,9 @@ def setup(monkeypatch: Any) -> Any:
               ASR_CLIENT_SHA256, sha(old), *(["c" * 64] * 3),
               sha(agent_provision.start_script("direct").encode()), sha(b"player"))
     clock = [0.0]
+    execution = threading.Lock()
     controller: Any = SimpleNamespace(writes=True, plans={}, _plan_lock=threading.Lock(),
-                                      _execution_lock=threading.Lock(), clock=lambda: clock[0],
+                                      execution_lock=lambda _: execution, clock=lambda: clock[0],
                                       station=lambda _: station)
     controller.store_plan = lambda *a, **kw: Controller.store_plan(controller, *a, **kw)
     controller.take_plan = lambda *a: Controller.take_plan(controller, *a)
@@ -263,7 +265,8 @@ def test_rejects_nonbaseline_config_and_pins(setup: Any, change: str) -> None:
                              "d" * 64, "e" * 64, layout="direct")
 
 
-@pytest.mark.parametrize("change", ["writes", "preauth", "native", "say", "model"])
+@pytest.mark.parametrize("change", ["writes", "preauth", "native", "say", "model",
+                                    "local_tts"])
 def test_preview_requires_existing_authorized_native_route(setup: Any, change: str) -> None:
     controller, station, package, calls, _ = setup
     if change == "writes":
@@ -271,7 +274,12 @@ def test_preview_requires_existing_authorized_native_route(setup: Any, change: s
     else:
         fields: dict[str, dict[str, Any]] = {
             "preauth": {"preauthorize_all_actions": False}, "native": {"native_mcp": {}},
-            "say": {"controls": {"allowed_actions": []}}, "model": {"model": "other"}}
+            "say": {"controls": {"allowed_actions": [], "local_tts": {}}},
+            "model": {"model": "other"},
+            # The upgraded resident speaks local PCM only; the mid-transaction TLS check
+            # would fail and roll back, so this is refused before anything is touched.
+            "local_tts": {"controls": {"firmware_sha256": "a" * 64,
+                                       "allowed_actions": ["speech.say"]}}}
         controller.station = lambda _: replace(station, **fields[change])
     with pytest.raises(SafetyError):
         agent_upgrade.preview(controller, "desk", package)

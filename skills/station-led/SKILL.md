@@ -27,16 +27,24 @@ installation or native Windows device writes are available.
    `get_station_controls(station_id)` for declared policy aliases. Neither verifies
    hardware availability. Lite uses `micro:{red,green,blue}:ring1` through `ring3`
    brightness nodes; Mini 2 uses `mini2:{red,green,blue}:ring1` through `ring6`.
-   This effect does not control Mini 2 clock segments. Do not infer Lite 2 support.
+   This effect does not control Mini 2 clock segments. Do not infer Lite 2 support:
+   the wiki reports Lite 2/Plum nodes as `plum:{red,green,blue}:ring1` through `ring3`
+   on one build, each colour carrying a stock trigger (normally `led_ring_fb`). A
+   brightness write there can detach the trigger and hide stock animations until the
+   trigger itself is put back, and the red mute indication keeps priority.
 2. Mini 3/Bergamot uses a six-by-one, 24-bpp **BGR**, 18-byte framebuffer. Its related sysfs
    nodes can reflect framebuffer state rather than independently drive it.
 3. Station 2 uses an **RGBW**, 32-bpp, 356-byte frame with 89 logical positions and
    88 visible LEDs: index 88 is not visible. Do not reuse Bergamot frame length or channel order.
 4. Midi has ring/logo framebuffers and separate clock segments, but their byte
    ordering is not established by its page. Pickle, Mango and Saturn have different
-   zone layouts and have no inferred adapter here. Mini 1's I2C ring protocol is
-   not the Lite interface. Mini 1 general RGB control and Midi LED writes are unsupported;
-   Mini 1 has only the separately gated fixed pulse/animation profiles described below.
+   zone layouts and have no inferred adapter here. Mini 1's SN3236 I2C ring is
+   not the Lite interface and has no `led.effect`: use `led.show` and the separately
+   gated capture/pulse/animation actions below. Midi LED writes are unsupported.
+   The wiki now documents the Mini 1 register layout, byte and zone order, gamma
+   header and the stock `led_util` file player: see [wiki LED notes](references/interfaces.md).
+   `get_model_interfaces(model).actions` says which LED actions a model has;
+   Mini 2 and Station 2 have `led.effect` but no `led.show` yet.
 5. An effect disappearing when Alice speaks can be normal ownership contention,
    not a reason for raw I2C, direct register writes or Quasar shutdown.
 
@@ -96,7 +104,8 @@ permission to replay them. A separately authorized `led.replay` action accepts
 only `{"capture_id": "<opaque id>"}` and repeats the recorded `25 aa` PWM-update
 packet once. It needs its own preview and native approval unless preauthorized, sends no new color or
 current values, never forces/unbinds a driver and promises no visible effect.
-No other packet replay is implemented. The full color protocol remains unverified. See the
+No other packet replay is implemented. The wiki's published frame layout
+([notes](references/interfaces.md)) is reference data, not authority to send other packets. See the
 capture contract in the source repository's `docs/CONTROLS.md` for limits and
 the distinction between runtime readiness and verified hardware behavior.
 
@@ -170,8 +179,10 @@ false. A state restoration check is not a human observation of the display.
 ## Limitations
 
 Mini 2's six-zone .led interpretation remains explicitly unverified. Lite's textual
-format is not a universal animation schema. Public evidence is pinned to revision
-`1ab048bf95c0e5e547a1ff6c801d2ed9deb193db`, not device qualification. Bundled
+format is not a universal animation schema; Mini 1 patterns carry six colours per
+frame. The Lite 2 handler and GPT lighting in the recipe belong to a third-party
+voice project and stay guidance-only. Public evidence is pinned to revision
+`520fbccd68cb90a8c4f01d06bf38d9a7db915304`, not device qualification. Bundled
 integration checks are offline/synthetic, not proof of physical playback. No
 arbitrary GPIO/I2C/memory/register controls, copied scripts or downloaded RGB
 installer are provided or executed here.
@@ -181,5 +192,5 @@ Sources: [LED recipe](https://hackalice.me/recipes/led/),
 [Mini 2 caveat](https://hackalice.me/devices/station-mini2/),
 [Bergamot framebuffer](https://hackalice.me/devices/station-mini3/),
 [Station 2 panel](https://hackalice.me/devices/station-2/),
-[Mini 1 unknown protocol](https://hackalice.me/devices/station-mini/),
+[Mini 1 SN3236 ring](https://hackalice.me/devices/station-mini/),
 [Midi format unknowns](https://hackalice.me/devices/station-midi/).

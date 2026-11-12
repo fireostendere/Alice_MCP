@@ -8,18 +8,20 @@ from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "src/alice_mcp/data/catalog.json"
-REVISION = "1ab048bf95c0e5e547a1ff6c801d2ed9deb193db"
+REVISION = "520fbccd68cb90a8c4f01d06bf38d9a7db915304"
 EXPECTED_PATHS = {
-    "docs/index.md",
     "docs/contributing.md",
     "docs/contributors.md",
+    "docs/devices/fiero-hi.md",
     "docs/devices/index.md",
     "docs/devices/jbl-link-music.md",
+    "docs/devices/jbl-link-portable.md",
     "docs/devices/station-2.md",
     "docs/devices/station-3.md",
     "docs/devices/station-gen1.md",
     "docs/devices/station-lite.md",
     "docs/devices/station-lite2.md",
+    "docs/devices/station-max-zigbee.md",
     "docs/devices/station-max.md",
     "docs/devices/station-midi.md",
     "docs/devices/station-mini.md",
@@ -28,21 +30,42 @@ EXPECTED_PATHS = {
     "docs/devices/station-mini3.md",
     "docs/devices/station-street.md",
     "docs/devices/yandex-hub.md",
+    "docs/edit.md",
+    "docs/glossary.md",
+    "docs/index.md",
     "docs/internals/architecture.md",
+    "docs/internals/calls.md",
     "docs/internals/directives.md",
     "docs/internals/gotchas.md",
     "docs/internals/network.md",
+    "docs/internals/telemetry.md",
     "docs/internals/toolchain.md",
     "docs/internals/voice.md",
+    "docs/internals/zigbee.md",
     "docs/recipes/airplay.md",
+    "docs/recipes/bekend-self-hosted.md",
+    "docs/recipes/bt-proxy.md",
     "docs/recipes/fastfetch.md",
+    "docs/recipes/home-assistant.md",
     "docs/recipes/index.md",
     "docs/recipes/led.md",
     "docs/recipes/llm.md",
+    "docs/recipes/microphone.md",
+    "docs/recipes/midipult.md",
+    "docs/recipes/packagemanagers.md",
+    "docs/recipes/quasard.md",
     "docs/recipes/sounds.md",
+    "docs/recipes/spotify.md",
     "docs/recipes/standalone.md",
+    "docs/recipes/station1-debian.md",
+    "docs/recipes/station1-privacy.md",
+    "docs/recipes/station1-soundcloud.md",
+    "docs/recipes/station1-spotify.md",
+    "docs/recipes/station1-tv.md",
+    "docs/recipes/upravlenie-golosom-alisy.md",
     "docs/recipes/usb-host.md",
-    "docs/recipes/yam.md",
+    "docs/recipes/v3rt3p.md",
+    "docs/recipes/youtube-music.md",
     "docs/start/index.md",
     "docs/start/packages.md",
     "docs/start/recovery.md",
@@ -54,21 +77,28 @@ EXPECTED_PATHS = {
     "docs/start/ssh.md",
 }
 EXPECTED_SKILLS = {
-    "station-devices",
     "station-access",
-    "station-recovery",
-    "station-packages",
-    "station-usb",
     "station-airplay",
-    "station-sounds",
-    "station-fastfetch",
-    "station-led",
-    "station-yam",
-    "station-llm",
-    "station-standalone",
-    "station-internals",
+    "station-bringup",
     "station-community",
+    "station-control",
+    "station-devices",
+    "station-fastfetch",
+    "station-gen1",
+    "station-integrations",
+    "station-internals",
+    "station-led",
+    "station-llm",
+    "station-microphone",
+    "station-packages",
+    "station-recovery",
+    "station-sounds",
+    "station-standalone",
+    "station-streaming",
+    "station-usb",
+    "station-yam",
 }
+CARRIED_REVISION = "1ab048bf95c0e5e547a1ff6c801d2ed9deb193db"
 
 
 def load_catalog():
@@ -85,17 +115,25 @@ def test_catalog_schema_and_complete_pinned_coverage():
     assert set(catalog) == {"schema", "upstream", "pages"}
     assert catalog["schema"] == "alice.catalog.v1"
     upstream = catalog["upstream"]
-    assert set(upstream) == {"url", "revision", "retrieved_at", "scope", "license_note"}
+    assert set(upstream) == {"url", "revision", "retrieved_at", "scope", "license_note",
+                             "carried"}
     assert upstream["url"] == "https://hackalice.me/"
     assert upstream["revision"] == REVISION
-    assert upstream["retrieved_at"] == "2026-10-26"
+    assert upstream["retrieved_at"] == "2026-11-11"
+    # Pages not re-read at this revision are named, never silently presented as current.
+    carried = upstream["carried"]
+    assert set(carried) == {"revision", "pages", "not_catalogued"}
+    assert carried["revision"] == CARRIED_REVISION
+    assert len(carried["pages"]) == 10 and len(carried["not_catalogued"]) == 8
+    assert not set(carried["not_catalogued"]) & EXPECTED_PATHS
     assert "sitemap" in upstream["scope"].lower()
     assert "no explicit" in upstream["license_note"].lower()
     pages = catalog["pages"]
-    assert len(pages) == len(EXPECTED_PATHS) == 42
+    assert len(pages) == len(EXPECTED_PATHS) == 65
+    assert set(carried["pages"]) <= {page["id"] for page in pages}
     assert {page["source_path"] for page in pages} == EXPECTED_PATHS
-    assert len({page["id"] for page in pages}) == 42
-    assert len({page["url"] for page in pages}) == 42
+    assert len({page["id"] for page in pages}) == 65
+    assert len({page["url"] for page in pages}) == 65
     referenced = set()
     for page in pages:
         assert set(page) == {
@@ -168,7 +206,8 @@ def test_device_matrix_and_evidence_limits_are_present():
         assert term in text
     sources = (ROOT / "docs/SOURCES.md").read_text(encoding="utf-8")
     assert REVISION in sources
-    assert "42" in sources and "sitemap" in sources.lower()
+    assert CARRIED_REVISION in sources
+    assert "65" in sources and "73" in sources and "sitemap" in sources.lower()
     assert "not device tests" in sources.lower()
 
 

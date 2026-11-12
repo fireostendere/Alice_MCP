@@ -28,17 +28,38 @@ firmware SHA-256. Native Windows device writes and automatic installation are un
    hardware availability. Distinguish file/codec failure from no output or wrong
    output. The documented native pipeline decodes, converts and resamples to ALSA
    `default`; that may already be USB headphones rather than the built-in speaker.
+   It is the same output Alice uses and follows her volume.
 2. Check whether ordinary Quasar sound works before suggesting extra packages.
    Vendor-library path or working-directory requirements can explain maind's
    standalone invocation failure; do not replace system libraries.
 3. For streams, verify the source is owner-approved and trusted. Do not convert
    an arbitrary supplied URL into shell syntax or bypass certificate verification.
-4. Custom system sounds are Ogg Opus in the source. Perform any conversion on the
+4. Custom system sounds are Ogg Opus in the source (48 kHz mono). On recent
+   firmware (reported on Mini 2, 0.369.1.50) they sit in `common/` and `ru-RU/`
+   under `/data/quasar/data/sounds/`, a writable partition; `/system/vendor/quasar/sounds/`
+   belongs to older builds and factory images and needs a root remount. The wake
+   acknowledgement is one of nine `seam_activation_feedback_*` files chosen by the
+   `activation_feedback_player` probabilities in `quasar.cfg`. One Lite 1 build has
+   four separate `aliced` earcon switches (start, cancel, stop-recognition, error);
+   which file each governs is not established. Perform any conversion on the
    host and inspect duration/level before considering a replacement.
 5. `audio.volume` requires probing an available `Master` control on reviewed
-   Buildroot. The public exact mixer command is documented only for Lite; do not
-   infer that all models share it. The maind/GStreamer recipe is not universal
+   Buildroot. The public mixer command is documented on some model pages (Lite,
+   Station 2, Mini 3 Pro), not all; do not infer that all models share it.
+   The maind/GStreamer recipe is not universal
    proof of plugins, codecs or working speakers. Unknown support fails closed.
+6. The recipe's own text-to-speech path (reported on one Lite 2/Plum build) sends a
+   vocalize request in Append mode over SSH to the station's loopback-only IPC
+   port 9875. Synthesis is Yandex cloud TTS under the station's existing account
+   binding, not local. Its event subscription and event codes are marked
+   unverified, replies are not matched to a request, so parallel speech must be
+   excluded, and a timeout or dropped session does not prove silence.
+7. A separate [web-panel recipe](https://hackalice.me/recipes/upravlenie-golosom-alisy/)
+   (reported on Mini 2 and Lite 2) wraps the same port from a PC on loopback port
+   8787. It calls the synthesis local, which conflicts with item 6, and it has the
+   reader unpack and run an archive from an anonymous file host with no checksum
+   or source. Treat it as guidance-only and do not fetch or run it; `speech.say`
+   is the reviewed route here.
 
 ## Preview and confirmation
 
@@ -51,9 +72,9 @@ inspection, selecting exactly one action:
 - `audio.volume`: `percent`, an integer from 0 to the private `max_volume`
   ceiling (default 30%). This is a persistent control change with a restore record.
 - `audio.play`: approved `asset` alias and integer `duration_seconds` from 1 to 10.
-- `media.upload`: approved `asset` alias and `content_base64`; decoded size is at
-  most 49,152 bytes and SHA-256 must match the preregistered private asset hash.
-  This ceiling deliberately bounds the SSH argument, not just file storage.
+- `media.upload`: approved `asset` alias and `content_base64`; SHA-256 must match
+  the preregistered private asset hash. Decoded size is at most 49,152 bytes:
+  the upload travels in one bounded request with the station helper, not a stream.
 - `sound.replace`: approved `asset` alias and `slot`, one of `spotter_start`,
   `spotter_cancel`, `volume_sound` or `notification_sound`.
 - `speech.say`: literal `text`, at most 256 Unicode scalars / 512 UTF-8 bytes,
@@ -68,6 +89,10 @@ inspection, selecting exactly one action:
   phrase. A 20-second observation timeout does not stop or bound playback.
   Only request-correlated start/completion plus cleanup establish protocol success;
   have the owner confirm audible/intelligible sound. Never retry an uncertain send.
+
+Stock volume steps and levels, the OpenAI voice and one-shot questions
+(`quasar.volume`, `speech.openai`, `ask_station`) are routed in
+[station-control](../station-control/SKILL.md).
 
 Assets refer only to privately registered `/data/sounds/<safe-name>.opus`, `.wav`
 or `.mp3` files. Do not supply a path, URL, shell command or arbitrary slot.
@@ -94,7 +119,9 @@ fall back to unchecked playback if unavailable.
 
 ## Backup and rollback
 
-One-shot playback does not install startup hooks or change vendor assets. Before
+One-shot playback does not install startup hooks or change vendor assets. The
+recipe keeps no on-station copy of a replaced system sound: the owner must hold
+the original off the station first. Before
 persistent volume/media/sound edits, the helper saves an owner-only record under
 `/data/opt/alice-mcp/backups/<id>.json`. Keep original values private. For recovery,
 preview `restore` with `backup_id` (32 lowercase hexadecimal characters) and get
@@ -127,8 +154,10 @@ service preview/approval, never an implied configuration reload.
 No station access or hardware test was performed; integration checks are
 offline/synthetic. Source filenames and available GStreamer plugins can vary by firmware;
 generic “all Amlogic” claims do not establish every model.
-The wiki does not verify whether replacing system sounds takes effect without reboot.
-Evidence is pinned to public revision `1ab048bf95c0e5e547a1ff6c801d2ed9deb193db`;
+The wiki tells the reader to reboot after replacing a system sound; whether a
+replacement takes effect without one is not verified.
+Evidence is pinned to public revision `520fbccd68cb90a8c4f01d06bf38d9a7db915304`;
 synthetic checks and policy declarations are not hardware qualification.
 
-Source: [custom sounds, streams and replacement caveats](https://hackalice.me/recipes/sounds/).
+Sources: [custom sounds, streams, native TTS and replacement caveats](https://hackalice.me/recipes/sounds/),
+[voice web panel](https://hackalice.me/recipes/upravlenie-golosom-alisy/).

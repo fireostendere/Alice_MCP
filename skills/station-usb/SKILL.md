@@ -12,7 +12,9 @@ guidance-only; never execute register writes or copied switching scripts.
 ## Prerequisites
 
 Limit the documented experiment to Lite Micro or retail Station 2, AXG/kernel
-4.9.68. Identify the exact build and compatible module provenance. Establish
+4.9.68; the upstream installer accepts only those two device-tree models. Use only
+the modules published with the recipe and remove any older module autostart left by
+earlier attempts. Identify the exact build and module provenance. Establish
 working pinned-host-key, key-only **Wi-Fi SSH** first: USB-gadget/ADB disappears
 after switching the port. Require an appropriate externally powered PD/pass-through
 hub; the station's sink port does not supply peripheral power.
@@ -33,7 +35,10 @@ hub; the station's sink port does not supply peripheral power.
    filesystem corruption. Do not format it as a troubleshooting step.
 5. For existing USB audio, distinguish card enumeration, supported PCM format,
    ALSA default routing and `Master` control. A hub's empty headphone jack can
-   still present an active sound card and silently receive all output.
+   still present an active sound card and silently receive all output; the recipe
+   has a persistent switch that keeps output on the speaker. Automatic switching on
+   plug-in relies on a hotplug rule that takes effect only after a reboot, and a
+   running player follows a new route from the next sound, not mid-playback.
 
 ## Preview and confirmation
 
@@ -52,7 +57,12 @@ Retain prior startup files, module inventory, ALSA and hotplug configurations.
 The documented runtime-only switch returns to factory role after a reboot **without
 the startup script**; an installed persistent script changes that assumption.
 Plan disabling OTG and restoring speaker routing through independent access.
-Never change U-Boot OTG variables to work around an unsupported model.
+The documented rollback has two levels: a disable flag plus reboot leaves files in
+place; full removal deletes the recipe's data directory and its init script while
+rootfs is temporarily writable. The route helper returns sound to the speaker, and
+the original ALSA and hotplug configurations are kept beside it as `.orig` copies.
+Never change U-Boot OTG variables to work around an unsupported model; the page
+states that doing so achieves nothing.
 
 ## Verification
 

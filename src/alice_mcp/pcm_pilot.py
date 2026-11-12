@@ -329,7 +329,7 @@ def _result(raw: str, audio: bytes, *, diagnostic: bool = False) -> dict[str, An
 def apply(controller: Controller, plan_id: str, expected: str, item: Candidate) -> dict[str, Any]:
     try:
         plan = controller.take_plan(plan_id, expected)
-        with controller._execution_lock:
+        with controller.execution_lock(plan.station.id):
             station = controller.station(plan.station.id)
             _permitted(controller, station)
             ssh = _ssh(station)

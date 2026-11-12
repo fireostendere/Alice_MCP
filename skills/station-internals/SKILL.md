@@ -1,6 +1,6 @@
 ---
 name: station-internals
-description: Diagnose Quasar startup, networking, voice and directive layers, then plan ABI-correct host builds; triggers include как устроена Алиса, maind, protobuf, кросс-компиляция.
+description: Diagnose Quasar startup, networking, voice, directive, call, telemetry and Zigbee layers, then plan ABI-correct host builds; triggers include как устроена Алиса, maind, protobuf, телеметрия, кросс-компиляция.
 ---
 
 # Trace one layer; do not rewrite the platform
@@ -21,18 +21,23 @@ executor, discovery sweep or a new root flow.
 
 ### Startup and filesystem
 
-Map BusyBox rcS startup to Quasar onboot, launcher configuration and maind roles.
+Map BusyBox rcS startup to Quasar onboot, launcher configuration and maind roles
+(platform, media, telemetry, log shipping, updates and an updater gateway).
 Different role names can be instances of one executable, not separate packages.
 Inspect only relevant role/version metadata; do not call broad diagnostic helpers
 that print device IDs or account configuration. Actual mount flags matter more
 than BusyBox write-permission tests. RAM-backed paths do not establish persistence.
+A patch-directory key seen in one Lite 1 config is unverified, not a settings API.
 
 ### Network and voice
 
-The cited Lite map includes glagol 1961, optional ADB 5555, optional SSH 2222 and
-mDNS 5353, plus local IPC/DNS. A port list is reference data, not a target list for
-scanning or proof that an operation is authenticated. Internal service ports come
-from the exact model/build configuration. Do not expose them to the LAN.
+The cited Lite map includes glagol 1961, optional ADB 5555 and SSH 2222, mDNS 5353,
+Zenoh 7447, `net_clock` on UDP 11125, call signalling on 5081 only during a call or
+registration, and loopback-only DNS, multiroom and daemon IPC ports.
+A port list is reference data, not a target list for scanning or proof that an
+operation is authenticated. Internal service ports come from the exact model/build
+configuration. Do not expose them to the LAN. Resolver forwarders come from the cloud
+sync config and are rewritten at each sync (Mini 2 report): local edits do not last.
 
 Separate microphone capture/VQE, local wake words, cloud ASR/dialogue, directive
 routing and output playback. Text input skips ASR, so working text does not prove
@@ -40,6 +45,12 @@ microphone health. Missing cloud ASR is not fixed by replacing an LLM URL. Do no
 record speech to diagnose by default; use owner-approved synthetic input.
 Capture device/rate examples differ: Cucumber's shared PDM report requires **96 kHz**;
 never apply a generic 48 kHz example to it or retune the hardware to experiment.
+The processed mono 16 kHz `vqe_0` channel feeds both the local spotters and the cloud
+uplink; channel sets, VQE presets and microphone counts vary by model and build.
+Spotter, wake-word, uplink and playback-profile findings, call signalling, the
+telemetry role and Midi Zigbee pairing are in the [subsystem notes](references/subsystems.md).
+None is a stable API; call-stack or telemetry tampering, traffic key logging, pairing
+directives and network-database edits are guidance-only there.
 
 ### Directives and state
 
@@ -48,9 +59,11 @@ typed `PayloadRaw` with serialized message bytes and matching `DirectiveType`.
 An apparent JSON shape is not an accepted typed wire message on protobuf-lite.
 Use matching protocol schemas and synthetic host-side encoding tests first.
 Own-device volume, alarm, timer and IoT alarm capabilities are different targets.
-Alarm-list state comes through its capability update, not necessarily the generic
-device-state message. Do not send trial alarm or smart-home directives to learn
-their meaning; those are state-changing operations with their own approval.
+Alarm-list state comes only through its capability update, not the generic
+device-state message. That build has no iCalendar alarm parser; do-not-disturb
+schedules stay in the cloud, with only forced on/off available locally. Do not send
+trial alarm or smart-home directives to learn their meaning; those are
+state-changing operations with their own approval.
 
 ### Runtime pitfalls
 
@@ -58,9 +71,13 @@ Check tool support before suggesting flags: sampled BusyBox lacks expected timeo
 tar and awk features. ALSA includes and cached mdev rules can explain why a config
 edit is not reflected in an existing process. Competing avahi/maind address
 publication can cause discovery-name churn; do not infer it is a network attack.
+Services that vanish from mDNS minutes after joining suggest router IGMP snooping
+without a querier. Wi-Fi networks added outside the app are removed at startup when
+maind reconciles them with the last cloud directive. Unsynced UBIFS writes can vanish.
 Vendor-module ABI needs matching structure layout, not merely a version string.
-The older TLS/no-pinning observation is model/build-scoped, not permission to use
-plaintext endpoints or assume certificate checks are absent on newer firmware.
+The TLS/no-pinning observation is model/build-scoped: the call stack verifies its
+server and Orion rejects a custom certificate. It is not permission to use plaintext
+endpoints or assume certificate checks are absent on newer firmware.
 
 ### Host toolchain workflow
 
@@ -69,7 +86,8 @@ plaintext endpoints or assume certificate checks are absent on newer firmware.
    armhf userspace. Street/JBL need ARMv7 even though their CPU family supports more.
 2. For an independent tool on a supported 64-bit kernel, the source recommends a
    static AArch64 musl target. For firmware-library integration use the actual armhf
-   ABI and verify that model's glibc ceiling; Lite's 2.30 is not Mini 1's guarantee.
+   ABI and verify that model's glibc ceiling; the 2.30 stated for Lite, Mini 2,
+   Station 2 and Midi is not Mini 1's guarantee.
 3. Build on the host with an existing cross-toolchain or Zig/CMake support, using
    a pinned source and dependency set. Inspect the artifact locally with ELF tools
    for interpreter, shared dependencies and minimum CPU features before deployment.
@@ -104,15 +122,19 @@ different evidence classes. Unknown semantics remain unknown.
 ## Limitations
 
 The wiki does not fully specify glagol or every maind diagnostic. Firmware role,
-port and typed-directive maps are not stable public APIs. No live capture,
-cross-build, station deployment or acceptance test was performed for these summaries.
+port and typed-directive maps are not stable public APIs. Summaries follow public
+revision `520fbccd68cb90a8c4f01d06bf38d9a7db915304`. No live capture, cross-build,
+station deployment or acceptance test was performed for these summaries.
 
 ## Sources
 
 - [Startup, maind and synthesized properties](https://hackalice.me/internals/architecture/)
-- [Network map and DNS fallbacks](https://hackalice.me/internals/network/)
+- [Network map, resolver config and DNS fallbacks](https://hackalice.me/internals/network/)
 - [Voice stages and labeled inferences](https://hackalice.me/internals/voice/)
 - [Legacy/typed directives and state](https://hackalice.me/internals/directives/)
-- [BusyBox, ALSA, mDNS, kernel and TLS pitfalls](https://hackalice.me/internals/gotchas/)
+- [Filesystem, BusyBox, ALSA, Wi-Fi, mDNS, kernel and TLS pitfalls](https://hackalice.me/internals/gotchas/)
 - [Host toolchains, ABI choices and ADB setup](https://hackalice.me/internals/toolchain/)
+- [Call signalling and port 5081](https://hackalice.me/internals/calls/),
+  [telemetry role and consent layers](https://hackalice.me/internals/telemetry/)
+- [Midi Zigbee pairing through a local backend](https://hackalice.me/internals/zigbee/)
 - [Cucumber microphone-rate constraint](https://hackalice.me/devices/station-midi/)

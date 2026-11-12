@@ -42,6 +42,8 @@ def test_inventory_and_ssh_are_key_only_and_host_pinned(inventory: Path) -> None
     assert "BatchMode=yes" in args
     assert "none" in args and "-F" in args
     assert not any(arg.startswith("HostKeyAlias=") for arg in args)
+    # A station that drops off the network must end the session, not hang its reader.
+    assert "ServerAliveInterval=15" in args and "ServerAliveCountMax=3" in args
     assert args[-2:] == ["root@station.invalid", "true"]
 
 
@@ -430,7 +432,7 @@ def test_bundled_helper_is_bounded_stdin_not_a_long_ssh_command(inventory: Path,
     ])
     assert int(core.run_ssh(station, command)) == len(payload)
     with pytest.raises(SafetyError):
-        core.run_ssh(station, core.SSHInput("sh -s", b"x" * (120 * 1024 + 1)))
+        core.run_ssh(station, core.SSHInput("sh -s", b"x" * (192 * 1024 + 1)))
 
 
 def test_bundled_helper_input_failure_does_not_hang_or_leak(inventory: Path,
@@ -442,3 +444,28 @@ def test_bundled_helper_input_failure_does_not_hang_or_leak(inventory: Path,
     with pytest.raises(SafetyError) as error:
         core.run_ssh(station, core.SSHInput("sh -s", b"x" * (100 * 1024)))
     assert "SENSITIVE_SENTINEL" not in str(error.value)
+
+
+def test_execution_is_serialized_per_station_not_globally(inventory: Path) -> None:
+    from types import SimpleNamespace
+
+    controller = Controller(inventory)
+    assert controller.execution_lock("desk") is controller.execution_lock("desk")
+    controller._execute_plan = lambda plan: {"ran": plan.station.id}  # type: ignore[method-assign]
+    done: list[str] = []
+
+    def run(station_id: str) -> None:
+        plan: Any = SimpleNamespace(station=SimpleNamespace(id=station_id))
+        done.append(controller.execute_plan(plan)["ran"])
+
+    with controller.execution_lock("desk"):  # One station is busy, e.g. a 20 s wake window.
+        other = threading.Thread(target=run, args=("kitchen",))
+        same = threading.Thread(target=run, args=("desk",))
+        other.start()
+        same.start()
+        other.join(5)
+        assert done == ["kitchen"]  # Another station does not wait for it...
+        same.join(0.2)
+        assert same.is_alive()  # ...but the same station still does.
+    same.join(5)
+    assert done == ["kitchen", "desk"]

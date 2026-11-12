@@ -69,3 +69,73 @@ def test_local_wav_transport_rejects_trailers_loud_audio_and_wrong_duration() ->
                  wav(b"\x01\x00" * 22050 * 21)]:
         with pytest.raises(SafetyError):
             local_tts.wav_parameters(data)
+
+
+FAKE_TTS = """
+import io, sys, time, wave
+text = sys.stdin.buffer.read().decode("utf-8")
+mode = sys.argv[1]
+if mode == "exit":
+    sys.exit(3)
+if mode == "text":
+    sys.stdout.write("not a wav")
+    sys.exit(0)
+if mode == "slow":
+    time.sleep(30)
+out = io.BytesIO()
+with wave.open(out, "wb") as wav:
+    wav.setnchannels(2 if mode == "stereo" else 1)
+    wav.setsampwidth(2)
+    wav.setframerate(24000)
+    wav.writeframes(b"\\x30\\x75\\xd0\\x8a" * (24000 * 11 if mode == "long" else 1000 * len(text)))
+sys.stdout.buffer.write(out.getvalue())
+"""
+
+
+def _command(tmp_path: Path, mode: str) -> list[str]:
+    script = tmp_path / "tts.py"
+    script.write_text(FAKE_TTS)
+    return [sys.executable, str(script), mode]
+
+
+def test_any_synthesizer_command_becomes_quiet_canonical_pcm(tmp_path: Path) -> None:
+    audio = local_tts.command_wav("привет", _command(tmp_path, "ok"))
+    assert set(local_tts.wav_parameters(audio)) == {"wav_base64", "sha256"}
+    with wave.open(io.BytesIO(audio), "rb") as wav:
+        frames = wav.readframes(wav.getnframes())
+        assert wav.getframerate() == 24000 and wav.getnframes() == 2 * 1000 * len("привет")
+    # ±30000 from the engine is attenuated to the player's ceiling, shape kept.
+    assert frames[:4] == (8191).to_bytes(2, "little", signed=True) + (-8191).to_bytes(
+        2, "little", signed=True)
+
+
+@pytest.mark.parametrize("mode,reason", [
+    ("exit", "failed"), ("text", "not a WAV"), ("stereo", "mono 16-bit"),
+    ("long", "longer than 20 s"), ("slow", "timed out")])
+def test_synthesizer_command_failures_have_fixed_reasons(
+    tmp_path: Path, monkeypatch: Any, mode: str, reason: str,
+) -> None:
+    monkeypatch.setattr(local_tts, "COMMAND_SECONDS", 2.0)
+    with pytest.raises(local_tts.SpeechCommandError, match=reason):
+        local_tts.command_wav("synthetic", _command(tmp_path, mode))
+    with pytest.raises(local_tts.SpeechCommandError, match="could not be run"):
+        local_tts.command_wav("synthetic", [str(tmp_path / "missing")])
+
+
+def test_policy_accepts_a_synthesizer_command_only_as_an_absolute_argv() -> None:
+    from alice_mcp import device_runtime as rt
+
+    base = {"firmware_sha256": "a" * 64}
+    command = ["/opt/tts/say", "--voice", "ru_RU", "голос"]
+    policy = rt.validate_policy({**base, "local_tts": {"command": command}}, "station-mini")
+    assert policy["local_tts"] == {"command": command}
+    for bad in [[], ["say"], ["/opt/tts/say", 1], ["/opt/tts/say", ""], ["/opt/tts/say", "a\0b"],
+                ["/opt/tts/say"] * 17, "/opt/tts/say"]:
+        with pytest.raises(ValueError):
+            rt.validate_policy({**base, "local_tts": {"command": bad}}, "station-mini")
+    with pytest.raises(ValueError):
+        rt.validate_policy({**base, "local_tts": {
+            "command": command, "model_file": "/x", "model_sha256": "a" * 64,
+            "config_sha256": "b" * 64}}, "station-mini")
+    with pytest.raises(ValueError):
+        rt.validate_policy({**base, "local_tts": {"command": command}}, "station-lite")

@@ -903,6 +903,14 @@ def test_worker_that_fails_before_listening_ends_stopped_and_can_restart(
         return mini
 
     voice_service.controller.station = lookup
+    publish = voice_service._state
+
+    def lingering(state: str) -> None:
+        publish(state)
+        if state == "stopped":
+            time.sleep(0.2)  # "stopped" is visible before the worker thread has exited.
+
+    voice_service._state = lingering
     voice_service.start("mini1")
     wait(lambda: voice_service.status()["state"] == "stopped")
     assert voice_service.status()["last_error"] == "Private inventory invalid"

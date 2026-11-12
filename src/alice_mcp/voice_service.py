@@ -157,6 +157,9 @@ class VoiceService:
                else None)
         if voice.get("source") == "station_live" and not key:
             raise SafetyError("Direct station voice requires REAL_TIME_API_KEY")
+        worker = self.thread
+        if worker is not None and self.state == "stopped":
+            worker.join(1)  # "stopped" is its last statement: let it exit before the check.
         with self.lock:
             if self.state != "stopped" or self.thread is not None and self.thread.is_alive():
                 raise SafetyError("Voice listener already running; stop it first")

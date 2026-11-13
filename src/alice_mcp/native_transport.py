@@ -292,10 +292,7 @@ def execute(controller: Controller, plan: Plan) -> dict[str, Any]:
         from alice_mcp import local_tts
 
         try:
-            audio = (local_tts.command_wav(parameters["text"], local["command"])
-                     if "command" in local else
-                     local_tts.synthesize(parameters["text"], Path(local["model_file"]),
-                                          local["model_sha256"], local["config_sha256"]))
+            audio = local_tts.speak(parameters["text"], local)
             parameters = local_tts.wav_parameters(audio)
         except local_tts.SpeechCommandError as error:
             return {"outcome": "blocked", "error": f"{error}; nothing was sent to the station"}

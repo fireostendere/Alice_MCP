@@ -14,8 +14,9 @@ from alice_mcp import device_runtime
 
 DEVICES = "https://hackalice.me/devices/"
 # Buildroot actions with no model gate: availability is probed on the station at preview.
+# speech.say is generic through host synthesis (private `local_tts`) and the firmware player.
 GENERIC_ACTIONS = frozenset({"audio.volume", "audio.play", "media.upload", "sound.replace",
-                             "config.select", "restore"})
+                             "config.select", "restore", "speech.say"})
 SOUND_ACTIONS = frozenset({"audio.volume", "audio.play", "sound.replace", "speech.say",
                            "speech.listen", "speech.openai", "quasar.volume",
                            "alice.activation"})

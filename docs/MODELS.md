@@ -14,7 +14,7 @@ pilot; everything else is offline-tested code or an empty slot.
 |---|---|---|---|---|
 | `station-mini` | Станция Мини (Mini 1) | Buildroot | I2C ring shows/capture, native and OpenAI speech, Quasar IPC, wake/voice, resident agent, generic audio/config | live pilot |
 | `station-mini3` | Станция Мини 3 (Bergamot) | Buildroot | framebuffer `led.effect`/`led.show`, `speech.say`, generic audio/config | one audible TTS pilot |
-| `station-lite`, `fiero-hi` | Станция Лайт, Fiero Hi (one board) | Buildroot | sysfs `led.effect`/`led.show`, generic audio/config | synthetic |
+| `station-lite`, `fiero-hi` | Станция Лайт, Fiero Hi (one board) | Buildroot | sysfs `led.effect`/`led.show`, generic audio/config, host speech | synthetic; one host-speech run on a Lite |
 | `station-mini2` | Станция Мини 2 | Buildroot | sysfs `led.effect`, generic audio/config | synthetic |
 | `station-2` | Станция 2 | Buildroot | RGBW framebuffer `led.effect`, generic audio/config | synthetic |
 | `station-lite2`, `station-mini3-pro`, `station-midi`, `station-3`, `station-street` | Лайт 2, Мини 3 Про, Миди, Станция 3, Стрит | Buildroot | generic audio/config only | none |
@@ -30,7 +30,9 @@ returns the profile, its open `todo` items and the per-action matrix:
   reviewed firmware digest and a successful preview);
 - `generic` — the model-agnostic Buildroot path (`audio.volume`, `audio.play`,
   `media.upload`, `sound.replace`, `config.select`, `restore`), probed on the
-  station at preview and unverified on that model;
+  station at preview and unverified on that model. `speech.say` is generic too:
+  with a private `local_tts` the host synthesizes and the firmware's player speaks
+  ([host speech](CONTROLS.md#host-speech-without-the-agent));
 - `none` — nothing to call; the action is rejected before any station traffic.
 
 The matrix is derived from the real gates (`device_runtime.ACTION_MODELS`, the LED
@@ -97,10 +99,16 @@ its own init hook and answered native probes ([NATIVE_AGENT.md](NATIVE_AGENT.md)
 From the station, with the Quasar CA bundle the voice client uses, the Gemini API
 host resolved and completed a verified TLS request (HTTP 403 without a key).
 
+Also on 2026-11-12 `speech.say` ran through a host synthesizer program on both
+powered stations: on the Mini 1 through the agent's PCM player and on the Lite over
+SSH into the firmware player. Both reported `applied`; neither is owner-confirmed
+as heard. Giving the Lite a `controls` entry showed that it has no Python, so the
+Python-based generic actions cannot run on it as they are.
+
 Not exercised on hardware: an upload near the 49,152-byte ceiling (no such asset is
 registered), the volume ceiling below 100 %, the PC audio source, Mini 1 `led.show`
-(needs a fresh capture), any audible speech (the owner's speech binding points at the
-provider that refused) and anything on Mini 3 (offline).
+(needs a fresh capture), host speech on any model but Mini 1 and Lite, and anything
+on Mini 3 (offline).
 
 ## Known gaps
 
@@ -108,8 +116,11 @@ provider that refused) and anything on Mini 3 (offline).
   (root, ADB, UART, OTA) pages were not re-read at that revision; see there.
 - Station 3's ring is `/dev/fb2`; the framebuffer adapter and the `led` probe look
   only at `/dev/fb0`, which on that model is the ambilight.
-- Policy keys for pinned artifacts (`quasar_client`, `speech_client`, `voice`,
-  `local_tts`) are accepted for Mini 1 only, and `tts_client` for Mini 1 and Mini 3.
+- Policy keys for pinned artifacts (`quasar_client`, `speech_client`, `voice`) are
+  accepted for Mini 1 only, and `tts_client` for Mini 1 and Mini 3. `local_tts` is
+  host-side and accepted for any model.
+- The Python-based generic actions need Python 3.8+ on the station; the one Lite
+  checked has none. Host speech does not need it.
 - The `reboot` probe reads an Amlogic 4.9 node and reports `unknown` elsewhere.
 - Stations behind the resident agent answer only its own probe set; `identify`
   needs an SSH-configured entry.

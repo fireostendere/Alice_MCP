@@ -22,6 +22,7 @@ import time
 import wave
 from array import array
 from pathlib import Path
+from typing import Any
 
 from alice_mcp import device_runtime as rt
 from alice_mcp.core import SafetyError, _check_ssh_file, _unique
@@ -110,6 +111,14 @@ def command_wav(text: str, command: list[str]) -> bytes:
         late = time.monotonic() - start >= COMMAND_SECONDS
         raise SpeechCommandError("TTS command timed out" if late else "TTS command failed")
     return canonical(raw)
+
+
+def speak(text: str, policy: dict[str, Any]) -> bytes:
+    """Canonical WAV from whichever engine the owner's `local_tts` policy selects."""
+    if "command" in policy:
+        return command_wav(text, policy["command"])
+    return synthesize(text, Path(policy["model_file"]), policy["model_sha256"],
+                      policy["config_sha256"])
 
 
 def synthesize(text: str, model: Path, model_sha256: str, config_sha256: str,

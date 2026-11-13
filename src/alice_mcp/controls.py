@@ -113,6 +113,10 @@ def invoke(controller: Controller, station: Station, request: dict[str, Any]) ->
         from alice_mcp import live_voice
 
         return live_voice.invoke(controller, station, request)
+    if request.get("action") == "speech.say" and "local_tts" in station.controls:
+        from alice_mcp import speech_stream
+
+        return speech_stream.invoke(controller, station, request)
     if request.get("action") in {"speech.listen", "speech.say"}:
         from alice_mcp import speech_capture
 
@@ -255,6 +259,12 @@ def describe(request: dict[str, Any]) -> str:
         return (("Re-enable" if params["enabled"] else "Disable") + " the stock «Алиса» wake "
                 "word through Quasar's spotter capability. Quasar keeps running; a Quasar "
                 "restart or reboot re-enables it. Verified by its spotter log. No retry.")
+    if action == "speech.say" and "local_tts" in request["policy"]:
+        return ("Speak this literal text with this PC's own synthesizer (private `local_tts`): "
+                + json.dumps(params["text"], ensure_ascii=False) + ". The audio, never the "
+                "text, is streamed over pinned SSH into the firmware's own player at the current "
+                "volume; nothing is installed or stored on the station and Quasar keeps running. "
+                "Permission includes sound in the room. No microphone, no volume change, no retry.")
     if action == "speech.say":
         from alice_mcp.speech_capture import TTS_CLIENT_SHA256
 

@@ -3,7 +3,13 @@
 This is the bounded runtime API, not just a set of manual recipes. It is an
 experimental development preview. Automated coverage is offline/synthetic and does not establish
 model, firmware, electrical or acoustic compatibility. Require owner authorization
-and keep Quasar enabled. Unsupported/high-risk operations remain guidance-only.
+and keep Quasar enabled. Unavailable Alice MCP actions remain guidance-only in
+this API; separately owner-authorized host workflows may use existing permitted
+tools. High-risk work requires explicit owner scope, exact-target evidence and
+verified prerequisites/recovery, not a blanket execution ban. Knowledge never
+authorizes writes or a bundled prerequisite chain. Obtain consent for scope
+extensions, not again for already-covered actions; runtime denials and TLS/SSH
+trust checks still apply.
 
 ## API and approval lifecycle
 

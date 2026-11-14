@@ -196,6 +196,99 @@ def test_skills_are_self_contained_and_portable():
             assert resolved.is_file(), (path, target)
 
 
+def test_access_skill_uses_owner_authorization_within_project_policy():
+    text = skill_text("station-access").lower()
+    for blanket_restriction in (
+        "without executing them",
+        "manual plan only",
+        "never execute an unlock flow",
+        "never execute downloaded installers",
+        "unsupported or prohibited operations remain guidance-only",
+    ):
+        assert blanket_restriction not in text
+    for boundary in (
+        "owner authorization",
+        "project policy and runtime permissions",
+        "already-authorized read-only checks",
+        "state-bound",
+        "cannot override",
+        "quasar enabled",
+        "never retry",
+        "integrity-pinned",
+        "never extract factory private keys",
+        "never blindly download and run",
+        "policy or runtime denial",
+        "pin it; stop on mismatch",
+        "restorable exact-model stock image and a verified backup",
+        "symlink target",
+        "reboot only on an explicit owner",
+    ):
+        assert boundary in text
+
+
+def test_recovery_allows_bounded_owner_authorized_repair():
+    text = skill_text("station-recovery").lower()
+    assert "performs it manually" not in text
+    assert "never execute them" not in text
+    assert "factory-reset execution are offered" not in text
+    for boundary in (
+        "explicitly authorized", "permitted tool", "missing capability",
+        "guidance-only", "never retry", "quasar enabled", "hashes and permissions",
+        "exact-model", "image source", "offline", "reboot",
+        "no blind partition writes", "backups", "runtime denials",
+    ):
+        assert boundary in text
+
+
+def test_access_backup_requirements_match_the_operation():
+    text = " ".join(skill_text("station-access").lower().split())
+    assert "owner-held backup before changes" not in text
+    for boundary in (
+        "full flash backup may require the access being established",
+        "explicitly accepted data-loss scope",
+        "never claim an unavailable backup exists",
+        "preserve affected originals",
+        "boot/partition writes",
+        "restorable exact-model stock image and a verified backup",
+    ):
+        assert boundary in text
+    recovery = " ".join(skill_text("station-recovery").lower().split())
+    assert "reset requires an explicitly accepted data-loss scope" in recovery
+
+
+def test_owner_authorization_docs_distinguish_capability_from_risk():
+    for name in ("AGENTS.md", "SECURITY.md", "README.md", "docs/CONTROLS.md",
+                 "docs/SOURCES.md"):
+        text = (ROOT / name).read_text(encoding="utf-8").lower()
+        assert "owner-authorized" in text, name
+        assert "tools" in text, name
+        for obsolete in (
+            "unsupported/high-risk operations remain guidance-only",
+            "recipes remain guidance-only",
+            "guidance-only, never automatic execution",
+            "do not use adb or change a station",
+            "no factory reset/flashing",
+        ):
+            assert obsolete not in text, (name, obsolete)
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").lower()
+    assert "voice_service.voice_actions" not in agents
+    for boundary in ("respect denials", "never retry an uncertain device write",
+                     "preserve concurrent changes", "dco sign-off", "never print raw secrets"):
+        assert boundary in agents
+
+
+def test_security_documents_default_and_selective_preauthorization():
+    text = (ROOT / "SECURITY.md").read_text(encoding="utf-8").lower()
+    assert "defaults to true" in text
+    assert "explicit false" in text
+    assert "defaults to false" not in text
+    for boundary in ("controls.preauthorized_actions", "led.effect", "audio.volume",
+                     "audio.play", "global write opt-in", "allowlists",
+                     "never retry uncertain writes", "offline/synthetic",
+                     "trust-store/dns changes are not implemented"):
+        assert boundary in text
+
+
 def test_device_matrix_and_evidence_limits_are_present():
     matrix = ROOT / "skills/station-devices/references/models.md"
     text = matrix.read_text(encoding="utf-8").lower()

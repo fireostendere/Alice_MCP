@@ -1,20 +1,30 @@
 ---
 name: station-access
-description: Assess owner-managed SSH and model-specific access, root and OTA options without executing them; triggers include SSH на Алисе, рут Станции, отключить обновления.
+description: Plan and carry out owner-authorized SSH and model-specific access, root and OTA work when project policy and tools permit; triggers include SSH на Алисе, рут Станции, отключить обновления.
 ---
 
-# Access assessment, not an unlock runner
+# Owner-authorized station access
 
 Require owner authorization for the named station and any router or phone involved.
-Keep Quasar enabled. Root, reset, OTA, flashing, CA changes and manual installations
-are guidance-only; never execute an unlock flow, payload or downloaded installer.
+Keep Quasar enabled. Use existing tools for explicitly requested actions when
+project policy and runtime permissions permit them. This skill cannot override
+those limits or add capabilities that are not implemented. Operations lacking an
+implemented, authorized tool remain guidance-only; name the missing capability or
+prerequisite immediately rather than implying that preparation is running.
+Reviewed, integrity-pinned owner-authorized workflows may use existing permitted
+tools; never blindly download and run an installer.
 
 ## Prerequisites
 
 Resolve retail model, OS family and exact firmware with
-[station-devices](../station-devices/SKILL.md). Ask whether secure SSH already
-exists; prefer using it over creating new access. Require an isolated trusted LAN,
-physical recovery access and an owner-held backup before discussing changes.
+[station-devices](../station-devices/SKILL.md). Prefer configured aliases and
+already-authorized read-only checks over repeated questions. Reuse existing secure
+SSH; ask only for facts that cannot be established through permitted checks.
+Require an isolated trusted LAN and physical recovery access before changes, with
+backup requirements proportional to the operation below. A full flash backup may
+require the access being established;
+do not make it a universal prerequisite for initial access/setup. Read-only
+diagnosis and discussing options do not require a backup.
 Never request credentials, factory keys or private device files.
 
 ## Diagnosis
@@ -37,18 +47,25 @@ Never request credentials, factory keys or private device files.
 5. Android first-generation Station has a separate **boot-image write** route.
    AliceBridge's reported Lite 1/Mini 1/Midi/Lite 2 tests do not establish every
    server profile; Shizuku networking remains experimental. Phone-kernel rooting
-   and any app's automatic downgrade/OTA stages are outside execution scope.
+   and an app's downgrade/OTA stages are separate operations, not implied by
+   permission to connect over SSH.
 6. JBL Link Music is ARMv7 Yocto/systemd with a reported transient service-USB
    window, not a Buildroot catcher workflow. Persistent ADB exposes root to the LAN;
    ready-made OTA blocking and SSH binary compatibility are unresolved.
 
 ## Preview and confirmation
 
-Provide a **manual plan only**: exact model/build, intended access boundary,
+Provide a bounded plan: exact model/build, intended access boundary,
 files/volumes affected, network scope, data-loss exposure and failure stop points.
-Ask separate confirmation for reset, phone root, boot writes, trust-store changes
-or OTA policy; consent to SSH does not cover them. Never turn a confirmation into
-permission to run a high-risk step through another tool.
+Perform permitted steps already covered by the owner's request, using the tool's
+state-bound previews and required approval flow. Preserve standing preauthorization;
+do not ask redundant chat confirmations for the same scope. Get explicit approval
+for additional reset, phone root, boot writes, trust-store changes or OTA policy
+not covered by that request; consent to SSH alone does not cover them. Never use
+another tool to bypass a policy or runtime denial.
+
+If the owner must perform a manual step, say preparation is ready only after its
+prerequisites have actually been verified; otherwise identify the unfinished step.
 
 SSH recommendations deliberately differ from upstream empty-password examples:
 disable password and empty-password logins, restrict reachability, verify the
@@ -58,11 +75,15 @@ Port 2222 is common; the first-generation AliceBridge route reports port 22.
 
 ## Backup and rollback
 
-The owner keeps original configuration files, permissions and hashes outside public
-reports. For CA work, retain the original **symlink target** and a proven way back
+Preserve affected originals, permissions and hashes before persistent edits when
+access exists; keep them outside public reports. If required originals cannot be
+collected, name that blocker rather than treating the edit as reversible. Never
+claim an unavailable backup exists.
+Reset requires an explicitly accepted data-loss scope, not an assumed full flash
+backup. For CA work, retain the original **symlink target** and a proven way back
 to that exact retail volume; do not use a different model's certificate bundle.
-For a boot route, require a restorable exact-model stock image and a verified backup
-before proceeding manually. Never extract factory private keys.
+For boot/partition writes, require a restorable exact-model stock image and a verified backup
+appropriate to the affected volumes/data before writing. Never extract factory private keys.
 
 OTA policy is a separate risk tradeoff: blocking it loses vendor security fixes.
 The wiki's Buildroot approach changes launcher membership, update application and
@@ -73,11 +94,13 @@ temporary owner-approved DNS changes; preserve unrelated router rules.
 
 ## Verification
 
-Ask for a sanitized result, not raw logs: correct model/build, successful key-only
+Run permitted read-only verification when access exists; ask the owner only for
+observations that tools cannot establish. Report sanitized results, not raw logs:
+correct model/build, successful key-only
 login, stable independently verified host-key fingerprint, rejected password login,
-restricted exposure and Quasar still working. Reboot/persistence tests themselves
-need owner scheduling. Recheck firmware after a reboot; report untested behavior.
-If a manual write outcome is uncertain, stop and inspect—never retry it blindly.
+restricted exposure and Quasar still working. Reboot only on an explicit owner
+request, not as an implicit test. Recheck firmware after a reboot; report untested
+behavior. If any write outcome is uncertain, stop and inspect—never retry it blindly.
 
 ## Limitations
 

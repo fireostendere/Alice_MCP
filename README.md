@@ -374,9 +374,14 @@ local-voice acceptance above is evidence only for that reviewed device/build.
 
 An SSH timeout can occur after execution; an `unknown` outcome is **not a failure
 safe to retry**. Inspect locally first. There is no automatic retry, Quasar stop,
-implicit reboot, flash, root, OTA change or installer endpoint. Those unsupported/high-risk
-recipes remain guidance-only, with prerequisites and recovery planning. Quasar is
-preserved even for AirPlay/standalone requests.
+implicit reboot, flash, root, OTA change or installer endpoint. Unavailable Alice MCP
+actions remain guidance-only in this API, not a prohibition on separately
+owner-authorized workflows through existing permitted host tools. High-risk work
+requires explicit owner scope, exact-target evidence, verified prerequisites and
+recovery planning. Knowledge never authorizes writes or a bundled prerequisite
+chain; obtain consent for scope extensions, not again for already-covered actions.
+Runtime denials and TLS/SSH trust checks still apply. Quasar is preserved even for
+AirPlay/standalone requests.
 
 ## Skills and source coverage
 

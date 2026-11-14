@@ -21,24 +21,30 @@ Log only bounded, reviewed status/error identifiers and synthetic station aliase
 
 - Require owner authorization, pinned host keys, and key-only SSH. Reject unknown
   or changed host keys; never silently enroll keys or disable host-key checking.
-- Password authentication, credential extraction, network discovery, arbitrary
-  shell execution, and downloaded-script execution are outside the supported
-  development workflow. Do not use ADB or change a station while developing or
-  testing this repository. The fixed bundled runtime helper is not a user-supplied
-  shell or a downloaded script. Keep Quasar enabled; no rooting or installation is
-  an implicit prerequisite.
-- Read-only behavior is the default. Never infer write permission from a skill,
-  a reference page, or a read approval. Service and experimental device actions
+- Development tests are offline/synthetic; do not use live stations as test fixtures.
+  Separately explicit owner-authorized operational work may use existing permitted
+  host/device tools, including reviewed, integrity-pinned access or installation
+  workflows. Name missing capabilities or prerequisites; do not impose a blanket
+  manual/read-only rule. Runtime permission denials still apply: never bypass them
+  through another tool or blindly download and run scripts. The Alice MCP API adds
+  no unrestricted shell, password authentication, discovery or rooting endpoint.
+  Never extract credentials. Keep Quasar enabled; no rooting or installation is
+  an implicit prerequisite. Knowledge is not write authorization; obtain consent
+  for scope extensions, not again for already-covered actions.
+- Without owner-authorized write scope, use read-only checks. Never infer write
+  permission from a skill, a reference page, or a read approval. Service and experimental device actions
   require explicit local policy, station/configuration/state-bound previews and
   native human elicitation unless the bounded action is explicitly delegated in
   private `controls.preauthorized_actions`. Only `led.effect`, `audio.volume` and
   `audio.play` can be delegated through that list and must also be in `allowed_actions`.
   Alternatively, station-level `preauthorize_all_actions=true` explicitly delegates
   every already-permitted service/device action, including capture, TTS and persistent
-  edits, without native forms. It defaults to false, is for trusted local agents only
+  edits, without native forms. It defaults to true by owner decision; an explicit false
+  disables this station-wide delegation. It is for trusted local agents only
   and does not expand action/asset/option allowlists or authorize unrelated tasks.
-  This local delegation persists until removed; choose the volume ceiling and registered
-  media for unattended use. It does not enable writes or weaken validation/state checks.
+  Station-wide delegation persists until explicitly disabled; choose the volume
+  ceiling and registered media for unattended use. The global write opt-in and private action policy remain
+  required; delegation does not enable writes or weaken validation/state checks.
   Previews expire after 300 seconds and are consumed
   once, including on cancellation. Never retry uncertain writes.
 - POSIX SSH files and ancestors reject symlinks, untrusted owners and group/world
@@ -58,7 +64,9 @@ Log only bounded, reviewed status/error identifiers and synthetic station aliase
 These are requirements and guidance, not a claim that all transports, guarded
 writes, rooting, recovery, or firmware procedures are implemented or verified.
 Check the current API and capability descriptions before use. Unsupported
-actions must remain unavailable rather than falling back to unrestricted SSH.
+Alice MCP actions remain unavailable there rather than falling back to unrestricted
+SSH. This API boundary does not prohibit a separately owner-authorized host-tool
+workflow with verified prerequisites and evidence; it does not bypass TLS/SSH trust.
 
 ## Optional resident transport
 
@@ -116,7 +124,10 @@ bindings; they are not certified vendor schemas, backend installation or univers
 native Alice voice replacement. Native `quasar.cfg` bindings are limited to
 `uniProxyUrl` and `uniProxyQuicUrl`. HTTPS/WSS is the default; HTTP/WS needs explicit
 per-binding `allow_insecure` consent. Credentials, query strings and fragments are
-forbidden even with that opt-in. Other trust-store/DNS changes remain guidance-only.
+forbidden even with that opt-in. Other trust-store/DNS changes are not implemented
+by this API and remain guidance-only here. Separately owner-authorized host-tool
+work requires exact-target evidence, backups and a verified recovery path; existing
+TLS/SSH verification and runtime permissions still apply.
 
 Uploads are limited to 49,152 decoded bytes and a preregistered asset SHA-256,
 not an arbitrary transfer facility. Before persistent edits, owner-only records

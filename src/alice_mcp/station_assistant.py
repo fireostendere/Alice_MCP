@@ -146,7 +146,9 @@ def weather(*, timeout: float = 5, refresh: bool = False) -> dict[str, Any]:
                   "current": {"time": observed.isoformat(),
                               "temperature_c": current["temperature_2m"],
                               "condition": CONDITIONS[code]}, "forecast": days}
-        _weather_cache = (time.monotonic(), result, now.date().isoformat())
+        # Keyed by Belgrade's date, as weather_snapshot reads it, whatever zone the reply used.
+        belgrade = datetime.now(ZoneInfo("Europe/Belgrade")).date().isoformat()
+        _weather_cache = (time.monotonic(), result, belgrade)
         return copy.deepcopy(result)
     except Exception:
         return unavailable  # No stale fallback and no provider text or secrets.

@@ -100,8 +100,9 @@ def test_live_weather_is_validated_cached_and_never_served_stale(
 def test_weather_cache_survives_a_reply_dated_in_another_zone(monkeypatch: Any,
                                                                zone: str) -> None:
     """The cache is keyed by Belgrade's date; at any hour one of these zones differs from it."""
-    import httpx
     from zoneinfo import ZoneInfo
+
+    import httpx
 
     now = datetime.now(ZoneInfo(zone))
     data = {"timezone": zone, "current_units": {"temperature_2m": "°C"},

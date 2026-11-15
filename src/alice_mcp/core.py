@@ -102,6 +102,21 @@ PROBES = {
         for key, check in I2C_TRACE_CHECKS.items()
     ),
     "led": LED_COMMAND,
+    # The Mini 3 Pro climate module: Quasar polls it every minute and logs the answer.
+    # Only the latest three numbers and their age leave; the module's port is never opened.
+    "climate": "LC_ALL=C; export LC_ALL; f=/data/quasar/daemons_logs/maind.log; "
+    "test -r \"$f\" && tail -n 2000 \"$f\" | awk -v now=\"$(date +%H:%M:%S)\" '"
+    "function sec(t) { split(t, a, \":\"); return a[1] * 3600 + a[2] * 60 + int(a[3]) } "
+    "/\\[cradle\\]/ { "
+    "if (match($0, /temperature_celsius=[^ ,]+/)) { t = substr($0, RSTART + 20, RLENGTH - 20); "
+    "ts = $3 } "
+    "if (match($0, /humidity_percent=[^ ,]+/)) { h = substr($0, RSTART + 17, RLENGTH - 17); "
+    "ts = $3 } "
+    "if (match($0, /co2_ppm=[^ ,]+/)) { c = substr($0, RSTART + 8, RLENGTH - 8); ts = $3 } } "
+    "END { if (t ~ /^[0-9]+([.][0-9]+)?$/ && h ~ /^[0-9]+([.][0-9]+)?$/ "
+    "&& c ~ /^[0-9]+$/) printf "
+    "\"temperature_milli=%d\\nhumidity_milli=%d\\nco2_ppm=%d\\nage_seconds=%d\\n\", "
+    "t * 1000 + 0.5, h * 1000 + 0.5, c, (sec(now) - sec(ts) + 86400) % 86400 }'",
     "health": "LC_ALL=C; export LC_ALL; "
     "printf 'uptime='; cut -d ' ' -f 1 /proc/uptime; "
     "awk '/^MemTotal:/ {print \"mem_total=\" $2} "
@@ -509,6 +524,15 @@ def parse_probe(probe: str, text: str) -> dict[str, Any]:
             "uptime_seconds": float(uptime), "memory_total_kib": _number(fields, "mem_total"),
             "memory_available_kib": _number(fields, "mem_available"), "kernel_arch": arch,
         }
+    if probe == "climate":
+        raw = {key: _number(fields, key) for key in
+               ("temperature_milli", "humidity_milli", "co2_ppm", "age_seconds")}
+        if (raw["temperature_milli"] > 100000 or raw["humidity_milli"] > 100000
+                or raw["co2_ppm"] > 100000 or raw["age_seconds"] >= 86400):
+            raise SafetyError("Probe unavailable or incompatible")
+        return {"temperature_celsius": raw["temperature_milli"] / 1000,
+                "humidity_percent": raw["humidity_milli"] / 1000,
+                "co2_ppm": raw["co2_ppm"], "age_seconds": raw["age_seconds"]}
     if probe in {"storage", "logs"}:
         keys = (
             ("total_kib", "used_kib", "free_kib") if probe == "storage" else ("errors", "warnings")

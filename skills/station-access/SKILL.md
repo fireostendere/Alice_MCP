@@ -8,9 +8,11 @@ description: Plan and carry out owner-authorized SSH and model-specific access, 
 Require owner authorization for the named station and any router or phone involved.
 Keep Quasar enabled. Use existing tools for explicitly requested actions when
 project policy and runtime permissions permit them. This skill cannot override
-those limits or add capabilities that are not implemented. Unsupported or prohibited
-operations remain guidance-only; name the concrete blocker immediately rather than
-implying that preparation is running. Never execute downloaded installers.
+those limits or add capabilities that are not implemented. Operations lacking an
+implemented, authorized tool remain guidance-only; name the missing capability or
+prerequisite immediately rather than implying that preparation is running.
+Reviewed, integrity-pinned owner-authorized workflows may use existing permitted
+tools; never blindly download and run an installer.
 
 ## Prerequisites
 
@@ -18,8 +20,11 @@ Resolve retail model, OS family and exact firmware with
 [station-devices](../station-devices/SKILL.md). Prefer configured aliases and
 already-authorized read-only checks over repeated questions. Reuse existing secure
 SSH; ask only for facts that cannot be established through permitted checks.
-Require an isolated trusted LAN, physical recovery access and an owner-held backup
-before changes, not before read-only diagnosis or discussing options.
+Require an isolated trusted LAN and physical recovery access before changes, with
+backup requirements proportional to the operation below. A full flash backup may
+require the access being established;
+do not make it a universal prerequisite for initial access/setup. Read-only
+diagnosis and discussing options do not require a backup.
 Never request credentials, factory keys or private device files.
 
 ## Diagnosis
@@ -70,11 +75,15 @@ Port 2222 is common; the first-generation AliceBridge route reports port 22.
 
 ## Backup and rollback
 
-The owner keeps original configuration files, permissions and hashes outside public
-reports. For CA work, retain the original **symlink target** and a proven way back
+Preserve affected originals, permissions and hashes before persistent edits when
+access exists; keep them outside public reports. If required originals cannot be
+collected, name that blocker rather than treating the edit as reversible. Never
+claim an unavailable backup exists.
+Reset requires an explicitly accepted data-loss scope, not an assumed full flash
+backup. For CA work, retain the original **symlink target** and a proven way back
 to that exact retail volume; do not use a different model's certificate bundle.
-For a boot route, require a restorable exact-model stock image and a verified backup
-before any permitted write. Never extract factory private keys.
+For boot/partition writes, require a restorable exact-model stock image and a verified backup
+appropriate to the affected volumes/data before writing. Never extract factory private keys.
 
 OTA policy is a separate risk tradeoff: blocking it loses vendor security fixes.
 The wiki's Buildroot approach changes launcher membership, update application and

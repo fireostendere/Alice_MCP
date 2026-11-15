@@ -305,7 +305,8 @@ def test_backup_parent_symlink_rejected(tmp_path):
 
 def test_empty_policy_and_public_model_facts():
     assert runtime.validate_policy({}, "station-mini3-pro") == {}
-    assert runtime.interfaces("station-mini3-pro")["led"]["supported"] is False
+    assert runtime.interfaces("station-lite2")["led"]["supported"] is False
+    assert runtime.interfaces("station-mini3-pro")["led"]["stride"] == 48
     assert runtime.interfaces("station-midi")["gpio"]["device_tree_properties"] == [
         "zb-reset-gpios", "zb-boot-gpios"]
 

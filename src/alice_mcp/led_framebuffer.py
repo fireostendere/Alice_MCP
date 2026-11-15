@@ -1,4 +1,4 @@
-"""Fixed Bergamot LED effect using stock shell utilities, without installation."""
+"""Fixed Bergamot/Pickle ring effects using stock shell utilities, without installation."""
 
 from __future__ import annotations
 
@@ -10,27 +10,35 @@ from typing import Any
 from alice_mcp import device_runtime as rt
 from alice_mcp.core import SafetyError, SSHInput
 
+# model -> (framebuffer index, zones, device-tree token). Pickle: fb1 is the 16-zone ring
+# (fb0 there is the logo); both rings stay on the firmware's own ledfb trigger.
+PROFILES = {"station-mini3": ("0", "6", "yandex,bergamot"),
+            "station-mini3-pro": ("1", "16", "yandex,pickle")}
+
 SCRIPT = r'''
 OWNER_UID=0
 LC_ALL=C; export LC_ALL
 umask 077
 exec 2>/dev/null
 mode=$1; firmware=$2; request_sha=$3; expected=$4; effect=$5; cycles=$6; period=$7
+fbn=$8; zones=$9; token=${10}
 blocked() { printf '{"outcome":"blocked"}\n'; exit 0; }
+case "$fbn/$zones/$token" in 0/6/yandex,bergamot|1/16/yandex,pickle) ;; *) blocked;; esac
+bytes=$((zones * 3)); b64=$((zones * 4))
 uid=$(id -u)
 [ "$uid" = "$OWNER_UID" ] || blocked
 for c in awk base64 cat cut dd flock grep id ls mkdir readlink sha256sum sleep tr wc; do
     command -v "$c" >/dev/null 2>&1 || blocked
 done
 if [ "$cycles" = show ]; then
-    # Bounded show: 1-75 base64 18-byte frames, >=200 ms each, <=15 s in total.
+    # Bounded show: 1-75 base64 whole-ring frames, >=200 ms each, <=15 s in total.
     set -f
     case "$period" in ''|*[!0-9]*) blocked;; esac
     [ "${#period}" -le 5 ] && [ "$period" -ge 200 ] || blocked
     count=0
     for f in $effect; do
         case "$f" in *[!A-Za-z0-9+/]*) blocked;; esac
-        [ "${#f}" = 24 ] || blocked
+        [ "${#f}" = "$b64" ] || blocked
         count=$((count + 1))
     done
     [ "$count" -ge 1 ] && [ "$count" -le 75 ] && [ $((count * period)) -le 15000 ] || blocked
@@ -58,9 +66,12 @@ if [ -L "$DATA" ]; then
 fi
 BASE=$DATA/opt/alice-mcp
 LOCK=$BASE/control.lock
-FB=/dev/fb0
-frame() { dd if="$FB" bs=18 count=1 | base64; }
-write_frame() { printf %s "$1" | base64 -d | dd of="$FB" ibs=18 obs=18 count=1 conv=notrunc; }
+FB=/dev/fb$fbn
+GRAPHICS=/sys/class/graphics/fb$fbn
+frame() { dd if="$FB" bs="$bytes" count=1 | base64; }
+write_frame() {
+    printf %s "$1" | base64 -d | dd of="$FB" ibs="$bytes" obs="$bytes" count=1 conv=notrunc
+}
 profile() {
     trusted "$DATA" || return 1
     if [ -e "$DATA/opt" ] || [ -L "$DATA/opt" ]; then trusted "$DATA/opt" || return 1; fi
@@ -75,16 +86,16 @@ profile() {
     [ "${#size}" -le 9 ] && [ "$size" -le 134217728 ] || return 1
     actual=$(sha256sum "$binary" | awk '{print $1}')
     [ "$actual" = "$firmware" ] || return 1
-    tr '\000' '\n' < /proc/device-tree/compatible | grep -qx 'yandex,bergamot' || return 1
+    tr '\000' '\n' < /proc/device-tree/compatible | grep -qx "$token" || return 1
     [ -c "$FB" ] && [ ! -L "$FB" ] || return 1
-    [ "$(cat /sys/class/graphics/fb0/virtual_size)" = 6,1 ] &&
-        [ "$(cat /sys/class/graphics/fb0/bits_per_pixel)" = 24 ] &&
-        [ "$(cat /sys/class/graphics/fb0/stride)" = 18 ] || return 1
+    [ "$(cat "$GRAPHICS/virtual_size")" = "$zones,1" ] &&
+        [ "$(cat "$GRAPHICS/bits_per_pixel")" = 24 ] &&
+        [ "$(cat "$GRAPHICS/stride")" = "$bytes" ] || return 1
     FRAME=$(frame) || return 1
     case "$FRAME" in *[!A-Za-z0-9+/]*) return 1;; esac
-    [ "${#FRAME}" = 24 ] || return 1
+    [ "${#FRAME}" = "$b64" ] || return 1
     roundtrip=$(printf %s "$FRAME" | base64 -d |
-        dd ibs=18 obs=18 count=1 conv=notrunc | base64)
+        dd ibs="$bytes" obs="$bytes" count=1 conv=notrunc | base64)
     [ "$roundtrip" = "$FRAME" ] || return 1
     sleep 0.001 || return 1
     boot=$(sha256sum /proc/sys/kernel/random/boot_id) || return 1
@@ -132,7 +143,9 @@ if [ "$cycles" = show ]; then
     # A changed readback means another writer (normally a firmware status indication)
     # owns the ring: stop and leave its state rather than restoring an older snapshot.
     # An unreadable framebuffer is not a yield: exit to the restore attempt instead.
-    unchanged() { current=$(frame); [ "${#current}" = 24 ] || exit 0; [ "$current" = "$last" ]; }
+    unchanged() {
+        current=$(frame); [ "${#current}" = "$b64" ] || exit 0; [ "$current" = "$last" ]
+    }
     last=$original
     started=$(now)
     for f in $effect; do
@@ -157,12 +170,12 @@ exit 0
 
 
 def command(request: dict[str, Any], *, source: str = SCRIPT) -> SSHInput:
-    """Accept only existing led.effect/led.show parameters on the exact Mini 3 profile."""
+    """Accept only existing led.effect/led.show parameters on an exact framebuffer profile."""
     try:
         mode, action = request["mode"], request["action"]
         rt._require(rt._keys(request, {"schema", "mode", "model", "policy", "action", "params",
                                        "nonce"}, {"expected_sha256"}))
-        rt._require(request["schema"] == rt.SCHEMA and request["model"] == "station-mini3"
+        rt._require(request["schema"] == rt.SCHEMA and request["model"] in PROFILES
                     and action in {"led.effect", "led.show"}
                     and rt._match(rt.HEX32, request["nonce"]))
         rt._require(mode in {"inspect", "apply"})
@@ -176,14 +189,16 @@ def command(request: dict[str, Any], *, source: str = SCRIPT) -> SSHInput:
         normalized.pop("expected_sha256", None)
         digest = hashlib.sha256(rt._encode(normalized) + source.encode()).hexdigest()
         if action == "led.show":
-            interval, frames = rt.show_frames(params, "station-mini3", policy.get("led_map"))
+            interval, frames = rt.show_frames(params, request["model"],
+                                              policy.get("led_map"))
             effect, cycles, period = " ".join(
                 base64.b64encode(bytes(f)).decode() for f in frames), "show", str(interval)
         else:
             effect = base64.b64encode(bytes(params[c] for c in ("blue", "green", "red"))
-                                      * 6).decode()
+                                      * int(PROFILES[request["model"]][1])).decode()
             cycles, period = str(params["count"]), f"{params['period_ms'] / 1000:.3f}"
-        args = [mode, policy["firmware_sha256"], digest, expected, effect, cycles, period]
+        args = [mode, policy["firmware_sha256"], digest, expected, effect, cycles, period,
+                *PROFILES[request["model"]]]
         return SSHInput("sh -s -- " + " ".join(shlex.quote(a) for a in args), source.encode())
     except (ValueError, TypeError, KeyError):
-        raise SafetyError("Invalid or unapproved Mini 3 framebuffer request") from None
+        raise SafetyError("Invalid or unapproved framebuffer LED request") from None

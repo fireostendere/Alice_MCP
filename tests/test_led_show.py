@@ -280,7 +280,7 @@ os.execv('/bin/dd', ['dd', *sys.argv[1:]])
     (shims / "dd").chmod(0o700)
     source = led_framebuffer.SCRIPT.replace("OWNER_UID=0", f"OWNER_UID={os.getuid()}")
     source = source.replace('[ -c "$FB" ]', '[ -f "$FB" ]')
-    source = re.sub(r"/(?:data\b|system\b|sys/|proc/(?!uptime)|dev/fb0)",
+    source = re.sub(r"/(?:data\b|system\b|sys/|proc/(?!uptime)|dev/fb)",
                     lambda match: str(tmp_path) + match[0], source)
     env = {**os.environ, "PATH": str(shims) + ":" + os.environ["PATH"],
            "TEST_WRITES": str(tmp_path / "writes")}

@@ -3,7 +3,13 @@
 This is the bounded runtime API, not just a set of manual recipes. It is an
 experimental development preview. Automated coverage is offline/synthetic and does not establish
 model, firmware, electrical or acoustic compatibility. Require owner authorization
-and keep Quasar enabled. Unsupported/high-risk operations remain guidance-only.
+and keep Quasar enabled. Unavailable Alice MCP actions remain guidance-only in
+this API; separately owner-authorized host workflows may use existing permitted
+tools. High-risk work requires explicit owner scope, exact-target evidence and
+verified prerequisites/recovery, not a blanket execution ban. Knowledge never
+authorizes writes or a bundled prerequisite chain. Obtain consent for scope
+extensions, not again for already-covered actions; runtime denials and TLS/SSH
+trust checks still apply.
 
 ## API and approval lifecycle
 
@@ -95,7 +101,7 @@ and unapproved aliases are not valid parameters. Aliases match
 | `led.replay` | `capture_id`: 32 lowercase hexadecimal characters | Mini 1 only: repeat the exact recorded bytes `25 aa` once, not an arbitrary packet. Requires a completed, cleaned capture on the same firmware containing that packet. No new PWM/color/current values. |
 | `led.pulse` | `capture_id`: 32 lowercase hexadecimal characters; `channel`: integer 0–2 | Mini 1 only: one second at fixed PWM 16/255 on one observed triplet position, then return to the captured idle zero frame. Requires same-boot recent PWM/update evidence; no arbitrary level, duration, register or RGB mapping. |
 | `led.animate` | `capture_id`: 32 lowercase hexadecimal characters; `mode`: `blink`, `rainbow`, `rainbow_swirl` | Mini 1 only: fixed low-brightness show for 3–6 s nominal, then the captured idle zero frame. No raw frame input, arbitrary level, duration, loops or daemon. |
-| `led.show` | `effect`: `rainbow`, `breathe`, `spin`, `spin_color`, `static`, `off`, `notify`, `police`, `calibrate`; `duration_seconds` 1–15; optional `speed` 1–5; `red`/`green`/`blue` 0–16 for colour effects only; `channel` for `calibrate` only; `capture_id` on Mini 1 only | Mini 1, Lite, Mini 3: bounded reference-effect equivalents at ≤16/255, ≤2.5 flashes/s, hard deadline, then restore (Lite/Mini 3 yield to a firmware write instead). Private `led_map` calibrates channels. **Source-tested, not live-accepted**; see [LED parity](LED_PARITY.md). |
+| `led.show` | `effect`: `rainbow`, `breathe`, `spin`, `spin_color`, `static`, `off`, `notify`, `police`, `calibrate`; `duration_seconds` 1–15; optional `speed` 1–5; `red`/`green`/`blue` 0–16 for colour effects only; `channel` for `calibrate` only; `capture_id` on Mini 1 only | Mini 1, Lite, Mini 3, Mini 3 Pro (16-zone ring): bounded reference-effect equivalents at ≤16/255, ≤2.5 flashes/s, hard deadline, then restore (Lite/Mini 3 yield to a firmware write instead). Private `led_map` calibrates channels. **Source-tested, not live-accepted**; see [LED parity](LED_PARITY.md). |
 | `audio.volume` | `percent`: integer 0–private `max_volume` (default 30) | Sets a probed `Master` control and preserves a restore record; not proof of room loudness or every model's mixer layout. |
 | `audio.play` | `asset`: approved media alias; `duration_seconds`: integer 1–10 | Bounded playback of the approved asset; no supplied path/stream URL, microphone recording or Quasar stop. |
 | `media.upload` | `asset`: approved media alias; `content_base64`: encoded content, decoded size at most 49,152 bytes | Decoded SHA-256 must match the asset's preregistered policy hash. This limit deliberately bounds SSH arguments; it is not a streaming upload API. |
@@ -218,21 +224,23 @@ ADB, runs a downloaded script or falls back to unrestricted SSH. Python version,
 exact firmware hash, known paths, driver format, geometry/stride and applicable
 LED triggers must pass runtime checks; missing or unknown interfaces fail closed.
 
-Mini 3 `led.effect` instead uses fixed bundled shell code through the same bounded
-SSH stdin transport. It requires stock `dd` (including `ibs`, `obs`, `conv=notrunc`),
+Mini 3 and Mini 3 Pro `led.effect` instead use fixed bundled shell code through the
+same bounded SSH stdin transport. It requires stock `dd` (including `ibs`, `obs`, `conv=notrunc`),
 `base64 -d`, fractional `sleep`, `flock` and core utilities. Read-only preview checks
-`yandex,bergamot`, the firmware digest, 6×1/24-bpp/18-byte geometry and an exact
-18-byte readable snapshot. State binds the normalized request, helper source,
+the firmware digest and exact board/geometry: Mini 3 uses `yandex,bergamot`,
+`/dev/fb0`, 6×1/24-bpp/18 bytes; Mini 3 Pro uses `yandex,pickle`, `/dev/fb1`,
+16×1/24-bpp/48 bytes (never its logo `/dev/fb0`). Both require an exact readable
+snapshot. State binds the normalized request, helper source,
 firmware, boot and snapshot; apply rechecks under the shared control lock.
 
-Only six repeated BGR triples are written, within the existing RGB/timing limits.
+Only whole-ring repeated BGR triples are written, within the existing RGB/timing limits.
 Each cycle returns to the snapshot, and an exit/signal trap attempts a final restore
 and bounded readback. A failed write or restore is `unknown`, never automatically
 retried. The snapshot is in memory: power loss, SIGKILL or a stuck kernel operation
 can prevent cleanup. This is not a detached watchdog or a durable LED backup.
 Quasar remains running; it can overwrite the effect or race restoration. Successful
 readback is not proof that any color was visible. This backend has synthetic tests,
-not physical-device qualification, and is not used for Mini 3 Pro or Station 2.
+not physical-device qualification, and is not used for Station 2.
 
 The following are public community reports at revision
 `520fbccd68cb90a8c4f01d06bf38d9a7db915304`, not tested hardware availability:

@@ -132,12 +132,16 @@ Every mapped page is cited by its skill or that skill's local reference.
   including undocumented recovery or service interruption. Classification is
   conservative and never grants execution permission.
 
-All skills require owner authorization and preserve Quasar by default. Rooting,
-OTA changes, flashing, reset, Quasar shutdown and manual installations are
-guidance-only, never automatic execution. Requesting one feature does not approve
-the wiki's bundled prerequisite chain. SSH policy deliberately rejects upstream
-empty/default-password examples in favor of pinned-host-key, key-only access.
-No arbitrary shell executor, network discovery or private-key extraction is implied.
+All skills require owner authorization and preserve Quasar by default. High-risk
+work requires explicit owner scope, exact-target evidence, verified prerequisites
+and recovery planning. Unavailable Alice MCP actions remain guidance-only in that
+API, not a prohibition on separately owner-authorized workflows through existing
+permitted host tools. Knowledge never authorizes writes; requesting one feature
+does not approve the wiki's bundled prerequisite chain. Obtain consent for scope
+extensions, not again for already-covered actions. Runtime denials and TLS/SSH
+trust checks still apply. SSH policy deliberately rejects upstream empty/default-
+password examples in favor of pinned-host-key, key-only access. No arbitrary shell
+executor, network discovery or private-key extraction is implied.
 
 The local model reference retains all seventeen model pages, unsupported index
 entries and conflicts: [model matrix](../skills/station-devices/references/models.md).

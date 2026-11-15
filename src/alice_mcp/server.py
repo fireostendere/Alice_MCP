@@ -1,9 +1,14 @@
-"""Stdio MCP; autonomous reads and explicit private-policy delegation for bounded actions."""
+"""Stdio MCP; autonomous reads and explicit private-policy delegation for bounded actions.
+
+With ALICE_MCP_HTTP the same tools are served over Streamable HTTP instead, for clients that
+cannot spawn a process (Home Assistant's MCP client, its automations): docs/SMART_HOME.md.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 import signal
 import time
 from collections.abc import Callable
@@ -54,6 +59,7 @@ STOP = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint
                        openWorldHint=False)
 # Preview lifetime: a later answer could only hit "Preview expired", so stop waiting there.
 APPROVAL_SECONDS = 300.0
+TRANSPORT = "stdio"
 
 
 def _safe(function: Callable[..., dict[str, Any]], *args: Any) -> dict[str, Any]:
@@ -70,7 +76,7 @@ def _safe(function: Callable[..., dict[str, Any]], *args: Any) -> dict[str, Any]
 def get_capabilities() -> dict[str, Any]:
     """Report implemented tools and manual-only workflows without station access."""
     return {
-        "version": __version__, "transport": "stdio", "default_read_only": True,
+        "version": __version__, "transport": TRANSPORT, "default_read_only": True,
         "writes_enabled": controller.writes, "probes": sorted(PROBES),
         "service_actions": ["quasar:start", "quasar:restart", "station:reboot"],
         "reboot_requirements": ["private allow_reboot", "reviewed firmware digest", "SSH station",
@@ -184,6 +190,10 @@ class Approval(BaseModel):
 
 
 async def _approve(plan: Any, ctx: Context[Any, Any, Any], impact: str) -> dict[str, Any]:
+    if TRANSPORT != "stdio":
+        # No form can reach a stateless HTTP caller; waiting would only hang its request.
+        return {"outcome": "blocked", "error": "Native human approval unavailable",
+                "preview_consumed": True}
     prompt_started = controller.clock()
     try:
         # Unbounded, a lost or unanswered form hangs the client's tool call forever.
@@ -247,7 +257,7 @@ DeviceAction = Literal["led.effect", "led.capture", "led.replay", "led.pulse", "
                        "led.show", "speech.listen", "speech.say",
                        "audio.volume", "audio.play", "media.upload", "sound.replace",
                        "config.select", "restore", "quasar.volume", "alice.activation",
-                       "speech.openai"]
+                       "alice.ask", "speech.openai", "zigbee.permit_join", "zigbee.on_off"]
 
 
 @mcp.tool(annotations=READ)
@@ -284,8 +294,22 @@ async def run_station_action(
     station_id: str, action: DeviceAction, parameters: dict[str, Any],
     ctx: Context[Any, Any, Any],
 ) -> dict[str, Any]:
-    """Do one device action now: fresh one-use preview, then apply; no form if preauthorized."""
+    """Do one device action now: fresh one-use preview, then apply; no form if preauthorized.
+
+    station_id "all" runs it on every configured station at once and reports each result."""
     started = time.monotonic()
+    try:
+        everyone = list(load_inventory(controller.inventory)) if station_id == "all" else []
+    except SafetyError as error:
+        return {"outcome": "blocked", "error": str(error)}
+    if everyone and "all" not in everyone:
+        results = await asyncio.gather(*(run_station_action(one, action, parameters, ctx)
+                                         for one in everyone))
+        outcomes = {str(result.get("outcome")) for result in results}
+        # Each station had its own preview and its own single attempt: never repeat the set.
+        return {"outcome": outcomes.pop() if len(outcomes) == 1 else "mixed",
+                "stations": dict(zip(everyone, results, strict=True)), "do_not_retry": True,
+                "timing_ms": {"total": round((time.monotonic() - started) * 1000)}}
     timing: dict[str, int] = {}
 
     def report(result: dict[str, Any]) -> dict[str, Any]:
@@ -408,11 +432,36 @@ def _exit(*_: Any) -> None:
     os._exit(0)
 
 
+def http_settings(address: str, token: str) -> None:
+    """Bind host:port and put the secret in the URL path; refuse anything weaker."""
+    global TRANSPORT
+    host, _, port = address.rpartition(":")
+    if (not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host) or not port.isdigit()
+            or not 1024 <= int(port) <= 65535
+            or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token)):
+        raise SystemExit("ALICE_MCP_HTTP needs host:port (port 1024-65535) and "
+                         "ALICE_MCP_HTTP_TOKEN of 32-128 URL-safe characters")
+    settings = mcp.settings
+    settings.host, settings.port = host, int(port)
+    # Home Assistant's MCP client has no static-token field: the URL itself is the credential.
+    settings.streamable_http_path = f"/{token}/mcp"
+    # One POST per call, no session: also usable from an automation's rest_command. No
+    # approval form can reach such a caller, so only preauthorized stations act.
+    settings.stateless_http = settings.json_response = True
+    if host != "localhost" and not host.startswith("127."):
+        # The default Host allowlist is loopback-only; off loopback the secret path guards.
+        settings.transport_security = None
+    TRANSPORT = "streamable-http"
+
+
 def main() -> None:
+    address = os.environ.get("ALICE_MCP_HTTP")
+    if address:
+        http_settings(address, os.environ.get("ALICE_MCP_HTTP_TOKEN", ""))
     for number in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, _exit)
     voice.autostart()
     try:
-        mcp.run(transport="stdio")
+        mcp.run(transport="streamable-http" if address else "stdio")
     finally:
         voice.stop()

@@ -35,9 +35,10 @@ Log only bounded, reviewed status/error identifiers and synthetic station aliase
   `audio.play` can be delegated through that list and must also be in `allowed_actions`.
   Alternatively, station-level `preauthorize_all_actions=true` explicitly delegates
   every already-permitted service/device action, including capture, TTS and persistent
-  edits, without native forms. It defaults to false, is for trusted local agents only
+  edits, without native forms. It defaults to true by the owner's decision; set it to
+  false to require native approval. It is for trusted local agents only
   and does not expand action/asset/option allowlists or authorize unrelated tasks.
-  This local delegation persists until removed; choose the volume ceiling and registered
+  This local delegation persists until set to false; choose the volume ceiling and registered
   media for unattended use. It does not enable writes or weaken validation/state checks.
   Previews expire after 300 seconds and are consumed
   once, including on cancellation. Never retry uncertain writes.

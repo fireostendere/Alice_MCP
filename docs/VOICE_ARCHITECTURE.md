@@ -434,7 +434,14 @@ sends only fixed requests:
 
 With a resident, a full SSH firmware hash runs once per resident state stamp; later
 actions under the same fresh stamp skip re-hashing. Measured on one Mini 1: about
-2 s per warm volume action, 4.4 s cold. No caller text reaches Alice.
+2 s per warm volume action, 4.4 s cold. Those two actions carry no caller text.
+
+- `alice.ask`: the same `START_REQUEST` with one short validated phrase (1–80 plain
+  characters; the client refuses quotes, backslashes and control bytes). Alice treats
+  it as typed by the owner, so music, radio and her smart home work as they do for
+  «Алиса, …». Only the send is confirmed. It is an operator MCP action, not in
+  `VOICE_ACTIONS`; it needs the current client build
+  ([CONTROLS.md](CONTROLS.md#quasar-client-build)) and has not run on a station.
 
 ### Volume commands on this PC
 
@@ -461,6 +468,10 @@ remains available.
 | Speak the resulting text | `gpt-realtime-2.1-mini`, text input and streamed audio output |
 | **компьютер, давай поговорим** / **компьютер, давай попиздим** | `gpt-realtime-2.1`, ongoing speech-to-speech session |
 | **компьютер, начни диктовку** | `gpt-live-transcribe`, ongoing transcription session |
+
+An optional private `voice.agent_tools` list lets that OpenCode session call another
+MCP server's tools (Home Assistant), and `station_asr` with OpenCode needs no cloud
+key when `speech.say` speaks the answer: see [SMART_HOME.md](SMART_HOME.md).
 
 An optional private `voice.conversation_prompt` (1–1000 characters) is appended to the
 Realtime conversation instructions only, never to spoken command replies; use it for

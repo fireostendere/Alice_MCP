@@ -159,12 +159,15 @@ def test_full_mode_checks_firmware_and_verified_mode_relies_on_the_resident_stam
 
 
 def test_verified_cache_only_follows_a_full_check_for_the_same_resident_stamp(
-        monkeypatch: Any) -> None:
+        tmp_path: Path, monkeypatch: Any) -> None:
     calls: list[str] = []
     stamps = iter(["1" * 64] * 3 + ["2" * 64] * 2)
     monkeypatch.setattr(native_transport, "_state", lambda *a: next(stamps))
-    station = SimpleNamespace(id="mini1", native_mcp={"url": "x"},
-                              controls={"firmware_sha256": "a" * 64})
+    client = tmp_path / "client"  # A preview names the build it will send.
+    client.write_bytes(b"\x7fELF synthetic")
+    monkeypatch.setattr(qc, "CLIENT_SHA256", hashlib.sha256(client.read_bytes()).hexdigest())
+    station = SimpleNamespace(id="mini1", native_mcp={"url": "x"}, controls={
+        "firmware_sha256": "a" * 64, "quasar_client": str(client)})
 
     def runner(target: Any, command: Any) -> str:
         calls.append(shlex.split(command.command)[4])
@@ -313,6 +316,9 @@ def test_invoke_maps_actions_to_fixed_client_commands() -> None:
     assert qc.control("quasar.volume", {"level": 7}) == ("--send-volume-level", "7")
     assert qc.control("quasar.volume", {"step": "quieter"}) == ("--send-volume-step", "quieter")
     assert qc.control("alice.activation", {"enabled": False}) == ("--send-activation", "off")
+    assert qc.control("alice.ask", {"text": "включи музыку"}) == ("--send-text", "включи музыку")
+    assert qc.parse_control('{"outcome":"applied","request":"sent"}') == {
+        "outcome": "applied", "request": "sent"}
     assert qc.parse_control('{"outcome":"applied","level":11,"previous_level":1}') == {
         "outcome": "unknown", "error_code": "send_unverified"}
 
@@ -380,3 +386,50 @@ def test_voice_policy_accepts_a_bounded_private_conversation_prompt() -> None:
         base["voice"]["conversation_prompt"] = bad
         with pytest.raises(ValueError):
             rt.validate_policy(base, "station-mini")
+
+
+def test_text_request_is_reported_sent_and_a_failed_send_is_unknown(
+        tmp_path: Path, dash: None) -> None:
+    device, client = fake_station(tmp_path, 'printf "%s\\n" "$2" >> ROOT/sent')
+    assert run_control(device, client, "--send-text", "включи музыку") == {
+        "outcome": "applied", "request": "sent"}
+    assert (device.root / "sent").read_text() == "включи музыку\n"  # Once, as one argument.
+    device, client = fake_station(tmp_path / "second", "exit 1")
+    assert run_control(device, client, "--send-text", "включи музыку") == {
+        "outcome": "unknown", "error_code": "send_unverified"}
+    assert run_control(device, client, "--send-text", "") == {
+        "outcome": "blocked", "error_code": "invalid_request"}
+
+
+@pytest.mark.parametrize("text,ok", [
+    ("включи музыку", True), ("Play jazz, 80s!", True), ("я" * 80, True), ("", False),
+    ("я" * 81, False), (" включи", False), ('скажи "да"', False), ("a\\b", False),
+    ("a\nb", False), ("rm -rf $(x)", False), (7, False)])
+def test_alice_ask_accepts_only_a_short_plain_phrase(text: Any, ok: bool) -> None:
+    policy = {"firmware_sha256": "a" * 64, "quasar_client": "/x/client"}
+    if ok:
+        assert rt.validate_parameters("alice.ask", {"text": text}, policy, "station-mini")
+    else:
+        with pytest.raises(ValueError):
+            rt.validate_parameters("alice.ask", {"text": text}, policy, "station-mini")
+    with pytest.raises(ValueError):  # Without the pinned client there is nothing to send with.
+        rt.validate_parameters("alice.ask", {"text": "включи музыку"},
+                               {"firmware_sha256": "a" * 64}, "station-mini")
+
+
+def test_the_earlier_client_build_keeps_its_fixed_requests_but_cannot_send_text(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    controller, station, calls = _control_station(
+        tmp_path, monkeypatch, '{"outcome":"applied","previous_level":3,"level":2}')
+    legacy = qc.CLIENT_SHA256  # The synthetic file's hash, set by the helper.
+    monkeypatch.setattr(qc, "LEGACY_SHA256", legacy)
+    monkeypatch.setattr(qc, "CLIENT_SHA256", "f" * 64)
+    request = {"action": "quasar.volume", "params": {"step": "quieter"}}
+    assert qc.invoke(controller, station, {**request, "mode": "inspect"})["outcome"] == "ready"
+    assert qc.invoke(controller, station, {**request, "mode": "apply",
+                                           "expected_sha256": "b" * 64})["outcome"] == "applied"
+    assert [call[3] for call in calls] == [legacy, legacy]  # One pin binds preview and apply.
+    with pytest.raises(SafetyError):
+        qc.invoke(controller, station, {"action": "alice.ask", "mode": "inspect",
+                                        "params": {"text": "включи музыку"}})
+    assert len(calls) == 2  # Refused on this PC: nothing reached the station.

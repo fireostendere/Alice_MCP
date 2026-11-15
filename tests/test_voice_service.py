@@ -27,6 +27,7 @@ FIRMWARE = {"firmware_sha256": "a" * 64}
 @pytest.fixture(autouse=True)
 def no_private_cloud_key(monkeypatch: Any) -> None:
     monkeypatch.setattr(vs.rv, "api_key", lambda: None)
+    monkeypatch.delenv("ALICE_MCP_OPENCODE", raising=False)
 
 
 def voice(tmp_path: Path, **extra: Any) -> dict[str, Any]:
@@ -354,7 +355,8 @@ def test_realtime_uses_early_wake_and_never_emits_a_second_agent_command(
     answer = lambda *a: {"mode": "command", "text": "Ответ"}  # noqa: E731
     bindings: list[Any] = []
 
-    def agent(executable: str, station_id: str, directory: Path) -> Any:
+    def agent(executable: str, station_id: str, directory: Path, tools: Any) -> Any:
+        assert tools == ()
         bindings.append((executable, station_id, directory))
         return SimpleNamespace(answer=answer)
 
@@ -976,3 +978,133 @@ def test_pc_owner_claim_is_released_only_after_station_cleanup(
     wait(lambda: voice_service.status()["state"] == "stopped")
     # Another MCP process may claim the PC only once this one has cleaned the ring.
     assert order == ["indicator", "owner"]
+
+
+def test_agent_tools_policy_names_other_mcp_servers_never_station_or_builtin_tools(
+        tmp_path: Path) -> None:
+    allowed = ["home-assistant_*", "music_HassMediaPause"]
+    result = rt.validate_policy({**FIRMWARE, "voice": voice(tmp_path, agent_tools=allowed)},
+                                "station-mini")
+    assert result["voice"]["agent_tools"] == allowed
+    for bad in (["*"], ["alice_*"], ["shell"], ["home*"], "home-assistant_*", ["x_*"] * 17,
+                ["Home_*"], [1]):
+        with pytest.raises(ValueError):
+            rt.validate_policy({**FIRMWARE, "voice": voice(tmp_path, agent_tools=bad)},
+                               "station-mini")
+
+
+def test_local_recognition_with_the_answer_agent_needs_no_cloud_key(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    built: list[Any] = []
+    monkeypatch.setenv("ALICE_MCP_OPENCODE", "/PRIVATE/opencode2")
+    monkeypatch.setattr(vs.ov, "Agent", lambda *args: SimpleNamespace(answer=args))
+
+    class Turn:
+        active = False
+
+        def __init__(self, key: str, *args: Any, **kwargs: Any) -> None:
+            built.append((key, kwargs["answer"], kwargs["local_transcripts"]))
+
+        def close(self) -> None:
+            pass
+
+        def status(self) -> dict[str, Any]:
+            return {}
+
+    monkeypatch.setattr(vs.rv, "RealtimeTurn", Turn)
+    monkeypatch.setattr(vs.station_asr, "listen", lambda *a, **k: {"outcome": "stopped"})
+    monkeypatch.setattr(vs.vi, "Indicator", lambda *a, **k: SimpleNamespace(
+        close=lambda: None, status=lambda: {}))
+    mini = station(tmp_path, source="station_asr", agent_tools=["home-assistant_*"],
+                   asr_directory="/bkupgrade/data/opt/alice-local-asr-0123456789ab")
+    voice_service = service(tmp_path, monkeypatch, mini)
+    voice_service.start("mini1")
+    wait(lambda: voice_service.state == "stopped")
+    assert built == [("", ("/PRIVATE/opencode2", "mini1", Path.cwd(), ("home-assistant_*",)),
+                      True)]
+
+
+def test_events_reach_the_owner_webhook_except_dictated_text(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    posted: list[Any] = []
+    done = threading.Event()
+
+    def post(url: str, **kwargs: Any) -> None:
+        posted.append((url, kwargs["json"], kwargs["trust_env"]))
+        done.set()
+        raise OSError("a dead hub must never disturb the listener")
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setenv("ALICE_MCP_EVENT_WEBHOOK", "http://hub.invalid/api/webhook/synthetic")
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    voice_service._record({"kind": "dictation", "station": "mini1", "text": "личное"},
+                          persist=False)
+    voice_service._record({"kind": "spotter", "station": "mini1", "phrase": "включи свет",
+                           "trusted": False}, persist=False)
+    assert done.wait(3) and len(posted) == 1
+    url, body, trust_env = posted[0]
+    assert url.endswith("/synthetic") and trust_env is False
+    assert body["kind"] == "spotter" and body["phrase"] == "включи свет" and "id" in body
+    monkeypatch.setenv("ALICE_MCP_EVENT_WEBHOOK", "file:///etc/passwd")
+    assert service(tmp_path, monkeypatch, station(tmp_path)).webhook == ""
+    # Caller text for stock Alice is an operator action; the voice set is the owner's to widen.
+    assert "alice.ask" not in vs.VOICE_ACTIONS
+
+
+def test_slow_webhook_drops_bursts_without_starting_more_threads(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    import httpx
+
+    entered, release = threading.Event(), threading.Event()
+    workers: list[threading.Thread] = []
+    thread = threading.Thread
+
+    def worker(*args: Any, **kwargs: Any) -> threading.Thread:
+        result = thread(*args, **kwargs)
+        workers.append(result)
+        return result
+
+    def post(*args: Any, **kwargs: Any) -> None:
+        entered.set()
+        assert release.wait(3)
+        raise OSError("delivery failed")
+
+    monkeypatch.setenv("ALICE_MCP_EVENT_WEBHOOK", "http://hub.invalid/api/webhook/synthetic")
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(vs.threading, "Thread", worker)
+    try:
+        voice_service._record({"kind": "spotter"}, persist=False)
+        assert entered.wait(3)
+        for _ in range(30):
+            voice_service._record({"kind": "spotter"}, persist=False)
+        assert len(workers) == 1
+        assert len(voice_service.events) == 31
+    finally:
+        release.set()
+        for item in workers:
+            item.join(3)
+    entered.clear()
+    voice_service._record({"kind": "spotter"}, persist=False)
+    workers[-1].join(3)
+    assert entered.is_set() and len(workers) == 2
+
+
+def test_webhook_thread_start_failure_keeps_listener_and_next_delivery_working(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    import httpx
+
+    def unavailable(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setenv("ALICE_MCP_EVENT_WEBHOOK", "http://hub.invalid/api/webhook/synthetic")
+    voice_service = service(tmp_path, monkeypatch, station(tmp_path))
+    with monkeypatch.context() as patch:
+        patch.setattr(vs.threading, "Thread", unavailable)
+        voice_service._record({"kind": "spotter"}, persist=False)
+    delivered = threading.Event()
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: delivered.set())
+    voice_service._record({"kind": "spotter"}, persist=False)
+    assert delivered.wait(3) and len(voice_service.events) == 2

@@ -536,7 +536,7 @@ static bool out_frame(Out *frames, const char *object, unsigned int method_field
 }
 
 static bool text_frame(Out *frames, const char *text, const char *id) {
-    char event[128];
+    char event[224];
     int length = snprintf(event, sizeof event, "{\"type\":\"text_input\",\"text\":\"%s\"}", text);
     Out vins = {0}, method = {0};
     return length > 0 && (size_t)length < sizeof event &&
@@ -552,7 +552,7 @@ static bool activation_frame(Out *frames, unsigned int value) {
            out_frame(frames, "ActivationSpotterCapability", 14, &method);
 }
 
-/* Returns false for anything outside the fixed table. */
+/* Returns false for anything outside the fixed table; only --send-text carries caller text. */
 static bool control_frames(const char *command, const char *arg, const char *id, Out *frames) {
     if (strcmp(command, "--send-volume-level") == 0) {
         if (strlen(arg) == 0 || strlen(arg) > 2) return false;
@@ -575,6 +575,14 @@ static bool control_frames(const char *command, const char *arg, const char *id,
         if (strcmp(arg, "off") == 0) return activation_frame(frames, 5);              /* DISABLE */
         if (strcmp(arg, "on") == 0)                                   /* ENABLE, then START */
             return activation_frame(frames, 4) && activation_frame(frames, 2);
+    }
+    if (strcmp(command, "--send-text") == 0) {
+        /* A short phrase on Alice's own text path: nothing that could leave the JSON string. */
+        size_t size = strlen(arg);
+        if (size == 0 || size > 160) return false;
+        for (const char *p = arg; *p; ++p)
+            if ((unsigned char)*p < 32 || *p == '"' || *p == '\\' || *p == 127) return false;
+        return text_frame(frames, arg, id);
     }
     return false;
 }
@@ -704,7 +712,8 @@ int main(int argc, char **argv) {
     return 0;
 usage:
     (void)fputs("Usage: quasar-client --watch-spotter SECONDS (1..3660) | --send-volume-level 0..10"
-                " | --send-volume-step louder|quieter | --send-activation on|off\n", stderr);
+                " | --send-volume-step louder|quieter | --send-activation on|off"
+                " | --send-text PHRASE\n", stderr);
     return 2;
 }
 #elif !defined(ASR_ONCE_TTS)

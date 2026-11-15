@@ -18,6 +18,7 @@ import re
 import stat
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import wave
@@ -370,7 +371,7 @@ class RealtimeTurn:
         return {"model": TTS_MODEL if self.listen_on_wake else MODEL,
                 "stt_model": "station_vosk" if self.local_transcripts else STT_MODEL,
                 "live_stt_model": "station_vosk" if self.local_transcripts else LIVE_STT_MODEL,
-                "tts_model": TTS_MODEL,
+                "tts_model": TTS_MODEL if self._key else "station_speech_say",
                 "llm_model": (TTS_MODEL if self.listen_on_wake else
                               OPENCODE_MODEL if self.answer else LLM_MODEL),
                 "command_backend": ("station_oneshot" if self.listen_on_wake else
@@ -560,16 +561,7 @@ class RealtimeTurn:
                 self.input_done.set()
                 self._timing("literal_speech")
                 self._remaining(deadline)
-                result = self.action({"action": "speech.say", "parameters": {"text": literal}})
-                self._timing("action_completed")
-                self.last_playback = {k: result[k] for k in (
-                    "speech_runtime", "playback_elapsed_ms", "playback_started",
-                    "playback_completed") if k in result}
-                if result.get("outcome") == "unknown":
-                    self.latched = True
-                    raise SafetyError("action_unverified")
-                if result.get("outcome") != "applied":
-                    raise SafetyError("action_blocked")
+                self._say(literal)
                 failed = False
                 return
             self.mode = route(text)
@@ -597,7 +589,17 @@ class RealtimeTurn:
                 self._timing("answer_started")
                 answer = self._reason(text, deadline)
                 self._timing("answer")
-            if self.mode == "conversation":
+            if not self._key:
+                # No cloud voice: the station's own synthesizer, in speech.say-sized pieces.
+                if self.mode != "command":
+                    answer = "Свободный разговор и диктовка недоступны без облачного ключа."
+                self.input_done.set()
+                self.state = "speaking"
+                for piece in textwrap.wrap(answer, 256)[:4]:
+                    self._remaining(deadline)
+                    self._say(piece)
+                self.echo_until = time.monotonic() + 1.5
+            elif self.mode == "conversation":
                 self._stream(MODEL, text, deadline, True)
             elif self.mode == "dictation":
                 self._dictate(deadline)
@@ -623,6 +625,21 @@ class RealtimeTurn:
                 self.done({"mode": self.mode, "error": self.error, "do_not_retry": self.latched,
                            "timing_ms": dict(self.timing_ms),
                            "playback": dict(self.last_playback), "mic": dict(self.last_mic)})
+
+    def _say(self, text: str) -> None:
+        """One guarded speech.say on this station; an unknown outcome latches, never retries."""
+        if self.action is None:
+            raise SafetyError("unsupported tool")
+        result = self.action({"action": "speech.say", "parameters": {"text": text}})
+        self._timing("action_completed")
+        self.last_playback = {k: result[k] for k in (
+            "speech_runtime", "playback_elapsed_ms", "playback_started",
+            "playback_completed") if k in result}
+        if result.get("outcome") == "unknown":
+            self.latched = True
+            raise SafetyError("action_unverified")
+        if result.get("outcome") != "applied":
+            raise SafetyError("action_blocked")
 
     def _receive(self, deadline: float) -> dict[str, Any]:
         while True:

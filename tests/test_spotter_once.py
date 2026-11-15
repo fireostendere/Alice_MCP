@@ -111,6 +111,8 @@ def activation(*methods: int) -> bytes:
     (["--send-volume-step", "quieter"], text_request("тише")),
     (["--send-activation", "off"], activation(5)),
     (["--send-activation", "on"], activation(4, 2)),
+    (["--send-text", "включи музыку"], text_request("включи музыку")),
+    (["--send-text", "я" * 80], text_request("я" * 80)),
 ])
 def test_control_frames_are_fixed_stock_requests_in_full_message_form(
     spotter_client: Path, args: list[str], expected: bytes,
@@ -122,7 +124,9 @@ def test_control_frames_are_fixed_stock_requests_in_full_message_form(
 
 @pytest.mark.parametrize("args", [["--send-volume-level", "11"], ["--send-volume-level", "x"],
                                   ["--send-volume-step", "up"], ["--send-activation", "maybe"],
-                                  ["--send-text", "купи слона"]])
+                                  ["--send-text", ""], ["--send-text", 'a"b'],
+                                  ["--send-text", "a\\b"], ["--send-text", "a\nb"],
+                                  ["--send-text", "я" * 81], ["--send-other", "x"]])
 def test_control_rejects_anything_outside_the_fixed_table(
     spotter_client: Path, args: list[str],
 ) -> None:

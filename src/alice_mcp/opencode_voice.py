@@ -29,6 +29,28 @@ INSTRUCTIONS = """Ты обрабатываешь одну голосовую к
 """
 
 
+def instructions(tools: tuple[str, ...]) -> str:
+    """The restricted profile, or the same profile plus the owner's declared MCP tools."""
+    if not tools:
+        return INSTRUCTIONS
+    old = ("Не вызывай MCP или другие инструменты для действий: их проверит и выполнит хост,",
+           "Единственные разрешённые инструменты — websearch и webfetch. Не используй skill, "
+           "shell,\nфайлы, execute, MCP и speech.say.")
+    new = ("Саму колонку меняет только хост через action, не инструменты:",
+           "Разрешённые инструменты — websearch, webfetch и инструменты владельца: "
+           + ", ".join(tools) + ". Через них управляй умным домом, музыкой и устройствами,\n"
+           "узнавай их состояние и погоду: выполни просьбу сам и верни command с коротким "
+           "итогом.\nНе выдумывай успех; об ошибке инструмента скажи прямо. Поле station — "
+           "колонка, которая\nуслышала команду: «здесь» и «в этой комнате» относятся к ней. "
+           "Не используй skill, shell,\nфайлы, execute, другие MCP и speech.say.")
+    text = INSTRUCTIONS
+    for before, after in zip(old, new, strict=True):
+        if before not in text:
+            raise SafetyError("OpenCode voice profile changed; tools not enabled")
+        text = text.replace(before, after)
+    return text
+
+
 def parse(text: str) -> dict[str, Any]:
     try:
         if len(text) > 65536:
@@ -52,10 +74,12 @@ def parse(text: str) -> dict[str, Any]:
 
 
 class Agent:
-    def __init__(self, executable: str, station_id: str, directory: Path) -> None:
+    def __init__(self, executable: str, station_id: str, directory: Path,
+                 tools: tuple[str, ...] = ()) -> None:
         if not Path(executable).is_absolute():
             raise SafetyError("OpenCode voice executable must be an absolute path")
         self.executable, self.station_id, self.directory = executable, station_id, directory
+        self.tools = tools  # Private voice.agent_tools: other MCP servers, never the station.
         self.session: str | None = None
 
     def answer(self, text: str, deadline: float) -> dict[str, Any]:
@@ -66,7 +90,9 @@ class Agent:
                         "model": {"providerID": "openai", "id": MODEL, "variant": "none"},
                         "permissions": [{"action": "*", "resource": "*", "effect": "deny"},
                                         {"action": "websearch", "resource": "*", "effect": "allow"},
-                                        {"action": "webfetch", "resource": "*", "effect": "allow"}]}
+                                        {"action": "webfetch", "resource": "*", "effect": "allow"},
+                                        *({"action": tool, "resource": "*", "effect": "allow"}
+                                          for tool in self.tools)]}
                 created = subprocess.run(
                     [self.executable, "api", "session.create", "--data", json.dumps(body)],
                     capture_output=True, text=True, check=True, cwd=self.directory,
@@ -81,7 +107,9 @@ class Agent:
                 raise TimeoutError
             result = subprocess.run(
                 [self.executable, "run", "--session", self.session, "--format", "json"],
-                input=INSTRUCTIONS + json.dumps({"speech": text}, ensure_ascii=False),
+                input=instructions(self.tools) + json.dumps(
+                    {"speech": text, **({"station": self.station_id} if self.tools else {})},
+                    ensure_ascii=False),
                 capture_output=True, text=True, check=True, cwd=self.directory, timeout=remaining)
             parts = [json.loads(line) for line in result.stdout.splitlines()
                      if line.startswith("{")]

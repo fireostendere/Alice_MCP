@@ -196,6 +196,26 @@ def test_skills_are_self_contained_and_portable():
             assert resolved.is_file(), (path, target)
 
 
+def test_access_skill_uses_owner_authorization_within_project_policy():
+    text = skill_text("station-access").lower()
+    for blanket_restriction in (
+        "without executing them",
+        "manual plan only",
+        "never execute an unlock flow",
+    ):
+        assert blanket_restriction not in text
+    for boundary in (
+        "owner authorization",
+        "project policy and runtime permissions",
+        "already-authorized read-only checks",
+        "state-bound",
+        "cannot override",
+        "quasar enabled",
+        "never retry",
+    ):
+        assert boundary in text
+
+
 def test_device_matrix_and_evidence_limits_are_present():
     matrix = ROOT / "skills/station-devices/references/models.md"
     text = matrix.read_text(encoding="utf-8").lower()

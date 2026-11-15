@@ -7,7 +7,7 @@ and keep Quasar enabled. Unsupported/high-risk operations remain guidance-only.
 
 ## API and approval lifecycle
 
-The server exposes 19 tools in total; these six add runtime control to the
+The server exposes 24 tools in total; these six add runtime control to the
 existing knowledge, probe and service tools. Owned jobs (`start_job`, `list_jobs`,
 `cancel_job`), the generated-tone siren, presets and the guarded reboot are in
 [JOBS.md](JOBS.md) (source-tested, not live-accepted):
@@ -142,6 +142,9 @@ re-minted in the background; it reaches the station only when speech starts. Mea
 → 3.5 s (warm standby) → 2.6 s (with the spare secret). When the listener is off,
 `speech.openai` falls back to its own SSH session.
 | `alice.activation` | `enabled`: boolean | Mini 1 with private `quasar_client`. Stops or starts only the stock «Алиса» wake word; Quasar keeps running and a restart/reboot re-enables it. Verified by Quasar's spotter log. |
+| `alice.ask` | `text`: 1–80 letters, digits, spaces and `,.!?-`, starting with a letter or digit | Mini 1 with private `quasar_client` of the current build. Hands the phrase to stock Alice as a typed request (Quasar's IPC text path, Yandex cloud): she answers aloud and acts as for the owner's own words — music, radio, her smart home. Only the send is confirmed; what Alice did is not observed. Not a voice-requestable action. Not live-accepted. |
+| `zigbee.permit_join` | `duration_seconds`: 0–254 (0 closes the network) | Mini 3 Pro with the firmware's local Zigbee panel enabled ([SMART_HOME.md](SMART_HOME.md#zigbee-on-the-mini-3-pro)). Lets any device in pairing mode within radio range join the station's own network. Only the firmware's acceptance is confirmed. |
+| `zigbee.on_off` | `command`: `on`, `off` or `toggle`; `address`: four lowercase hex digits below `fff8`; `endpoint`: 1–240 | Same panel. One Zigbee On/Off command to one network address. The firmware answers success even for an unknown address, so `applied` never means a device switched. |
 | `restore` | `backup_id`: 32 lowercase hexadecimal characters | Rechecks the recorded post-edit state before restoring one exact runtime backup. Optimistic check, not atomic CAS. Not factory recovery or a broad reset. |
 
 For example, after local opt-in, a read-only preview request may be:
@@ -548,6 +551,30 @@ Keep policy declarations, public documentation, synthetic tests, runtime checks
 and owner-observed effects distinct. Offline integration checks and code review do
 not qualify live device compatibility, native Windows writes or universal
 voice/backend support.
+
+## Quasar client build
+
+`quasar.volume`, `alice.activation`, `alice.ask` and the stock spotter listener share
+one pinned ARM client, `src/alice_mcp/native/asr_once.c` built with
+`-DASR_ONCE_SPOTTER`. Two builds are accepted at the private `quasar_client` path:
+
+| Pin | Build | Requests |
+|---|---|---|
+| `quasar_client.CLIENT_SHA256` | current source | everything, including `alice.ask` |
+| `quasar_client.LEGACY_SHA256` | the source before `--send-text` | everything except `alice.ask`, which is refused on the host |
+
+Zig 0.15.1 (the `ziglang` wheel) reproduced both pins from clean caches on 2026-11-13:
+
+```sh
+python -m ziglang cc -target arm-linux-musleabihf -std=c11 -D_POSIX_C_SOURCE=200809L \
+  -DASR_ONCE_SPOTTER -Os -Wall -Wextra -Werror -Wconversion -Wshadow -Wstrict-prototypes \
+  -fstack-protector-strong -D_FORTIFY_SOURCE=2 -static -s \
+  src/alice_mcp/native/asr_once.c -o quasar-client
+```
+
+Compare the SHA-256 with the pin before replacing the private file. A preview reads
+that file, so a missing or unknown build is refused before any station traffic. The
+current build has host frame tests only; it has not run on a station.
 
 Sources: [LED recipe](https://hackalice.me/recipes/led/),
 [sounds recipe](https://hackalice.me/recipes/sounds/),

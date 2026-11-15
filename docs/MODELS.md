@@ -17,7 +17,8 @@ pilot; everything else is offline-tested code or an empty slot.
 | `station-lite`, `fiero-hi` | Станция Лайт, Fiero Hi (one board) | Buildroot | sysfs `led.effect`/`led.show`, generic audio/config, host speech | synthetic; one host-speech run on a Lite |
 | `station-mini2` | Станция Мини 2 | Buildroot | sysfs `led.effect`, generic audio/config | synthetic |
 | `station-2` | Станция 2 | Buildroot | RGBW framebuffer `led.effect`, generic audio/config | synthetic |
-| `station-lite2`, `station-mini3-pro`, `station-midi`, `station-3`, `station-street` | Лайт 2, Мини 3 Про, Миди, Станция 3, Стрит | Buildroot | generic audio/config only | none |
+| `station-mini3-pro` | Станция Мини 3 Про (Pickle) | Buildroot | local Zigbee panel `zigbee.permit_join`/`zigbee.on_off`, generic audio/config | one live `zigbee.permit_join` on factory-12, no Zigbee device |
+| `station-lite2`, `station-midi`, `station-3`, `station-street` | Лайт 2, Миди, Станция 3, Стрит | Buildroot | generic audio/config only | none |
 | `yandex-hub` | Умный хаб | Buildroot | `config.select`, `media.upload`, `restore` (no speaker) | none |
 | `station-gen1`, `station-max`, `station-max-zigbee` | Станция (1), Макс, Макс с Zigbee | Android | none: read-only probes | none |
 | `jbl-link-music`, `jbl-link-portable` | JBL Link Music / Portable | Yocto | none: read-only probes | none |

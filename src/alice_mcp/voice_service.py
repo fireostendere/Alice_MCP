@@ -100,6 +100,10 @@ class VoiceService:
                  engines: Callable[..., Any] = wl.engines) -> None:
         self.controller, self.engines = controller, engines
         self.sink = sink or Sink(events_path())
+        # Owner's hub trigger (Home Assistant webhook): the URL is the secret, env only.
+        url = os.environ.get("ALICE_MCP_EVENT_WEBHOOK", "")
+        self.webhook = url if url.startswith(("http://", "https://")) else ""
+        self._webhook_lock = threading.Lock()
         self.lock = threading.RLock()
         self.thread: threading.Thread | None = None
         self.stop_event = threading.Event()
@@ -132,6 +136,13 @@ class VoiceService:
                       "ts": datetime.now(UTC).isoformat(timespec="seconds"), **record}
             if record["kind"] in {"wake", "dictation", "spotter"}:
                 self.events.append(record)
+        if (self.webhook and record["kind"] != "dictation"
+                and self._webhook_lock.acquire(blocking=False)):
+            try:
+                threading.Thread(target=self._push, args=(record,), name="alice-webhook",
+                                 daemon=True).start()
+            except RuntimeError:
+                self._webhook_lock.release()
         if not persist:
             return record
         try:
@@ -139,6 +150,17 @@ class VoiceService:
         except OSError:
             self.last_error = "Voice events file unavailable; events kept in memory only"
         return record
+
+    def _push(self, record: dict[str, Any]) -> None:
+        """Best effort, once: a slow or dead hub never delays or fails the listener."""
+        try:
+            import httpx
+
+            httpx.post(self.webhook, json=record, timeout=3, trust_env=False)
+        except Exception:
+            pass  # Never the URL or a transport error in MCP output.
+        finally:
+            self._webhook_lock.release()
 
     def _state(self, state: str) -> None:
         self.state = state
@@ -180,9 +202,12 @@ class VoiceService:
                                           "station_asr", "station_live"})
         try:
             executable = os.environ.get("ALICE_MCP_OPENCODE")
-            agent = ov.Agent(executable, station.id, Path.cwd()) if executable and key else None
+            # Local text in, the station's own speech.say out: that pair needs no cloud key.
+            agent = (ov.Agent(executable, station.id, Path.cwd(),
+                              tuple(voice.get("agent_tools", ())))
+                     if executable and (key or self.source == "station_asr") else None)
             self.realtime = rv.RealtimeTurn(
-                key, self.indicator,
+                key or "", self.indicator,
                 lambda audio: native_transport.play_pcm(
                     self.controller, self.controller.station(station.id), audio,
                     cancel=self.realtime.cancel if self.realtime else None),
@@ -194,14 +219,14 @@ class VoiceService:
                 command_vad_silence_ms=voice.get("command_vad_silence_ms", 200),
                 direct=(lambda *args, **kwargs: self._standby.session(*args, **kwargs))
                 if self.source == "station_live" else (
-                    functools.partial(lv.run, self.controller, station.id, key)
+                    functools.partial(lv.run, self.controller, station.id, key or "")
                     if "live_client" in voice else None),
                 listen_on_wake=self.source == "station_live",
                 done=lambda summary: self._record({"kind": "turn", "station": station.id,
                                                    **summary}),
                 emit=lambda event: self._record({**event, "kind": "dictation",
                                                   "station": station.id, "trusted": False},
-                                                 persist=False)) if key else None
+                                                 persist=False)) if key or agent else None
         except BaseException:
             self.indicator.close()  # Its worker already runs; leave no prepared player.
             raise

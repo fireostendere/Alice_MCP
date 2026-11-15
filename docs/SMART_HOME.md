@@ -231,7 +231,9 @@ differs.
 
 Enabling the panel is the owner's step: set `"enabled" : true` under `zigbee` →
 `httpControl` in the station's `quasar.cfg` and restart Quasar. On the pilot unit this
-was a temporary bind mount of an edited copy, which a reboot removes.
+was first a temporary bind mount of an edited copy; later the file on the root
+filesystem was edited (remount read-write, one line, remount read-only, the original
+kept beside it) and the panel answered after a reboot.
 
 Limits:
 
@@ -240,8 +242,14 @@ Limits:
   the LAN can reach them while it is enabled, and the image has no `iptables`.
 - On/Off only: no brightness, colour, sensors or device list. The address of a joined
   device has to be read from the station's log; nothing here reports it yet.
-- Whether a device joined this way is kept by Quasar without its cloud discovery
-  session is unknown.
+- A device joined this way is forgotten when Quasar starts. Seen once on the pilot unit:
+  a sensor joined (`network.dat` 93 bytes, one node); after a reboot the cloud's
+  restore-networks directive arrived, the log said `Unable to deserialize network saved
+  on a server, creating a new network`, and the file was back to 54 bytes with no nodes.
+- The radio itself keeps the device: the sensor's IAS Zone messages kept arriving after
+  that reboot, each logged with an `unknown nodeId` warning. So sensor events stay
+  readable from the log, while `zigbee.on_off` to such a device cannot work. Nothing
+  here reads those events yet.
 - Do not open the radio's serial port while Quasar runs: a second reader desynchronised
   its link until Quasar was restarted.
 

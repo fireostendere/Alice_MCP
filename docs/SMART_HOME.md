@@ -168,6 +168,46 @@ selects the cloud voice and fails there. Conversation and dictation need the key
 and answer with a spoken notice instead. `voice_status().realtime.tts_model` then
 reports `station_speech_say`. `station_live` still requires the key.
 
+## Climate module and ring on the Mini 3 Pro
+
+**Status: live on one unit (factory-12), 2026-11-15.**
+
+The climate module is a USB attachment that Quasar polls once a minute for temperature,
+humidity and CO₂. `station_probe(station_id, probe="climate")` returns the latest
+reading and its age from Quasar's own log:
+`{"temperature_celsius": 23.5, "humidity_percent": 42.9, "co2_ppm": 1227, "age_seconds": 23}`.
+It never opens the module's port (Quasar holds it), so it works only while Quasar runs
+and logs those lines; a station without the module answers "unavailable". Nothing is
+pushed: a hub has to poll. This probe uses pinned SSH, not the resident native
+transport. It samples at most 2,000 log lines; values may come from different
+polls. Age uses the last matching time of day modulo 24 hours, not a dated
+freshness guarantee; old logs can look recent. Raw log text never leaves the station.
+
+Ways to work with the module, and what this project does:
+
+| Way | State |
+|---|---|
+| Read Quasar's log (the `climate` probe) | implemented, live; three values, one-minute resolution, no `stale_data` flag |
+| Watch the serial traffic with kernel kprobe events | done once by hand to record the protocol; not an action here |
+| Talk to the module directly | not implemented: Quasar holds `/dev/ttyACM0`. One hand-written sync request while Quasar ran was answered by the module, and Quasar's main process exited 0.4 s later (one observation, cause unknown) |
+
+The module is a USB CDC device (`28e9:018a`). Frames are HDLC (flag `7e`, address `01`,
+control byte, CRC-16/X-25) carrying protobuf messages of package `cradle`; the schema is
+embedded in maind and also defines VOC, NOx, particulates, battery, button, CO₂
+calibration and firmware-update messages that this module was not seen to use.
+Its sync reply named application firmware `6.19…20260507`, bootloader `6.12…20250929`
+and the capabilities button, CO₂, humidity, temperature, power supply, updater and
+one number (12) this station firmware's schema does not define. Lifting
+the station off the module, and putting it back, rebooted the station once each.
+
+The ring has 16 RGB zones behind the firmware's second LED framebuffer. `led.effect` and
+`led.show` drive it like the Mini 3 ring: `led.show` at most 16/255 and
+`led.effect` at most 32/255. The captured
+state is restored, and a firmware animation that starts meanwhile wins. A written red
+frame was read back by the LED driver as red; what the room saw, and which way the
+zones run, the owner has not confirmed. The six-zone logo and the clock segments are
+not touched.
+
 ## Zigbee on the Mini 3 Pro
 
 **Status: one live call, no Zigbee device.** On the owner's Pickle (factory-12 image)

@@ -5,9 +5,13 @@ description: Triage station boot loops and failed customizations with bounded ev
 
 # Recover the last change first
 
-Require owner authorization and physical access. Keep Quasar enabled whenever it
-is running. Reset, flash, rooting, service shutdown and repair writes are
-guidance-only; never execute them or repeat an uncertain repair automatically.
+Require owner authorization and physical recovery access. Keep Quasar enabled
+whenever it is running. One bounded, explicitly authorized reversible repair may
+use an actually available permitted tool and its required approval flow. Operations
+lacking such a tool remain guidance-only: name the missing capability, prerequisite
+or manual physical requirement. Respect runtime denials; never retry an uncertain
+repair automatically. Reboot or Quasar shutdown requires an explicit owner request,
+never an implicit recovery step.
 
 ## Prerequisites
 
@@ -37,7 +41,10 @@ the network, enable ADB or reset settings.
 ## Preview and confirmation
 
 Name one reversible repair, its exact precondition, affected file and expected
-outage. The owner confirms the target and performs it manually. For OTG, explain
+outage. Verify the target and backups before using a permitted tool within the
+owner's explicit scope; do not ask again for already-covered actions. Obtain consent
+for scope extensions. If execution is unavailable, name the concrete blocker and
+the necessary owner-performed step. For OTG, explain
 the documented disable/boot-pending guards before considering startup removal.
 For audio, restore the speaker route before changing kernel drivers.
 
@@ -51,17 +58,23 @@ Private backups and removed files must not be attached to a public issue.
 
 ## Verification
 
-After the owner's scheduled recovery, check normal boot, secure access, Quasar,
+After the authorized repair, use permitted checks for normal boot, secure access, Quasar,
 audio or hub function as applicable, and absence of the original symptom. Confirm
 the suspected startup component is inactive without assuming all custom software
-must be removed. If the device is still unstable, stop before flash escalation.
+must be removed. Ask the owner only for observations tools cannot establish.
+Do not reboot as an implicit test. If still unstable, stop before flash escalation.
 
 ## Limitations
 
-The generic recovery page does not establish reliable USB-burning entry or a safe
+Project recovery tests are offline/synthetic, not evidence of a successful device
+repair. The generic recovery page does not establish reliable USB-burning entry or a safe
 image source. Its UART unlock idea is untested; UART rates differ by model, so
 do not generalize its Lite settings to JBL or Midi. No blind partition writes,
-bootloader edits, generic rollback scripts or factory-reset execution are offered.
+bootloader edits or generic rollback scripts are offered. Reset/flash is not an
+Alice MCP action. Reset requires an explicitly accepted data-loss scope and the
+exact-model procedure, not a full flash backup that itself requires root. A
+separately owner-authorized boot/partition write requires verified exact-model
+firmware/artifact, image source, appropriate backups and recovery access.
 
 Sources: [recovery and reset semantics](https://hackalice.me/start/recovery/),
 [known platform pitfalls](https://hackalice.me/internals/gotchas/),

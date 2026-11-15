@@ -77,7 +77,7 @@ os.execv('/bin/dd', ['dd', *sys.argv[1:]])
     source = led_framebuffer.SCRIPT.replace("OWNER_UID=0", f"OWNER_UID={os.getuid()}")
     # Regular files emulate the character framebuffer only in this synthetic test.
     source = source.replace('[ -c "$FB" ]', '[ -f "$FB" ]')
-    source = re.sub(r"/(?:data\b|system\b|sys/|proc/|dev/fb0)",
+    source = re.sub(r"/(?:data\b|system\b|sys/|proc/|dev/fb)",
                     lambda match: str(tmp_path) + match[0], source)
     env = {**os.environ, "PATH": str(shims) + ":" + os.environ["PATH"],
            "TEST_WRITES": str(tmp_path / "writes")}
@@ -190,8 +190,34 @@ def test_handled_termination_restores_snapshot(framebuffer: Any) -> None:
             process.wait(timeout=3)
 
 
+def test_pro_ring_is_the_second_framebuffer_with_sixteen_zones(framebuffer: Any) -> None:
+    root, _, _ = framebuffer
+    (root / "proc/device-tree/compatible").write_bytes(b"yandex,pickle-evt\0yandex,pickle\0")
+    original = bytes(range(48))
+    for name, content in {"virtual_size": b"16,1\n", "bits_per_pixel": b"24\n",
+                          "stride": b"48\n"}.items():
+        path = root / "sys/class/graphics/fb1" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    (root / "dev/fb1").write_bytes(original)
+    logo = (root / "dev/fb0").read_bytes()
+    pro = dict(request(), model="station-mini3-pro")
+    assert run(framebuffer, dict(request()))["outcome"] == "blocked"  # Not a Bergamot board.
+    preview = run(framebuffer, pro)
+    result = run(framebuffer, dict(pro, mode="apply", expected_sha256=preview["state_sha256"]))
+    assert result["outcome"] == "applied" and result["restoration_verified"] is True
+    writes = [base64.b64decode(line) for line in (root / "writes").read_bytes().splitlines()]
+    assert writes[0] == bytes([4, 8, 16]) * 16 and writes[-1] == original
+    assert (root / "dev/fb1").read_bytes() == original
+    assert (root / "dev/fb0").read_bytes() == logo  # The logo framebuffer is never touched.
+    assert device_runtime.interfaces("station-mini3-pro")["led"]["path"] == "/dev/fb1"
+    show = dict(pro, action="led.show", params={"effect": "spin", "duration_seconds": 1},
+                policy={**pro["policy"], "allowed_actions": ["led.show"]})
+    assert run(framebuffer, show)["outcome"] == "ready"
+
+
 @pytest.mark.parametrize("change", [
-    {"model": "station-mini3-pro"}, {"action": "led.replay"}, {"mode": "worker"},
+    {"model": "station-midi"}, {"action": "led.replay"}, {"mode": "worker"},
     {"nonce": "$(id)"}, {"extra": 1}, {"expected_sha256": "b" * 64},
     {"params": {**request()["params"], "path": "/dev/fb1"}},
     {"params": {**request()["params"], "red": True}},

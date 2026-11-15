@@ -142,7 +142,7 @@ and the [runtime control contract](docs/CONTROLS.md).
 | `search_knowledge`, `get_knowledge` | Original summaries, compatibility/risk metadata, source links |
 | `list_skills`, `read_skill` | Bundled skills and references; not arbitrary local file access |
 | `station_status` | Every station at once: online flag, read-only `health` metrics, writes and private-policy summary |
-| `station_probe` | Fixed `identify`, `health`, `storage`, `services`, `audio`, `reboot`, `logs`, `led`, `i2c_trace`, `network` probes; `identify` compares fixed device-tree tokens with the declared model; [`asr_resources`](docs/ON_STATION_ASR.md) explicitly uses pinned SSH for passive memory/storage checks |
+| `station_probe` | Fixed `identify`, `health`, `storage`, `services`, `audio`, `reboot`, `logs`, `led`, `i2c_trace`, `network`, `climate` (Mini 3 Pro climate module) probes; `identify` compares fixed device-tree tokens with the declared model; [`asr_resources`](docs/ON_STATION_ASR.md) explicitly uses pinned SSH for passive memory/storage checks |
 | `preview_service_action` | Read state and create a five-minute one-use preview |
 | `apply_service_action` | Native human approval, fresh-state validation, Quasar `start`/`restart`, post-check |
 | `get_model_interfaces(model)` | Model profile, per-action adapter matrix (`adapter`/`generic`/`none`), LED/audio/GPIO facts and open gaps; no station access |
@@ -379,9 +379,14 @@ local-voice acceptance above is evidence only for that reviewed device/build.
 
 An SSH timeout can occur after execution; an `unknown` outcome is **not a failure
 safe to retry**. Inspect locally first. There is no automatic retry, Quasar stop,
-implicit reboot, flash, root, OTA change or installer endpoint. Those unsupported/high-risk
-recipes remain guidance-only, with prerequisites and recovery planning. Quasar is
-preserved even for AirPlay/standalone requests.
+implicit reboot, flash, root, OTA change or installer endpoint. Unavailable Alice MCP
+actions remain guidance-only in this API, not a prohibition on separately
+owner-authorized workflows through existing permitted host tools. High-risk work
+requires explicit owner scope, exact-target evidence, verified prerequisites and
+recovery planning. Knowledge never authorizes writes or a bundled prerequisite
+chain; obtain consent for scope extensions, not again for already-covered actions.
+Runtime denials and TLS/SSH trust checks still apply. Quasar is preserved even for
+AirPlay/standalone requests.
 
 ## Skills and source coverage
 

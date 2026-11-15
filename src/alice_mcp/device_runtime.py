@@ -41,7 +41,9 @@ SHOW_INTERVAL_MS = {1: 500, 2: 400, 3: 300, 4: 250, 5: 200}
 SHOW_LEVEL = 16
 COLORS = ("red", "green", "blue")
 LIKE_LITE = frozenset({"station-lite", "fiero-hi"})  # One Micro board, two brands.
-LED_ZONES = {"station-mini": 6, "station-lite": 3, "fiero-hi": 3, "station-mini3": 6}
+LED_ZONES = {"station-mini": 6, "station-lite": 3, "fiero-hi": 3, "station-mini3": 6,
+             "station-mini3-pro": 16}
+FRAMEBUFFER_RINGS = frozenset({"station-mini3", "station-mini3-pro"})  # led_framebuffer, BGR.
 HUES = ((16, 0, 0), (16, 6, 0), (16, 16, 0), (6, 16, 0), (0, 16, 0), (0, 16, 6),
         (0, 16, 16), (0, 6, 16), (0, 0, 16), (6, 0, 16), (16, 0, 16), (16, 0, 6))
 BREATH = (1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2)  # Eighths of the requested colour.
@@ -356,8 +358,8 @@ def led_layout(model: str) -> list[list[Any]]:
     _require(model in LED_ZONES, "unsupported_led")
     if model in LIKE_LITE:
         return [[j % 3, COLORS[j // 3]] for j in range(9)]
-    order = (2, 1, 0) if model == "station-mini3" else (0, 1, 2)
-    return [[j // 3, COLORS[order[j % 3]]] for j in range(18)]
+    order = (2, 1, 0) if model in FRAMEBUFFER_RINGS else (0, 1, 2)
+    return [[j // 3, COLORS[order[j % 3]]] for j in range(LED_ZONES[model] * 3)]
 
 
 def validate_led_map(model: str, value: Any) -> dict[str, Any]:
@@ -573,11 +575,13 @@ def interfaces(model: str) -> dict[str, Any]:
             "mini2" if model == "station-mini2" else "micro"),
                "zones": 6 if model == "station-mini2" else 3,
                "attributes": ["brightness", "max_brightness", "trigger"]}
-    elif model in {"station-mini3", "station-2"}:
-        mini = model == "station-mini3"
-        led = {"supported": True, "interface": "framebuffer", "path": "/dev/fb0",
-               "width": 6 if mini else 89, "height": 1, "bits_per_pixel": 24 if mini else 32,
-               "stride": 18 if mini else 356, "channels": "BGR" if mini else "RGBW",
+    elif model in FRAMEBUFFER_RINGS | {"station-2"}:
+        mini = model in FRAMEBUFFER_RINGS
+        zones = LED_ZONES.get(model, 89)
+        led = {"supported": True, "interface": "framebuffer",
+               "path": "/dev/fb1" if model == "station-mini3-pro" else "/dev/fb0",
+               "width": zones, "height": 1, "bits_per_pixel": 24 if mini else 32,
+               "stride": zones * 3 if mini else 356, "channels": "BGR" if mini else "RGBW",
                "last_pixel_unlit": not mini}
     return {"model": model, "evidence_class": "document",
             "evidence": "public_documentation_only", "led": led,

@@ -81,7 +81,8 @@ PROFILES: dict[str, dict[str, Any]] = {
         "Root is reported only on one factory image; later builds persist only /data",
         "Kernel 5.4 / Buildroot 2023.11: verify the ABI before reusing any pinned ARM32 client",
         "Opening the loopback capture device while Quasar holds it crashes its platform role",
-        dt="yandex,pickle"),
+        "Ring colour order is driver-read; physical zone order and the logo/clock are untested",
+        dt="yandex,pickle", evidence="partial_live"),
     "station-midi": _profile(
         "Станция Миди", "Cucumber", "buildroot", "aarch64",
         "sysfs cucumber:* ring0-23 / logo0-5 / clock; /dev/fb0 ring 24x1 and /dev/fb1 logo "

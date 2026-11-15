@@ -126,7 +126,7 @@ def invoke(controller: Controller, station: Station, request: dict[str, Any]) ->
 
         return parse_response(controller.runner(station, zigbee_http.command(request)))
     if (request.get("action") in {"led.effect", "led.show"}
-            and request.get("model") == "station-mini3"):
+            and request.get("model") in device_runtime.FRAMEBUFFER_RINGS):
         from alice_mcp import led_framebuffer
 
         return parse_response(controller.runner(station, led_framebuffer.command(request)))

@@ -150,6 +150,11 @@ brightness and Quasar's clock settings, the same yield-to-firmware rule as above
 and owner acceptance. The reference's bind-mounted fake lux/scale inputs and
 forced GCC=255 are forbidden and will not be ported.
 
+Since then the Mini 3 segment nodes were read on one unit and `display.show` writes
+short text there and restores the segment levels; it does not touch Quasar's clock
+settings. This probe's `display_writes_supported` predates it and still reports false.
+See [CONTROLS.md](CONTROLS.md) and [MODELS.md](MODELS.md#mini-3-clock-2026-11-13).
+
 ## Known gaps
 
 No live acceptance on any model. Mini 1 channel/colour/position mapping is

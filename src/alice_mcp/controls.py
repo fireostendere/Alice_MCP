@@ -125,6 +125,10 @@ def invoke(controller: Controller, station: Station, request: dict[str, Any]) ->
         from alice_mcp import zigbee_http
 
         return parse_response(controller.runner(station, zigbee_http.command(request)))
+    if request.get("action") == "display.show":
+        from alice_mcp import clock_sysfs
+
+        return parse_response(controller.runner(station, clock_sysfs.command(request)))
     if (request.get("action") in {"led.effect", "led.show"}
             and request.get("model") in device_runtime.FRAMEBUFFER_RINGS):
         from alice_mcp import led_framebuffer
@@ -195,11 +199,14 @@ def capabilities(controller: Controller, station_id: str) -> dict[str, Any]:
                       if station.model == "station-mini" else []),
         "led_show_effects": (sorted(device_runtime.SHOW_EFFECTS)
                              if station.model in device_runtime.LED_ZONES else []),
+        "display_characters": ("".join(sorted(device_runtime.SEGMENTS))
+                               if station.model in device_runtime.CLOCKS else ""),
         "assets": sorted(policy.get("media", {})),
         "bindings": [{"name": name, "kind": value["kind"],
                       "options": sorted(value["choices"])}
                      for name, value in policy.get("configs", {}).items()],
-        "runtime": "Mini 3 led.effect/show and Mini 1 capture/replay/pulse/animate/show use "
+        "runtime": "Mini 3 led.effect/show/display.show and Mini 1 "
+                   "capture/replay/pulse/animate/show use "
                    "stock shell; replay/pulse/animate/show also require i2cset; "
                    "speech.listen/say temporarily deploy "
                    "one exact reviewed ARM32 client with stock shell; "
@@ -317,6 +324,15 @@ def describe(request: dict[str, Any]) -> str:
                 "continues. Keep Quasar enabled; no SSH/config/autostart changes or retry. "
                 "Remove the temporary executable/directory on exit; failed cleanup is unknown. "
                 "Compatibility is unverified; do not speak until fresh capture_ready=true")
+    if action == "display.show":
+        return (f"Show {params['text']!r}" + (" with the colon" if params["colon"] else "")
+                + f" on the {request['model']} segment clock for at most "
+                f"{params['duration_seconds']} s at level {params['level']}/255 (limit 90), "
+                "right-aligned, other clock marks dark. Then restore the captured segments; "
+                "if the firmware redraws the time meanwhile, stop and leave its state. The "
+                "restored time can be up to a minute stale until the next firmware tick. "
+                "Sysfs brightness values only: no clock setting, animation file, daemon, "
+                "Quasar stop or retry")
     if action == "led.show":
         mini1 = request["model"] == "station-mini"
         return (f"LED show {params['effect']} on {request['model']}: hard limit "

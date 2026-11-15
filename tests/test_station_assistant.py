@@ -96,6 +96,36 @@ def test_live_weather_is_validated_cached_and_never_served_stale(
     assert sa.weather()["source"] == "unavailable"
 
 
+@pytest.mark.parametrize("zone", ["Pacific/Kiritimati", "Etc/GMT+12"])
+def test_weather_cache_survives_a_reply_dated_in_another_zone(monkeypatch: Any,
+                                                               zone: str) -> None:
+    """The cache is keyed by Belgrade's date; at any hour one of these zones differs from it."""
+    from zoneinfo import ZoneInfo
+
+    import httpx
+
+    now = datetime.now(ZoneInfo(zone))
+    data = {"timezone": zone, "current_units": {"temperature_2m": "°C"},
+            "daily_units": {"temperature_2m_max": "°C", "temperature_2m_min": "°C",
+                            "precipitation_probability_max": "%"},
+            "current": {"time": now.isoformat(), "temperature_2m": 9.6, "weather_code": 3},
+            "daily": {"time": [now.date().isoformat()], "temperature_2m_max": [10.3],
+                      "temperature_2m_min": [7.8], "precipitation_probability_max": [59]}}
+    calls: list[Any] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, Any]:
+            return data
+
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: calls.append(url) or Response())
+    first = sa.weather()
+    assert first["source"] == "open_meteo"
+    assert sa.weather_snapshot() == first and sa.weather() == first and len(calls) == 1
+
+
 def test_news_snapshot_contains_only_fresh_sourced_headlines(monkeypatch: Any) -> None:
     import time
     from email.utils import format_datetime

@@ -33,7 +33,8 @@ installation or native Windows device writes are available.
    brightness write there can detach the trigger and hide stock animations until the
    trigger itself is put back, and the red mute indication keeps priority.
 2. Mini 3/Bergamot uses a six-by-one, 24-bpp **BGR**, 18-byte framebuffer. Its related sysfs
-   nodes can reflect framebuffer state rather than independently drive it.
+   nodes can reflect framebuffer state rather than independently drive it. Its white
+   segment clock is separate sysfs nodes, driven only by `display.show` (below).
 3. Station 2 uses an **RGBW**, 32-bpp, 356-byte frame with 89 logical positions and
    88 visible LEDs: index 88 is not visible. Do not reuse Bergamot frame length or channel order.
 4. Midi has ring/logo framebuffers and separate clock segments, but their byte
@@ -155,6 +156,15 @@ can race its updates; do not fight it or stop Quasar to obtain exclusivity.
 Mini 3's shell adapter restores on normal exit and handled HUP/INT/TERM, then
 checks the exact 18-byte readback. Its in-memory snapshot cannot survive power
 loss, SIGKILL or a stuck kernel operation; there is no detached recovery watchdog.
+
+### Clock text (`display.show`, Mini 3 only)
+
+«Покажи на часах 12:34» → `{"text": "1234", "colon": true, "duration_seconds": 5}`.
+Up to four characters from `get_station_controls(...).display_characters`, right-aligned;
+optional `level` 1–90. The time comes back after the show; `yielded=true` means the
+firmware redrew it first. No faces, timers or brightness setting. One Mini 3 run read
+every segment back as written, but nobody watched the clock; other models' clocks
+(Mini 2, Mini 3 Pro, Midi) have no adapter.
 
 ### Reference-style shows (`led.show`, Mini 1, Lite, Mini 3)
 

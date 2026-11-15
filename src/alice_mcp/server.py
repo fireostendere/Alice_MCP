@@ -254,7 +254,7 @@ def get_station_controls(station_id: str) -> dict[str, Any]:
 
 
 DeviceAction = Literal["led.effect", "led.capture", "led.replay", "led.pulse", "led.animate",
-                       "led.show", "speech.listen", "speech.say",
+                       "led.show", "display.show", "speech.listen", "speech.say",
                        "audio.volume", "audio.play", "media.upload", "sound.replace",
                        "config.select", "restore", "quasar.volume", "alice.activation",
                        "alice.ask", "speech.openai", "zigbee.permit_join", "zigbee.on_off"]

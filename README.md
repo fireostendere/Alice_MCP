@@ -28,6 +28,11 @@ has a separately authenticated TLS listener; see [native transport](docs/NATIVE_
 Do not launch it manually in a terminal expecting a chat interface: configure
 your MCP client to start it.
 
+For Home Assistant and other clients that cannot spawn a process, `ALICE_MCP_HTTP`
+with `ALICE_MCP_HTTP_TOKEN` serves the same tools over Streamable HTTP on a secret
+URL path; a private `voice.agent_tools` list lets the voice answer agent call
+another MCP server's tools. See [stations as smart-home terminals](docs/SMART_HOME.md).
+
 ### OpenCode V2
 
 Merge this entry into your existing configuration; do not replace other servers.
@@ -144,7 +149,7 @@ and the [runtime control contract](docs/CONTROLS.md).
 | `get_station_controls(station_id)` | Declared private-policy action/asset/option aliases, plus `supported_actions` (those this model has an adapter for); not verified hardware availability |
 | `preview_station_action(station_id, action, parameters)` | Read-only runtime inspection and a 300-second one-use device preview |
 | `apply_station_action(plan_id, expected_sha256)` | Private preauthorization or native human approval, fresh-state validation, bounded device action, post-check |
-| `run_station_action(station_id, action, parameters)` | Preview and apply in one call: fresh one-use preview, then private preauthorization or one native approval form |
+| `run_station_action(station_id, action, parameters)` | Preview and apply in one call: fresh one-use preview, then private preauthorization or one native approval form; `station_id` `"all"` does this on every station and reports each |
 | `ask_station(station_id, question)` | Answer and speak once on the selected station: local clock, current news/weather/facts through actual web search, with separate source links; normal speech gates remain; web-derived answers carry `untrusted_text` |
 | `get_capture_status(station_id, capture_id)` | Read fresh capture readiness, bounded LED records or one approved ASR text; never starts capture |
 | `start_job`, `list_jobs`, `cancel_job` | Owned host timers, declarative presets and a bounded generated-tone siren; cancel by owned ID; lost when this process exits ([jobs](docs/JOBS.md)) |
@@ -207,7 +212,7 @@ To delegate **all already-permitted actions**, set `"preauthorize_all_actions": 
 on the private **station entry**, alongside `controls` (not inside it). Default is
 `true` by the owner's decision. This skips native forms for service start/restart and all device actions,
 including capture, arbitrary-text TTS and persistent edits, within authorized tasks.
-It persists until removed or set to `false`; choose it only for a trusted local agent.
+It persists until set to `false`; choose it only for a trusted local agent.
 It does not enable the global write gate, add assets/options, authorize unrelated
 tasks, or implement unsupported operations. An absent action list or `"all"` allows
 all implemented actions; an explicit list still restricts them. Revocation invalidates outstanding previews.
@@ -304,7 +309,7 @@ The runtime implements `led.effect`, `led.capture`, `led.replay`, `led.pulse`, `
 `speech.listen`, `speech.say`,
 `audio.volume`, `audio.play`, `media.upload`,
 `sound.replace`, `config.select`, narrow backup-record `restore`, and on Mini 1
-`quasar.volume` / `alice.activation` through Quasar's own local IPC
+`quasar.volume` / `alice.activation` / `alice.ask` through Quasar's own local IPC
 ([voice architecture](docs/VOICE_ARCHITECTURE.md#quasar-level-and-stock-alice)).
 `led.show` (source-tested, not live-accepted) adds bounded reference-effect equivalents
 and a channel-calibration runner; see [LED parity](docs/LED_PARITY.md).

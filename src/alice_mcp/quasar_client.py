@@ -7,7 +7,9 @@ One pinned ARM client (asr_once.c built with ASR_ONCE_SPOTTER):
 - `--send-*`: one fixed request in Quasar's own full-message form. Volume goes through
   Alice's text path, so Quasar sets its own level, ring, click and app/VQE state. The
   activation toggle stops or starts only the stock wake word; Quasar keeps running.
-Results are verified on the station (Quasar's saved level, its spotter log lines).
+- `--send-text`: one short validated phrase on the same text path (`alice.ask`): Alice
+  treats it as typed by the owner. Only the send is confirmed, never its effect.
+Other results are verified on the station (Quasar's saved level, its spotter log lines).
 """
 
 from __future__ import annotations
@@ -27,7 +29,9 @@ from alice_mcp.core import Controller, SafetyError, SSHInput, Station, ssh_argv
 from alice_mcp.vqe_experiment import _ssh
 from alice_mcp.wake_simulate import read_pinned
 
-CLIENT_SHA256 = "efb7fd7d532d35bc4cdb6f026244fc6d1e873efed72840c91abb22e734ade3d5"
+CLIENT_SHA256 = "289da6ad792abe4c3abef311eede7520089262d2380afec780c7bbd2b71ecbdf"
+# The same source before --send-text: still accepted for every other request.
+LEGACY_SHA256 = "efb7fd7d532d35bc4cdb6f026244fc6d1e873efed72840c91abb22e734ade3d5"
 PHRASES = frozenset({
     "дальше", "назад", "выше", "ниже", "вправо", "влево", "вверх", "вниз", "домой",
     "продолжи", "играй", "стоп", "хватит", "пауза", "следующий", "громче", "тише",
@@ -55,6 +59,7 @@ case "$command:$arg" in
  --send-volume-level:[0-9]|--send-volume-level:10) ;;
  --send-volume-step:louder|--send-volume-step:quieter) ;;
  --send-activation:on|--send-activation:off) ;;
+ --send-text:?*) ;;
  *) blocked invalid_request;;
 esac
 case "$ceiling" in ''|*[!0-9]*) blocked invalid_request;; esac
@@ -96,6 +101,8 @@ head -c "$size" >"$DIR/client"
 chmod 500 "$DIR/client"
 lines=$(wc -l <"$L") || lines=0
 "$DIR/client" "$command" "$arg" >/dev/null 2>&1 || unknown send_unverified
+# Alice's answer to a phrase has no local state to read back: report the send only.
+[ "$command" != --send-text ] || { printf '{"outcome":"applied","request":"sent"}\n'; exit 0; }
 i=0
 while [ "$i" -lt 25 ]; do
  sleep 0.2
@@ -190,6 +197,8 @@ def request(firmware: str, client: bytes, *, pin: str | None = None) -> SSHInput
 def control(action: str, params: dict[str, Any]) -> tuple[str, str]:
     if action == "alice.activation":
         return "--send-activation", "on" if params["enabled"] else "off"
+    if action == "alice.ask":
+        return "--send-text", params["text"]
     if "step" in params:
         return "--send-volume-step", params["step"]
     return "--send-volume-level", str(params["level"])
@@ -224,6 +233,9 @@ def parse_control(raw: str, max_level: int = 10) -> dict[str, Any]:
         elif outcome in {"blocked", "unknown"} and keys == {"outcome", "error_code"}:
             if value["error_code"] not in CONTROL_ERRORS:
                 raise ValueError
+        elif outcome == "applied" and keys == {"outcome", "request"}:
+            if value["request"] != "sent":
+                raise ValueError
         elif outcome == "applied" and keys == {"outcome", "activation"}:
             if value["activation"] not in {"on", "off"}:
                 raise ValueError
@@ -238,6 +250,18 @@ def parse_control(raw: str, max_level: int = 10) -> dict[str, Any]:
         return {"outcome": "unknown", "error_code": "send_unverified"}
 
 
+def _client(station: Station, text: bool = False) -> tuple[bytes, str]:
+    """The private artifact and which reviewed build it is; only the current one sends text."""
+    path = Path(station.controls["quasar_client"])
+    try:
+        return read_pinned(path, CLIENT_SHA256, 64 * 1024), CLIENT_SHA256
+    except SafetyError:
+        if text:
+            raise SafetyError("alice.ask needs the rebuilt Quasar client; see docs/CONTROLS.md"
+                              ) from None
+        return read_pinned(path, LEGACY_SHA256, 64 * 1024), LEGACY_SHA256
+
+
 # Station id -> resident state stamp under which a full SSH firmware hash last passed.
 _verified: dict[str, str] = {}
 
@@ -249,6 +273,8 @@ def invoke(controller: Controller, station: Station, request: dict[str, Any]) ->
     re-hashing maind over SSH (~0.8 s) once a full check passed under that same stamp.
     """
     command, arg = control(request["action"], request["params"])
+    # Read at preview too: the build's pin is part of the state both steps must agree on.
+    client, pin = _client(station, text=request["action"] == "alice.ask")
     firmware = station.controls["firmware_sha256"]
     from alice_mcp import live_voice  # It imports this module.
 
@@ -259,14 +285,14 @@ def invoke(controller: Controller, station: Station, request: dict[str, Any]) ->
     suffix = "_verified" if verified else ""
     if request["mode"] == "inspect":
         result = parse_control(controller.runner(station, control_request(
-            firmware, "inspect" + suffix, command, arg, stamp=stamp, ceiling=ceiling)))
+            firmware, "inspect" + suffix, command, arg, stamp=stamp, pin=pin,
+            ceiling=ceiling)))
         if result["outcome"] == "ready" and stamp != "-":
             _verified[station.id] = stamp
         return result
-    client = read_pinned(Path(station.controls["quasar_client"]), CLIENT_SHA256, 64 * 1024)
     return parse_control(controller.runner(station, control_request(
         firmware, "apply" + suffix, command, arg, client, request["expected_sha256"],
-        stamp=stamp, ceiling=ceiling)), ceiling // 10 if arg == "louder" else 10)
+        stamp=stamp, pin=pin, ceiling=ceiling)), ceiling // 10 if arg == "louder" else 10)
 
 
 def stream(process: Any, sink: Callable[[dict[str, Any]], None],
@@ -294,9 +320,9 @@ def watch(controller: Controller, station_id: str, sink: Callable[[dict[str, Any
     """One bounded (≤1 h) listener session; read-only, so a new session may follow."""
     station = controller.station(station_id)
     iop._permitted(controller, station)
-    client = read_pinned(Path(station.controls["quasar_client"]), CLIENT_SHA256, 64 * 1024)
+    client, pin = _client(station)
     ssh = _ssh(station)
-    launch = request(station.controls["firmware_sha256"], client)
+    launch = request(station.controls["firmware_sha256"], client, pin=pin)
     with subprocess.Popen(ssh_argv(ssh, launch), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL) as process:
         assert process.stdin is not None

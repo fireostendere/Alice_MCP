@@ -19,7 +19,7 @@ GENERIC_ACTIONS = frozenset({"audio.volume", "audio.play", "media.upload", "soun
                              "config.select", "restore", "speech.say"})
 SOUND_ACTIONS = frozenset({"audio.volume", "audio.play", "sound.replace", "speech.say",
                            "speech.listen", "speech.openai", "quasar.volume",
-                           "alice.activation"})
+                           "alice.activation", "alice.ask"})
 
 
 def _profile(title: str, codename: str, os: str, userspace: str, led: str, *todo: str,

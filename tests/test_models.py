@@ -33,6 +33,7 @@ SAMPLES: dict[str, dict[str, Any]] = {
     "sound.replace": {"asset": "a", "slot": "volume_sound"},
     "config.select": {"binding": "b", "option": "c"}, "restore": {"backup_id": "0" * 32},
     "quasar.volume": {"level": 1}, "alice.activation": {"enabled": True},
+    "alice.ask": {"text": "включи музыку"},
 }
 
 

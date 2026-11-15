@@ -38,7 +38,7 @@ OUTCOMES = {"ready", "applied", "blocked", "conflict", "unknown", "capturing", "
 # The installed Mini 1 resident has no LED adapter: these use explicit pinned SSH on request.
 SSH_LED_ACTIONS = frozenset({"led.capture", "led.animate", "led.pulse", "led.show"})
 # Quasar's own level and wake word through its local IPC (quasar_client.py), pinned SSH only.
-QUASAR_ACTIONS = frozenset({"quasar.volume", "alice.activation"})
+QUASAR_ACTIONS = frozenset({"quasar.volume", "alice.activation", "alice.ask"})
 LIVE_ACTIONS = frozenset({"speech.openai"})  # The station streams OpenAI itself (live_voice).
 
 
@@ -121,6 +121,10 @@ def invoke(controller: Controller, station: Station, request: dict[str, Any]) ->
         from alice_mcp import speech_capture
 
         return speech_capture.invoke(controller, station, request)
+    if isinstance(request.get("action"), str) and request["action"].startswith("zigbee."):
+        from alice_mcp import zigbee_http
+
+        return parse_response(controller.runner(station, zigbee_http.command(request)))
     if (request.get("action") in {"led.effect", "led.show"}
             and request.get("model") == "station-mini3"):
         from alice_mcp import led_framebuffer
@@ -255,10 +259,29 @@ def describe(request: dict[str, Any]) -> str:
                 "one-session secret; the API key stays here. The pinned live client and player "
                 "run from station RAM and are removed. No microphone, no volume change, no retry; "
                 "the resident agent is not needed. Permission includes sound in the room.")
+    if action == "zigbee.permit_join":
+        seconds = params["duration_seconds"]
+        return (("Close the station's Zigbee network to new devices" if seconds == 0 else
+                 f"Let new Zigbee devices join the station's own network for {seconds} seconds")
+                + " through the firmware's local panel (loopback, pinned SSH, stock wget). Any "
+                "device in pairing mode within radio range can join. Stock Quasar stays the "
+                "coordinator; no cloud call, nothing installed. Only the firmware's acceptance "
+                "is confirmed. No retry.")
+    if action == "zigbee.on_off":
+        return (f"Send Zigbee On/Off «{params['command']}» to network address "
+                f"{params['address']}, endpoint {params['endpoint']}, through the firmware's "
+                "local panel (loopback, pinned SSH, stock wget). The firmware answers success "
+                "even for an address it does not know: only acceptance is confirmed, never "
+                "that a device switched. Whatever is wired to that device switches. No retry.")
     if action == "alice.activation":
         return (("Re-enable" if params["enabled"] else "Disable") + " the stock «Алиса» wake "
                 "word through Quasar's spotter capability. Quasar keeps running; a Quasar "
                 "restart or reboot re-enables it. Verified by its spotter log. No retry.")
+    if action == "alice.ask":
+        return ("Hand this phrase to stock Alice as a typed request through Quasar's IPC text "
+                "path: " + json.dumps(params["text"], ensure_ascii=False) + ". Alice answers "
+                "and acts as she would for the owner's own words (music, her smart home, "
+                "sound in the room) through Yandex's cloud. Only the send is confirmed. No retry.")
     if action == "speech.say" and "local_tts" in request["policy"]:
         return ("Speak this literal text with this PC's own synthesizer (private `local_tts`): "
                 + json.dumps(params["text"], ensure_ascii=False) + ". The audio, never the "

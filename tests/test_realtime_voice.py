@@ -837,3 +837,29 @@ def test_windows_acl_check_is_reused_until_the_dotenv_changes(
     monkeypatch.setattr(rv.time, "monotonic", lambda: 10 ** 9)
     rv.api_key()
     assert len(checks) == 3  # And never trusted for more than five minutes.
+
+
+@pytest.mark.parametrize(("reply", "spoken"), [
+    ({"mode": "command", "text": "Свет включён. " * 30}, None),
+    ({"mode": "conversation", "text": ""}, "недоступны"),
+])
+def test_keyless_answer_is_spoken_by_the_station_never_by_the_cloud(
+        reply: dict[str, Any], spoken: str | None) -> None:
+    said: list[str] = []
+
+    def action(arguments: dict[str, Any]) -> dict[str, Any]:
+        assert arguments["action"] == "speech.say"
+        said.append(arguments["parameters"]["text"])
+        return {"outcome": "applied"}
+
+    turn = rv.RealtimeTurn("", Ring(), lambda _: pytest.fail("played cloud audio"),
+                           connect=lambda *a: pytest.fail("opened a cloud session"),
+                           action=action, answer=lambda text, deadline: reply,
+                           local_transcripts=True)
+    assert turn.wake(1)
+    assert turn.transcript("включи свет")
+    wait(lambda: not turn.active)
+    assert turn.error is None and said and all(len(piece) <= 256 for piece in said)
+    assert (spoken in said[0] if spoken else
+            " ".join(said) == " ".join(reply["text"].split()))
+    assert turn.status()["tts_model"] == "station_speech_say"

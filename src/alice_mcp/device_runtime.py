@@ -29,7 +29,7 @@ ACTIONS = frozenset({"led.effect", "led.capture", "led.replay", "led.pulse", "le
                      "speech.listen", "speech.say",
                      "audio.volume", "audio.play", "media.upload", "sound.replace",
                      "config.select", "restore", "quasar.volume", "alice.activation",
-                     "speech.openai"})
+                     "alice.ask", "speech.openai", "zigbee.permit_join", "zigbee.on_off"})
 PREAUTHORIZED_ACTIONS = frozenset({"led.effect", "audio.volume", "audio.play"})
 ALL = "all"
 ANIMATION_MODES = frozenset({"blink", "rainbow", "rainbow_swirl"})
@@ -66,7 +66,10 @@ MINI1 = frozenset({"station-mini"})
 ACTION_MODELS = {"led.show": frozenset(LED_ZONES), "speech.say": MINI1 | {"station-mini3"},
                  **dict.fromkeys(("led.capture", "led.replay", "led.pulse", "led.animate",
                                   "speech.listen", "speech.openai", "quasar.volume",
-                                  "alice.activation"), MINI1)}
+                                  "alice.activation", "alice.ask"), MINI1),
+                 # The firmware's own local Zigbee panel (zigbee_http); only Pickle has the radio.
+                 "zigbee.permit_join": frozenset({"station-mini3-pro"}),
+                 "zigbee.on_off": frozenset({"station-mini3-pro"})}
 BASE = "/data/opt/alice-mcp"
 CAPTURE_BASE = BASE + "/led-captures"
 CAPTURE_ROOTS = ("/sys/kernel/tracing", "/sys/kernel/debug/tracing")
@@ -232,8 +235,15 @@ def validate_policy(policy: dict[str, Any], model: str) -> dict[str, Any]:
                      and source in ("PC", "station", "station_asr", "station_live")
                      and _keys(voice, fields,
                                 pc_fields | {"indicator", "conversation_prompt", "say_backend",
-                                             "vad_silence_ms", "command_vad_silence_ms"})
+                                             "vad_silence_ms", "command_vad_silence_ms",
+                                             "agent_tools"})
                       and type(voice["autostart"]) is bool)
+            # Other MCP servers' tools for the voice answer agent (server_* or server_Tool):
+            # never this server's own station tools, never a client built-in or a bare "*".
+            tools = voice.get("agent_tools", [])
+            _require(type(tools) is list and len(tools) <= 16 and all(
+                _match(re.compile(r"[a-z][a-z0-9-]{0,31}_(\*|[A-Za-z0-9_]{1,64})"), tool)
+                and not tool.startswith("alice_") for tool in tools))
             for field, default in (("vad_silence_ms", 350), ("command_vad_silence_ms", 200)):
                 _require(_integer(voice.get(field, default), 200, 1000))
             _require(all(_safe_path(voice[k]) for k in ("client", "mww", "libvosk", "vosk_zip")
@@ -463,8 +473,10 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
             "audio.volume": {"percent"}, "audio.play": {"asset", "duration_seconds"},
             "media.upload": {"asset", "content_base64"}, "sound.replace": {"asset", "slot"},
             "config.select": {"binding", "option"}, "restore": {"backup_id"},
-            "alice.activation": {"enabled"},
+            "alice.activation": {"enabled"}, "alice.ask": {"text"},
             "speech.openai": {"text"},
+            "zigbee.permit_join": {"duration_seconds"},
+            "zigbee.on_off": {"command", "address", "endpoint"},
         }
         if action == "quasar.volume":
             # Quasar's own level 0-10 (×10 %), or one stock step; never a supplied text.
@@ -492,9 +504,23 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
                      and isinstance(text, str) and 1 <= len(text) <= 1000 and bool(text.strip())
                      and not any(ord(c) < 32 and c != "\n" or 127 <= ord(c) <= 159
                                  for c in text))
+        elif action == "zigbee.permit_join":
+            # 0 closes the network; 255 would keep it open forever.
+            _require(_integer(params["duration_seconds"], 0, 254))
+        elif action == "zigbee.on_off":
+            # One device by its 16-bit network address; fff8-ffff are broadcasts.
+            _require(params["command"] in ("on", "off", "toggle")
+                     and _match(re.compile(r"[0-9a-f]{4}\Z"), params["address"])
+                     and int(params["address"], 16) < 0xfff8
+                     and _integer(params["endpoint"], 1, 240))
         elif action == "alice.activation":
             # Only the stock wake word; Quasar itself keeps running.
             _require("quasar_client" in policy and type(params["enabled"]) is bool)
+        elif action == "alice.ask":
+            # One short plain phrase for stock Alice, as if typed in her app: no quoting,
+            # escapes or control characters can exist in what the pinned client frames.
+            _require("quasar_client" in policy and _match(re.compile(
+                r"[0-9A-Za-zА-Яа-яЁё][0-9A-Za-zА-Яа-яЁё ,.!?-]{0,79}"), params["text"]))
         elif action == "speech.say":
             text = params["text"]
             _require(("tts_client" in policy or "local_tts" in policy)

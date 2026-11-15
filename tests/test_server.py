@@ -420,3 +420,91 @@ def test_sigterm_stops_the_voice_listener_and_exits_cleanly() -> None:
     assert json.loads(process.stdout.readline())["id"] == 1  # Serving: handlers installed.
     process.send_signal(signal.SIGTERM)
     assert process.wait(timeout=30) == 0
+
+
+def test_http_transport_needs_a_strong_url_secret_and_serves_one_post_per_call(
+        monkeypatch: Any) -> None:
+    ran: list[Any] = []
+    monkeypatch.setattr(server, "TRANSPORT", "stdio")  # Restored after the test.
+    monkeypatch.setattr(server, "voice", SimpleNamespace(autostart=lambda: ran.append("auto"),
+                                                         stop=lambda: ran.append("stop")))
+    monkeypatch.setattr(server.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(server.mcp, "run", lambda transport: ran.append(transport))
+    monkeypatch.setattr(server.mcp, "settings", server.mcp.settings.model_copy())
+    for address, token in (("hub.invalid:8765", "short"), ("hub.invalid:8765", "a/" * 20),
+                           ("hub.invalid", "t" * 32), ("hub.invalid:80", "t" * 32),
+                           ("bad host:8765", "t" * 32)):
+        monkeypatch.setenv("ALICE_MCP_HTTP", address)
+        monkeypatch.setenv("ALICE_MCP_HTTP_TOKEN", token)
+        with pytest.raises(SystemExit):
+            server.main()
+    assert ran == []  # Refused before the listener, the voice autostart or any socket.
+    monkeypatch.setenv("ALICE_MCP_HTTP", "hub.invalid:8765")
+    monkeypatch.setenv("ALICE_MCP_HTTP_TOKEN", "t" * 32)
+    server.main()
+    settings = server.mcp.settings
+    assert ran == ["auto", "streamable-http", "stop"]
+    assert (settings.host, settings.port) == ("hub.invalid", 8765)
+    assert settings.streamable_http_path == "/" + "t" * 32 + "/mcp"
+    assert settings.stateless_http and settings.json_response
+    assert settings.transport_security is None  # The loopback Host allowlist would refuse LAN.
+    assert server.get_capabilities()["transport"] == "streamable-http"
+
+
+def test_http_endpoint_answers_only_on_the_secret_path(monkeypatch: Any) -> None:
+    from starlette.testclient import TestClient
+
+    monkeypatch.setattr(server, "TRANSPORT", "stdio")  # Restored after the test.
+    monkeypatch.setattr(server.mcp, "settings", server.mcp.settings.model_copy())
+    monkeypatch.setattr(server.mcp, "_session_manager", None)
+    server.http_settings("localhost:8765", "s" * 32)
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "list_stations", "arguments": {}}}
+    headers = {"Accept": "application/json, text/event-stream", "Host": "localhost:8765"}
+    with TestClient(server.mcp.streamable_http_app()) as client:
+        assert client.post("/mcp", json=call, headers=headers).status_code == 404
+        answer = client.post("/" + "s" * 32 + "/mcp", json=call, headers=headers)
+    assert answer.status_code == 200
+    assert answer.json()["result"]["structuredContent"]["evidence_class"] == "caller"
+
+
+def test_all_runs_the_action_on_every_station_and_reports_each(monkeypatch: Any) -> None:
+    stations = {"kitchen": None, "hall": None}
+    monkeypatch.setattr(server, "load_inventory", lambda _: stations)
+
+    def station(station_id: str) -> Any:
+        if station_id not in stations:
+            raise server.SafetyError("Unknown station")
+        return SimpleNamespace(id=station_id, native_mcp={})
+
+    monkeypatch.setattr(server.controller, "station", station)
+    monkeypatch.setattr(server.controls, "bound_action", lambda station, action: action)
+    previews: list[str] = []
+
+    async def preview(station_id: str, action: str, parameters: Any) -> dict[str, Any]:
+        previews.append(station_id)
+        return ({"plan_id": station_id, "expected_sha256": "e" * 64} if station_id == "hall"
+                else {"outcome": "blocked", "error": "offline"})
+
+    async def apply(plan_id: str, expected: str, ctx: Any) -> dict[str, Any]:
+        return {"outcome": "applied"}
+
+    monkeypatch.setattr(server, "preview_station_action", preview)
+    monkeypatch.setattr(server, "apply_station_action", apply)
+    result = asyncio.run(server.run_station_action("all", "speech.say", {"text": "Ужин"}, Mock()))
+    assert sorted(previews) == ["hall", "kitchen"]
+    assert result["outcome"] == "mixed" and result["do_not_retry"] is True
+    assert result["stations"]["hall"]["outcome"] == "applied"
+    assert result["stations"]["kitchen"] == {**result["stations"]["kitchen"],
+                                             "outcome": "blocked", "error": "offline"}
+
+
+def test_http_callers_get_an_immediate_refusal_instead_of_an_unanswerable_form(
+        monkeypatch: Any) -> None:
+    monkeypatch.setattr(server, "TRANSPORT", "streamable-http")
+    ctx = Mock()
+    ctx.elicit = AsyncMock(side_effect=AssertionError("a form no HTTP caller can answer"))
+    plan = SimpleNamespace(station=SimpleNamespace(id="desk"), expires=0.0)
+    assert asyncio.run(server._approve(plan, ctx, "impact")) == {
+        "outcome": "blocked", "error": "Native human approval unavailable",
+        "preview_consumed": True}

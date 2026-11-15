@@ -80,3 +80,30 @@ def test_timeout_interrupts_owned_session_once_and_never_retries(monkeypatch: An
         agent.answer("hello", time.monotonic() + 5)
     assert "PRIVATE_SENTINEL" not in str(error.value)
     assert len(calls) == 2 and "session.interrupt" in calls[1]
+
+
+def test_owner_declared_tools_are_allowed_and_named_to_the_agent(
+        monkeypatch: Any, tmp_path: Path) -> None:
+    calls: list[Any] = []
+
+    def run(args: list[str], **kwargs: Any) -> Any:
+        calls.append((args, kwargs))
+        if "session.create" in args:
+            return subprocess.CompletedProcess(args, 0, json.dumps({"data": {"id": "ses_test"}}))
+        event = {"type": "text", "part": {"text": json.dumps({"mode": "command", "text": "Ок"})}}
+        return subprocess.CompletedProcess(args, 0, json.dumps(event) + "\n")
+
+    monkeypatch.setattr(ov.subprocess, "run", run)
+    agent = ov.Agent("/PRIVATE/opencode2", "desk", tmp_path, ("home-assistant_*",))
+    assert agent.answer("включи свет", time.monotonic() + 5)["text"] == "Ок"
+    assert json.loads(calls[0][0][-1])["permissions"] == [
+        {"action": "*", "resource": "*", "effect": "deny"},
+        {"action": "websearch", "resource": "*", "effect": "allow"},
+        {"action": "webfetch", "resource": "*", "effect": "allow"},
+        {"action": "home-assistant_*", "resource": "*", "effect": "allow"}]
+    prompt = calls[1][1]["input"]
+    assert "home-assistant_*" in prompt and "Единственные" not in prompt
+    assert "Не вызывай MCP" not in prompt  # Both restricted-profile rules were replaced.
+    assert json.loads(prompt[prompt.rindex("\n") + 1:]) == {"speech": "включи свет",
+                                                            "station": "desk"}
+    assert ov.instructions(()) == ov.INSTRUCTIONS and "Единственные" in ov.INSTRUCTIONS

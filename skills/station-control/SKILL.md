@@ -33,6 +33,7 @@ Pick the tool from the request, then check the action is in `supported_actions`.
 | «не откликайся на Алису» | `alice.activation` with `{"enabled": false}`; a Quasar restart or reboot re-enables it. |
 | «проиграй звук» | `audio.play` with a registered `asset` and `duration_seconds` 1-10. |
 | «радуга / мигни / выключи подсветку» | `led.show`; see [station-led](../station-led/SKILL.md) for effects and the Mini 1 capture prerequisite. |
+| «покажи на часах 12:34» | `display.show` on Mini 3 (the only model with a clock adapter); see [station-led](../station-led/SKILL.md). |
 | «таймер на N» | `start_job(id, "timer", {"seconds": N, "preset": alias})`. |
 | «сирена» / «выключи сирену» | `start_job(id, "siren", {"mode": "full"})`, or `sound_only`, `test`, `off`. |
 | «что запущено / отмени» | `list_jobs`, `cancel_job(job_id)` or `cancel_job("all")`. |

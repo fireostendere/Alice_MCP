@@ -313,6 +313,8 @@ The runtime implements `led.effect`, `led.capture`, `led.replay`, `led.pulse`, `
 ([voice architecture](docs/VOICE_ARCHITECTURE.md#quasar-level-and-stock-alice)).
 `led.show` (source-tested, not live-accepted) adds bounded reference-effect equivalents
 and a channel-calibration runner; see [LED parity](docs/LED_PARITY.md).
+`display.show` puts up to four characters on the Mini 3 segment clock for at most 15 s
+in stock shell, then restores it (one driver-readback run, not visually confirmed).
 They require `ALICE_MCP_ALLOW_WRITES=1`, a private per-station `controls` policy
 allowing the action, and a locally reviewed SHA-256 of
 `/system/vendor/quasar/maind`. This digest binds the reviewed firmware, not a

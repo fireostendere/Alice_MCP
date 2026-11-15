@@ -72,7 +72,9 @@ PROFILES: dict[str, dict[str, Any]] = {
         "Станция Мини 3", "Bergamot", "buildroot", "armhf",
         "framebuffer /dev/fb0, 6x1, 24 bpp BGR, 18 bytes; optional white clock",
         "speech.say was audible on one pilot; completion events are unverified",
-        "led.show is source-tested, not live-accepted; the clock has no adapter",
+        "led.show is source-tested, not live-accepted",
+        "display.show: one driver-readback run on one unit (2026-11-13), segments read back "
+        "and restored; not visually confirmed",
         "No ASR, Quasar IPC, live-voice or resident-agent build for Bergamot",
         dt="yandex,bergamot", evidence="partial_live"),
     "station-mini3-pro": _profile(

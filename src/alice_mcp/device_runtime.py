@@ -25,7 +25,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 ACTIONS = frozenset({"led.effect", "led.capture", "led.replay", "led.pulse", "led.animate",
-                     "led.show",
+                     "led.show", "display.show",
                      "speech.listen", "speech.say",
                      "audio.volume", "audio.play", "media.upload", "sound.replace",
                      "config.select", "restore", "quasar.volume", "alice.activation",
@@ -44,6 +44,14 @@ LIKE_LITE = frozenset({"station-lite", "fiero-hi"})  # One Micro board, two bran
 LED_ZONES = {"station-mini": 6, "station-lite": 3, "fiero-hi": 3, "station-mini3": 6,
              "station-mini3-pro": 16}
 FRAMEBUFFER_RINGS = frozenset({"station-mini3", "station-mini3-pro"})  # led_framebuffer, BGR.
+# White seven-segment clocks (clock_sysfs): model -> sysfs prefix. Mini 3's nodes were read on
+# one unit; other models' clocks are wiki listings only and get no adapter.
+CLOCKS = {"station-mini3": "bergamot"}
+DISPLAY_LEVEL = 90  # Of 255: the level stock firmware is reported to use on Mini 3 Pro.
+SEGMENTS = {"0": "ABCDEF", "1": "BC", "2": "ABDEG", "3": "ABCDG", "4": "BCFG", "5": "ACDFG",
+            "6": "ACDEFG", "7": "ABC", "8": "ABCDEFG", "9": "ABCDFG", " ": "", "-": "G",
+            "A": "ABCEFG", "C": "ADEF", "E": "ADEFG", "F": "AEFG", "H": "BCEFG", "L": "DEF",
+            "P": "ABEFG", "U": "BCDEF"}
 HUES = ((16, 0, 0), (16, 6, 0), (16, 16, 0), (6, 16, 0), (0, 16, 0), (0, 16, 6),
         (0, 16, 16), (0, 6, 16), (0, 0, 16), (6, 0, 16), (16, 0, 16), (16, 0, 6))
 BREATH = (1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2)  # Eighths of the requested colour.
@@ -65,7 +73,8 @@ MODELS = {"station-lite", "station-lite2", "station-mini", "station-mini2", "sta
           "station-duo-max", "station-pro"}
 MINI1 = frozenset({"station-mini"})
 # The model gate: actions with model-specific adapters. An absent action is runtime-probed.
-ACTION_MODELS = {"led.show": frozenset(LED_ZONES), "speech.say": MINI1 | {"station-mini3"},
+ACTION_MODELS = {"led.show": frozenset(LED_ZONES), "display.show": frozenset(CLOCKS),
+                 "speech.say": MINI1 | {"station-mini3"},
                  **dict.fromkeys(("led.capture", "led.replay", "led.pulse", "led.animate",
                                   "speech.listen", "speech.openai", "quasar.volume",
                                   "alice.activation", "alice.ask"), MINI1),
@@ -402,6 +411,17 @@ def _show_parameters(params: Any, model: str) -> dict[str, Any]:
     return result
 
 
+def _display_parameters(params: Any, model: str) -> dict[str, Any]:
+    """Up to four seven-segment characters, right-aligned, optional colon."""
+    _require(model in CLOCKS and _keys(params, {"text", "duration_seconds"}, {"colon", "level"}))
+    result = {"colon": False, "level": 32, **params}
+    text = result["text"]
+    _require(isinstance(text, str) and 1 <= len(text) <= 4 and all(c in SEGMENTS for c in text)
+             and _integer(result["duration_seconds"], 1, 15)
+             and _integer(result["level"], 1, DISPLAY_LEVEL) and type(result["colon"]) is bool)
+    return result
+
+
 def _show_frame(effect: str, i: int, zones: int,
                 color: tuple[int, ...]) -> list[tuple[int, ...]]:
     dark = (0, 0, 0)
@@ -464,6 +484,8 @@ def validate_parameters(action: str, params: dict[str, Any], policy: dict[str, A
                       or action == "speech.say" and "local_tts" in policy))
         if action == "led.show":
             return _show_parameters(params, model)
+        if action == "display.show":
+            return _display_parameters(params, model)
         fields = {
             "led.effect": {"red", "green", "blue", "count", "period_ms"},
             "led.capture": {"duration_seconds"},
@@ -585,6 +607,10 @@ def interfaces(model: str) -> dict[str, Any]:
                "last_pixel_unlit": not mini}
     return {"model": model, "evidence_class": "document",
             "evidence": "public_documentation_only", "led": led,
+            "display": ({"supported": True, "interface": "sysfs", "prefix": CLOCKS[model],
+                         "digits": 4, "segments": 7, "colon": True,
+                         "characters": "".join(sorted(SEGMENTS)), "runtime": "stock_shell"}
+                        if model in CLOCKS else {"supported": False}),
             "gpio": ({"mode": "read_only_facts", "AO": [497, 511], "EE": [411, 496],
                       "consumers": ["pdn", "sdio_wifi", "bt_rfkill", "aw9110_shdn", "3V3 WLAN"],
                       "physical_pin_map": False} if model == "station-lite" else {

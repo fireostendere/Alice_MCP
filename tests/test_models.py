@@ -27,6 +27,7 @@ SAMPLES: dict[str, dict[str, Any]] = {
     "led.pulse": {"capture_id": "0" * 32, "channel": 0},
     "led.animate": {"capture_id": "0" * 32, "mode": "blink"},
     "led.show": {"effect": "off", "duration_seconds": 1, "capture_id": "0" * 32},
+    "display.show": {"text": "1", "duration_seconds": 1},
     "speech.listen": {"duration_seconds": 5},
     "speech.say": {"text": "x"}, "speech.openai": {"text": "x"},
     "audio.volume": {"percent": 1}, "audio.play": {"asset": "a", "duration_seconds": 1},

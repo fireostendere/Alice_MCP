@@ -13,7 +13,7 @@ pilot; everything else is offline-tested code or an empty slot.
 | `model` | Retail device | OS family | Adapters today | Evidence |
 |---|---|---|---|---|
 | `station-mini` | Станция Мини (Mini 1) | Buildroot | I2C ring shows/capture, native and OpenAI speech, Quasar IPC, wake/voice, resident agent, generic audio/config | live pilot |
-| `station-mini3` | Станция Мини 3 (Bergamot) | Buildroot | framebuffer `led.effect`/`led.show`, `speech.say`, generic audio/config | one audible TTS pilot |
+| `station-mini3` | Станция Мини 3 (Bergamot) | Buildroot | framebuffer `led.effect`/`led.show`, clock `display.show`, `speech.say`, generic audio/config | one audible TTS pilot; one `display.show` driver-readback run, not visually confirmed |
 | `station-lite`, `fiero-hi` | Станция Лайт, Fiero Hi (one board) | Buildroot | sysfs `led.effect`/`led.show`, generic audio/config, host speech | synthetic; one host-speech run on a Lite |
 | `station-mini2` | Станция Мини 2 | Buildroot | sysfs `led.effect`, generic audio/config | synthetic |
 | `station-2` | Станция 2 | Buildroot | RGBW framebuffer `led.effect`, generic audio/config | synthetic |
@@ -108,8 +108,22 @@ Python-based generic actions cannot run on it as they are.
 
 Not exercised on hardware: an upload near the 49,152-byte ceiling (no such asset is
 registered), the volume ceiling below 100 %, the PC audio source, Mini 1 `led.show`
-(needs a fresh capture), host speech on any model but Mini 1 and Lite, and anything
-on Mini 3 (offline).
+(needs a fresh capture) and host speech on any model but Mini 1 and Lite.
+
+## Mini 3 clock (2026-11-13)
+
+Read on one Mini 3 with a clock, read-only: `/sys/class/leds` holds
+`bergamot:white:clock{A..G}{0..3}`, `clockDH`, `clockDL`, `clockDM` and `clockDEGREE`,
+each with `max_brightness` 255, trigger `none`, level 3 at night. It has no Python, so
+the adapter (`src/alice_mcp/clock_sysfs.py`) runs in stock shell.
+
+One `display.show` (`12:34`, level 8, 3 s) then ran through preview and apply:
+`applied`, every segment read back as written, the captured levels restored. Nobody
+was watching the clock, so the visible effect is not owner-confirmed. That run used
+the helper of an earlier branch that also drove sysfs rings; the clock path ported
+here is that helper with the ring and trigger handling removed, not re-run since.
+Other models' clocks (Mini 2, Mini 3 Pro, Midi) are wiki listings only and have no
+`display.show` adapter.
 
 ## Known gaps
 
@@ -117,6 +131,8 @@ on Mini 3 (offline).
   (root, ADB, UART, OTA) pages were not re-read at that revision; see there.
 - Station 3's ring is `/dev/fb2`; the framebuffer adapter and the `led` probe look
   only at `/dev/fb0`, which on that model is the ambilight.
+- `display.show` writes text on the Mini 3 clock only: no faces, animations,
+  brightness setting or timers, and no other model's clock.
 - Policy keys for pinned artifacts (`quasar_client`, `speech_client`, `voice`) are
   accepted for Mini 1 only, and `tts_client` for Mini 1 and Mini 3. `local_tts` is
   host-side and accepted for any model.

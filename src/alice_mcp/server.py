@@ -10,6 +10,7 @@ import asyncio
 import os
 import re
 import signal
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -29,7 +30,13 @@ from alice_mcp import (
     station_assistant,
     voice_service,
 )
-from alice_mcp.core import PROBES, Controller, SafetyError, load_inventory
+from alice_mcp.core import (
+    PROBES,
+    Controller,
+    SafetyError,
+    load_inventory,
+    watch_adb_wake,
+)
 
 mcp = FastMCP(
     "alice-station-mcp",
@@ -461,6 +468,8 @@ def main() -> None:
     for number in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, _exit)
     voice.autostart()
+    threading.Thread(target=watch_adb_wake, args=(controller.inventory,),
+                     daemon=True).start()
     try:
         mcp.run(transport="streamable-http" if address else "stdio")
     finally:

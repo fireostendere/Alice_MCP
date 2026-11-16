@@ -110,6 +110,14 @@ If that file pins a logical name instead of the endpoint, set the optional
 `host_key_alias` field to that exact name (OpenSSH `HostKeyAlias`). Only literal
 names of 1–253 ASCII letters, digits, dots, underscores and hyphens are accepted,
 starting with a letter or digit; no patterns or SSH expansion tokens are allowed.
+
+A station whose read-only rootfs cannot autostart SSH (Mini 3 Pro on retail firmware)
+can carry an optional `adb_wake` object: `{"adb": "<absolute path to adb>", "port":
+5555, "script": "/data/..."}`. When the station answers but refuses SSH, as after a
+reboot, the server runs that script on the station over ADB (`start-stop-daemon -b`)
+before connecting, and while it runs it checks every 30 s. Only a refused connection
+triggers it, so nothing has been sent and nothing is retried; ADB itself is the
+owner's own setup (network ADB is unauthenticated root on the LAN).
 On POSIX, the SSH files and their ancestors must be owned by the current user or
 root, without group/world write access (trusted sticky temporary directories
 are permitted). SSH files/ancestors cannot be symlinks; the private identity

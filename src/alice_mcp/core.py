@@ -9,6 +9,7 @@ import math
 import os
 import re
 import secrets
+import socket
 import stat
 import subprocess
 import threading
@@ -105,12 +106,19 @@ PROBES = {
     # The Mini 3 Pro climate module: Quasar polls it every minute and logs the answer.
     # Only the latest three numbers and their age leave; the module's port is never opened.
     "climate": "LC_ALL=C; export LC_ALL; f=/data/quasar/daemons_logs/maind.log; "
-    "test -r \"$f\" && tail -n 2000 \"$f\" | awk -v now=\"$(date +%H:%M:%S)\" '"
+    # The log rotates within minutes, so the previous file is read too. Firmware 0.374 also
+    # logs its self-heating correction; the corrected values are the ones its app shows.
+    "test -r \"$f\" && cat \"$f.1\" \"$f\" 2>/dev/null | tail -n 2000 "
+    "| awk -v now=\"$(date +%H:%M:%S)\" '"
     "function sec(t) { split(t, a, \":\"); return a[1] * 3600 + a[2] * 60 + int(a[3]) } "
     "/\\[cradle\\]/ { "
     "if (match($0, /temperature_celsius=[^ ,]+/)) { t = substr($0, RSTART + 20, RLENGTH - 20); "
     "ts = $3 } "
+    "if (match($0, /corrected_temperature_celsius=[^ ,]+/)) "
+    "t = substr($0, RSTART + 30, RLENGTH - 30); "
     "if (match($0, /humidity_percent=[^ ,]+/)) { h = substr($0, RSTART + 17, RLENGTH - 17); "
+    "ts = $3 } "
+    "if (match($0, /humidityPercent=[^ ,]+/)) { h = substr($0, RSTART + 16, RLENGTH - 16); "
     "ts = $3 } "
     "if (match($0, /co2_ppm=[^ ,]+/)) { c = substr($0, RSTART + 8, RLENGTH - 8); ts = $3 } } "
     "END { if (t ~ /^[0-9]+([.][0-9]+)?$/ && h ~ /^[0-9]+([.][0-9]+)?$/ "
@@ -166,6 +174,7 @@ class Station:
     native_mcp: dict[str, str] = field(default_factory=dict)
     allow_reboot: bool = True
     jobs: dict[str, Any] = field(default_factory=dict)
+    adb_wake: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -267,7 +276,7 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
             optional = {
                 "allow_service_actions", "quasar_script_sha256", "controls", "host_key_alias",
                 "preauthorize_all_actions",
-                "native_mcp", "allow_reboot", "jobs",
+                "native_mcp", "allow_reboot", "jobs", "adb_wake",
             }
             if entry.keys() - required - optional - ssh_fields:
                 raise ValueError("unexpected fields")
@@ -300,6 +309,18 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
                     raise ValueError("invalid user")
                 if type(port) is not int or not 1 <= port <= 65535:
                     raise ValueError("invalid port")
+            # A station whose rootfs cannot autostart SSH: its own /data script, run over ADB.
+            wake = entry.get("adb_wake", {})
+            if "adb_wake" in entry and (
+                native or not ssh_fields <= entry.keys() or type(wake) is not dict
+                or set(wake) != {"adb", "port", "script"}
+                or not isinstance(wake["adb"], str) or not Path(wake["adb"]).is_absolute()
+                or not Path(wake["adb"]).is_file()
+                or type(wake["port"]) is not int or not 1 <= wake["port"] <= 65535
+                or not isinstance(wake["script"], str) or ".." in wake["script"]
+                or not re.fullmatch(r"/data/[A-Za-z0-9._/-]{1,200}", wake["script"])
+            ):
+                raise ValueError("invalid adb wake")
             host_key_alias = entry.get("host_key_alias", "")
             if "host_key_alias" in entry and (
                 not isinstance(host_key_alias, str)
@@ -362,7 +383,7 @@ def load_inventory(path: Path | None) -> dict[str, Station]:
                 hashlib.sha256(effective).hexdigest(), hashlib.sha256(trust).hexdigest(),
                 control_policy, host_key_alias=host_key_alias,
                 preauthorize_all_actions=preauthorized,
-                native_mcp=native, allow_reboot=reboot, jobs=jobs,
+                native_mcp=native, allow_reboot=reboot, jobs=jobs, adb_wake=dict(wake),
             )
         if (bindings.keys() | colours.keys()) - result.keys():
             raise ValueError("process binding has unknown station alias")
@@ -394,8 +415,58 @@ def ssh_argv(station: Station, command: str | SSHInput) -> list[str]:
     ]
 
 
+_WAKE_LOCK = threading.Lock()
+
+
+def _ssh_refused(station: Station) -> bool:
+    """Up but not listening is the only state ADB can fix; unreachable means off the network."""
+    try:
+        socket.create_connection((station.host, station.port), timeout=3).close()
+    except ConnectionRefusedError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def ensure_ssh(station: Station) -> None:
+    """Before any SSH byte is sent: a station that refuses SSH (as after a reboot) gets its own
+    /data start script run over ADB, then SSH is awaited. Nothing is retried here."""
+    if not station.adb_wake or not _ssh_refused(station):
+        return
+    with _WAKE_LOCK:
+        if not _ssh_refused(station):
+            return
+        adb, script = station.adb_wake["adb"], station.adb_wake["script"]
+        target = f"{station.host}:{station.adb_wake['port']}"
+        try:
+            for argv in ([adb, "connect", target],
+                         # Daemonized: a plain `&` or setsid child dies with the adb session.
+                         [adb, "-s", target, "shell", f"start-stop-daemon -S -b -x {script}"]):
+                subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=20, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return
+        for _ in range(15):
+            if not _ssh_refused(station):
+                return
+            time.sleep(1)
+
+
+def watch_adb_wake(inventory: Path | None, interval: float = 30.0) -> None:
+    """Bring SSH up as soon as an ADB-woken station is back on the network, MCP call or not."""
+    while True:
+        try:
+            for station in load_inventory(inventory).values():
+                ensure_ssh(station)
+        except SafetyError:
+            pass
+        time.sleep(interval)
+
+
 def run_ssh(station: Station, command: str | SSHInput) -> str:
     """Bound runtime and output; never expose subprocess exceptions or stderr."""
+    ensure_ssh(station)
     try:
         with subprocess.Popen(
             ssh_argv(station, command),

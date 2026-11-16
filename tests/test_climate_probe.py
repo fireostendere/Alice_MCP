@@ -37,6 +37,32 @@ def test_latest_reading_is_typed_and_aged(tmp_path: Path) -> None:
         "age_seconds": 70}  # Across midnight.
 
 
+def test_firmware_0374_reports_its_corrected_values(tmp_path: Path) -> None:
+    lines = [
+        LINE.format(time="11:06:01.926", name="temperature",
+                    text="temperature data response, temperature_celsius=19.2641, correction=2, "
+                         "corrected_temperature_celsius=17.2641"),
+        LINE.format(time="11:06:01.930", name="co2", text="CO2 data response, co2_ppm=1847"),
+        LINE.format(time="11:06:01.935", name="humidity",
+                    text="humidity data response, rawHumidityPercent=63.4165, correction=5.6804, "
+                         "humidityPercent=69.0969"),
+    ]
+    assert parse_probe("climate", run(tmp_path, lines, "11:06:11")) == {
+        "temperature_celsius": 17.264, "humidity_percent": 69.097, "co2_ppm": 1847,
+        "age_seconds": 10}
+
+
+def test_reading_survives_a_log_rotation(tmp_path: Path) -> None:
+    (tmp_path / "maind.log.1").write_text("\n".join([
+        LINE.format(time="12:00:00.100", name="temperature", text="temperature_celsius=20.0"),
+        LINE.format(time="12:00:00.200", name="humidity", text="humidity_percent=40.0"),
+        LINE.format(time="12:00:00.300", name="co2", text="co2_ppm=500")]) + "\n")
+    lines = ["[1:2] [2026-01-02 12:00:30.000] [other] [info] rotated"]
+    assert parse_probe("climate", run(tmp_path, lines, "12:00:40")) == {
+        "temperature_celsius": 20.0, "humidity_percent": 40.0, "co2_ppm": 500,
+        "age_seconds": 40}
+
+
 def test_no_module_or_wild_values_are_incompatible(tmp_path: Path) -> None:
     with pytest.raises(SafetyError):
         parse_probe("climate", run(tmp_path, ["[1:2] [2026-01-02 00:00:00.0] [x] y"], "00:00:10"))
